@@ -10,8 +10,12 @@ description: 用本地 voice-core runtime 让 agent 真的发声：指定角色�
 
 ## 0. 核心约定（必读）
 
-- **两段文本各有其职**：`text` 是**念出来的日文**，`displayText` 是**给用户看的中文**。
-  两者都由你生成——翻译是你的责任，runtime 从不翻译。只有 `text` 是必填。
+- **两段文本各有其职**：`text` 是**念出来的、后端语言的文本**,`displayText` 是**给用户看的
+  文本**。两者都由你生成——翻译是你的责任,runtime 从不翻译。只有 `text` 是必填。
+  当前唯一的后端(Irodori)最擅长日语,所以今天的实际写法是 `text` 日文、`displayText` 中文;
+  但语言是**后端和声线包的属性,不是本产品的属性**——每个包自带 `languages` 字段。
+  **想说某种语言前,先查 `/api/voices` 里有没有覆盖该语言的包**;没有就如实告知用户,
+  不要把说不出来的文本发给后端(见 §7 边界)。
 - **对齐由你提供**：`rubyPairs` 是 `displayText` 与 `text` 的分段对应关系
   （`base` 是中文片段，`ruby` 是它对应的日文片段，按阅读顺序，两侧各自拼接必须还原完整原串）。
   中日文不按位置对齐（SOV vs SVO，翻译会合并/拆分/重排子句），下游无法推导，
@@ -160,48 +164,21 @@ curl -s -X POST http://127.0.0.1:8760/api/speak \
 
 存盘后 runtime 自动重载，`voice-core.exe voices` 应立刻列出它。
 
-### 6.3 训练一个 LoRA 声线包
+### 6.3 训练一个声线包
 
-训练树在开发仓 `tts\irodori-tts\`（自带 uv venv、HF 缓存、上游 WebUI）：
-`env\Scripts\python.exe` 是解释器，`webui\Irodori-TTS\train.py` 与 `infer.py` 是上游入口
-（`train.py --config --manifest --init-checkpoint`；`infer.py --checkpoint --ref-wavs --ref-embed --lora-adapter`），
-**不要自己写训练循环**。
+完整流程(数据要求、manifest、训练、选 checkpoint、评测、安装注册)在
+**`docs/training-a-voice.md`**,脚本在 `scripts/training/`。这里只留一个 agent 需要记住的
+摘要,细节以那份文档为准——两处都写会漂移。
 
-1. **准备语料。** 日文音频配**日文**转写。中文转写配日语音频会造成文本域错位，
-   将来用日文文本生成时 LoRA 学到的是错域映射——这条踩过。
-   实测可用量级：约 60–70 条/角色、总时长 ~15 分钟即可出可用声线。
-2. **建 manifest**（`data\*_manifest.jsonl`，一行一条）：
-   ```json
-   {"text": "…", "audio_path": "…\\xxx.wav", "speaker_id": "ba_shun_kid", "latent_path": "…\\0000.pt", "num_frames": 39}
-   ```
-   latent 由 `data\encode_*_latents.py` 预编码。
-3. **离线环境变量必设**：`HF_HOME` / `HF_HUB_CACHE` 指向本地缓存 + `HF_HUB_OFFLINE=1`，
-   否则 DACVAE/codec 会去找远端 repo id 报 `FileNotFoundError`。
-   uv venv 默认没有 pip，装包用 `uv pip install --python env\Scripts\python.exe <pkg>`。
-4. **训练**：抄 `train\shun_lora.yaml`（LoRA `r=16`/`alpha=32`/`target=diffusion_attn`，
-   `batch_size=16`、`max_steps=2000`、`precision=bf16`、`lr=1e-4`、`wsd` 调度）。
-   **必须显式 `--init-checkpoint` 指向基座 `model.safetensors`**，否则启动即报错。
-   实测：RTX 5060 Ti 16GB 上稳态 1.9–2.3 s/step（≈6.4 samples/s），2000 步约 50–90 分钟。
-5. **选 checkpoint**：看 val loss，别默认拿最后一步。本例最优是 **1000 步**
-   （相似度 0.815–0.818），2000 步已过拟合退化，与 val loss 曲线吻合。
-6. **验收**：用与生成模型无关的说话人验证模型（Resemblyzer GE2E）算 d-vector 余弦相似度。
-   参考语料留一法均值是“同说话人自然方差”上限基准（本例 0.771，p10 0.703）。
-   **看分布下限不看均值**：批量样本最低 0.651 已跌破自然 p10，那就是“多次对话走音”的量化形态。
-   脚本在 `eval\similarity_eval.py`。
-7. **装包**：把选中的 checkpoint 目录拷进 `data\voicepacks\<id>\`，按 6.2 注册。
+- **LoRA 需要音频 + 与音频同语言的逐条转写。** 实测约 60–70 条 / 总时长 ~15 分钟够用。
+  语言必须一致:文本编码器是 `modernbert-ja-310m`,中文转写配日语音频会让 adapter 学到
+  生成时不成立的文本域映射(踩过,已记录)。
+- **选 checkpoint 看 val loss,不要拿最后一步。** 本例 1000 步优于 2000 步(后者已过拟合)。
+- **验收看相似度分布的下限,不看均值**,与参考语料留一法基准比(本例均值 0.771 / p10 0.703)。
+- **只要音色不要风格**:参考音频克隆或 SE 即可,零训练/轻训练。实测三者音色相似度打平
+  (0.77–0.82)——**音色不是瓶颈,韵律和风格才需要 LoRA**。
 
-**训练性能改动纪律（用户规定，违反即失败）**：先诊断后动手，改前给出吞吐基线+瓶颈证据；
-一次只改一个变量并同法复测，无收益就回退；Windows 每个 DataLoader worker ≈700MB 且
-persistent 常驻全程，几百条的数据集 `num_workers: 0–2` 足够，
-`dataloader_persistent_workers: true` 才是解决 GPU 断粮的关键（占空比 20% → 99–100%）；
-改动前声明 RAM/VRAM 增量，不把机器推到 OOM 边缘；不碰正在跑的训练；
-汇报必须是“基线数字 → 改动 → 改后数字 → 保留/回退”，禁止“应该会更快”。
-
-### 6.4 只要音色、不训练
-
-WebUI（`tts\irodori-tts\start_webui.ps1`，http://127.0.0.1:7860 ）可直接上传参考音频克隆，
-或用已有的 SE 文件。实测 SE / 单参考 / 8 参考的**音色**相似度打平（0.77–0.82）——
-音色身份不是瓶颈，**韵律和风格必须靠 LoRA**，这是参考克隆补不上的。
+用户要一个不存在的声线时,如实说没有并指向这份文档,不要编造 id。
 
 ## 7. 边界
 
@@ -209,4 +186,8 @@ WebUI（`tts\irodori-tts\start_webui.ps1`，http://127.0.0.1:7860 ）可直接�
 - 不要把 token 写进任何会外发的内容。
 - 用户要一个不存在的声线时,如实说没有并指向 6.3,不要编造 id。
 - 模型权重和声线包不在你的管理范围;需要新声线时引导用户走训练流程。
+- **不要把后端说不出来的语言发给它。** 语言是**后端和包的能力**,不是产品的固有属性:
+  先看 `/api/voices` 里每个包的 `languages`,没有覆盖用户要的语言就如实说明,并说清
+  当前唯一后端(Irodori)最擅长日语。硬发过去只会得到听不懂的音频,而不是错误。
+  未来接入其他语言专长的后端时,选择依据仍然是这个字段(见 `docs/adr/0001-tts-engine-backend-seam.md`)。
 - runtime 不做 LLM 推理、不做对话管理、不做翻译。

@@ -56,14 +56,27 @@ Two binaries, deliberately: `voice-core-runtime` runs, `voice-core` controls
 | OS | Windows 10 20H1 (build 19041) or newer, x64 (`app/VoiceCoreTray/VoiceCoreTray.csproj:5,13`) |
 | GPU | An NVIDIA GPU. The worker runs the model on CUDA in bf16; there is no CPU path today. Reference machine: RTX 5060 Ti 16 GB |
 | Toolchain | Rust (2021 edition) and .NET 8 SDK with the Windows App SDK workload |
-| Engine | **Not shipped.** [Irodori-TTS](https://github.com/Aratako/Irodori-TTS) v4.1-Small, plus a Python virtualenv for it |
-| Weights | **Not shipped.** ~4.7 GB: `Aratako/Irodori-TTS-v4.1-Small` (3.1 GB), `sbintuitions/modernbert-ja-310m` (1.3 GB), `Aratako/Semantic-DACVAE-Japanese-32dim` (0.4 GB) |
-| Voices | **Not shipped.** A voice pack is a LoRA adapter directory or a speaker-embedding file that you train or clone yourself; `skills/voice-core/SKILL.md` §6 documents the process end to end |
+| Engine | **Not shipped**, but provisioned for you. [Irodori-TTS](https://github.com/Aratako/Irodori-TTS) v4.1-Small plus its virtualenv |
+| Weights | **Not shipped**, but provisioned for you. ~4.8 GiB: `Aratako/Irodori-TTS-v4.1-Small` (3.1 GiB), `sbintuitions/modernbert-ja-310m` (1.3 GiB), `Aratako/Semantic-DACVAE-Japanese-32dim` (0.4 GiB) |
+| Voices | **Not shipped and not provisionable.** A voice pack is trained or cloned from audio you supply — see [`docs/training-a-voice.md`](docs/training-a-voice.md) |
 
-Nothing is downloaded for you. First-run model provisioning is not implemented (see
-*Known gaps*), so the weights must already be on disk. A missing engine or model is
-reported, never crashed on: startup continues, the missing paths appear in
-`GET /api/status` under `worker.missing`, and a synthesis attempt fails with
+## Install
+
+Download the single `voice-core-<version>-setup.exe` from the
+[releases page](https://github.com/yabo083/voice-core/releases), run it, and let its last
+page run the provisioner. The installer is **not code-signed**, so SmartScreen will warn that
+the publisher is unrecognised; the release notes publish the installer's SHA256.
+
+```powershell
+.\scripts\bootstrap.ps1 -CheckOnly   # environment report; downloads nothing
+.\scripts\bootstrap.ps1              # engine, virtualenv, weights, layout, smoke test
+```
+
+[`docs/getting-started.md`](docs/getting-started.md) walks the same path in prose, with the
+measured cost of each stage and what to read when one fails.
+
+A missing engine or model is reported, never crashed on: startup continues, the missing paths
+appear in `GET /api/status` under `worker.missing`, and a synthesis attempt fails with
 `worker_start_failed` or `model_load_failed` naming the actual path
 (`docs/deployment.md:103-114`).
 
@@ -202,13 +215,22 @@ tray would not come with it.
 
 Not implemented, and not pretended to be:
 
-- **First-run model provisioning.** No download, no disk-space preflight. The weights must
-  already be on disk.
+- **Browsing does not interrupt a line that is still speaking.** Wheel-up over the dialog
+  walks the backlog once the current line has finished — the history badge steps and the band
+  swaps to the replay control — but the gesture does not fire while audio is playing. The
+  suspected cause is UI-thread starvation from the typewriter and growth timers: one
+  32-character line records 86 resizes and 448 ms of resize time in `data/logs/dialog.jsonl`,
+  on the same thread that owns the low-level mouse hook. Judged non-essential; the interrupt
+  path itself is implemented and does run from the 历史 control and the tray menu.
 - **Mid-step cancellation.** `DELETE /api/requests/{id}` frees the caller immediately and
   guarantees the utterance is never delivered, but the engine finishes its current step
   before the GPU permit is released (`docs/api.md:183-190`).
 - **Real streaming audio.** One `audioId` per utterance. The byte endpoint can become
   chunked without changing any client.
+- **One backend.** Irodori is best at Japanese and is the only implementation. The seam for
+  another is real but the routing is not wired: every pack already declares its `engine` and
+  `languages`, and nothing reads them yet
+  ([`docs/adr/0001-tts-engine-backend-seam.md`](docs/adr/0001-tts-engine-backend-seam.md)).
 
 ## Licensing
 

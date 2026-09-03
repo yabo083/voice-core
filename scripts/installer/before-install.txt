@@ -1,0 +1,46 @@
+================================================================================
+voice-core — 本地语音合成服务 / Local TTS Runtime
+================================================================================
+
+感谢安装 voice-core！在开始安装前，请阅读以下重要安全与架构说明：
+
+【1. 未签名安装包与 SmartScreen 提示 / Unsigned Binary Notice】
+本安装包目前未附带商业 Authenticode 代码签名证书（EV 证书需要企业实体认证）。
+在 Windows 10/11 上首次运行时，Windows Defender SmartScreen 可能会弹出：
+  「Windows 已保护你的电脑 / Windows protected your PC」
+这是未签名新发布的正常现象。请在官方 GitHub Release 页面核对安装包的 SHA-256
+校验和，确认无误后点击「更多信息 (More info)」→「仍要运行 (Run anyway)」。
+
+验证命令（PowerShell）：
+  Get-FileHash -Algorithm SHA256 voice-core-*-setup.exe
+
+【2. 安装包内容与模型引擎配置 / Model & Engine Provisioning】
+为了保证安装包体积小巧（约 50MB）且符合分发规范，本安装包仅包含：
+  - voice-core-runtime.exe（核心服务端，127.0.0.1:8760）
+  - voice-core.exe（命令行交互与控制客户端）
+  - VoiceCoreTray.exe（WinUI 3 托盘与字幕交互呈现器）
+  - Windows App SDK 运行时依赖与许可证声明
+  - 完整开发文档、架构说明与 AI Agent 接入技能包（skills/）
+
+本安装包【不包含】AI 模型权重（约 4.7 GB）与 Python 推理虚拟环境。
+安装完成后，可在安装向导最后一页勾选执行初始化向导（scripts\bootstrap.ps1），
+或稍后通过开始菜单中的「voice-core 初始化向导」随时下载和配置引擎与声线。
+
+【3. 架构与多引擎支持 / Architecture & Engines】
+voice-core 采用解耦设计，runtime 与具体 TTS 引擎通过进程环回协议通信。
+当前默认支持的推理后端为 Irodori-TTS（日语），后续将按相同协议扩展更多
+语言和引擎。安装后的目录完全保持相对路径便携性，不写入任何绝对路径。
+
+【4. 推荐安装模式 / Installation Scope】
+- 推荐选择「仅为我安装 (Install for me only)」：
+  安装到当前用户目录（%LOCALAPPDATA%\Programs\voice-core），应用可直接写入
+  data\ 目录保存声线包、配置与日志，无需管理员 UAC 提权。
+- 若选择「为所有用户安装 (Install for all users)」：
+  安装到 Program Files，后续初始化引擎需要管理员权限运行。
+
+【5. 开源许可证声明 / License & Third-Party Notices】
+voice-core 基于 GPL-3.0-or-later 许可分发，并附带针对 Windows App SDK 的
+特别例外条款（见 LICENSE-EXCEPTION.md）。
+所有第三方开源库许可证见 THIRD-PARTY-NOTICES.md，Windows App SDK 供应方
+声明见 bin\app\WindowsAppSDK-license.txt 与 WindowsAppSDK-NOTICE.txt。
+================================================================================

@@ -8,6 +8,70 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.1.0] - 2026-09-04
+
+Feature-sized rather than a patch: a first-run experience that did not exist, a training kit
+that did not exist, and a measured change to when the engine's cost is paid. `apiVersion`
+stays `1` — no contract changed shape.
+
+### Added
+
+- **A single-file installer.** `voice-core-<version>-setup.exe`, built by
+  `scripts/package.ps1 -Installer` from the same portable tree the zip uses
+  (`scripts/installer/voice-core.iss`). Per-user by default so it needs no administrator;
+  the uninstaller leaves `data/` alone because that is where the token, the settings and the
+  voice packs live. Unsigned, so SmartScreen warns; the release publishes its SHA256.
+- **`scripts/bootstrap.ps1`** — six idempotent stages that turn a fresh install into one
+  that can speak: preflight (disk, GPU, driver, git, uv) with a remedy printed for every
+  failure, the Irodori engine and DACVAE cloned at a pinned revision, the engine virtualenv
+  via upstream's own `uv sync --extra cu128`, ~4.8 GiB of weights into a resumable Hugging
+  Face cache, `data/runtime.json` written with **relative** paths so the tree stays portable,
+  and a smoke test that loads the model and prints what each stage cost. `-CheckOnly` reports
+  the environment and changes nothing.
+- **`docs/getting-started.md`** and **`docs/training-a-voice.md`** — the install path and the
+  voice-pack pipeline in prose, including the honest table of what each pack kind actually
+  requires (reference audio needs no text; a LoRA needs audio *plus* a transcript in the same
+  language as the audio).
+- **`scripts/training/`** — the training pipeline as first-party scripts, parameterised for
+  any speaker and any dataset. No dataset, no audio and no character name ships with them.
+- **`docs/adr/0001-tts-engine-backend-seam.md`** — the decision that a TTS backend is any process
+  that speaks the loopback protocol, that `pack.engine` is the routing key and
+  `pack.languages` the capability advertisement, and what a second backend would actually
+  cost. Records the part that would otherwise be discovered late: the GPU is arbitrated by a
+  single semaphore and idle reclaim is per-worker, so two resident backends need a VRAM
+  budget and a scheduling policy that do not exist.
+
+### Changed
+
+- **The engine's Python imports moved off the readiness path.** `torch` and the engine are
+  ~3 s of imports (9 s with a cold page cache) and are not needed to answer `/health`, so
+  they now load on a background thread while uvicorn binds. Measured in
+  `data/logs/tts-worker.out.log`: `boot.listening` moved from t=3017 ms to t=604 ms and the
+  supervisor's `worker.ready` from 3305 ms to 1218 ms. Nothing got faster in total — the
+  import still finishes before the model load starts — the wait moved off the path where a
+  caller is blocked.
+- **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** is now the worker's default
+  (overridable). **Measured result on the reference machine: no change** — 1755.6 MiB
+  allocated against 3178.0 MiB reserved, before and after. The overhang is the engine's own
+  transient peak, not fragmentation. Kept because it costs nothing and is the right default
+  for a process that loads and unloads repeatedly; `boot.device` now reports whether it is in
+  effect, so the next person can re-measure instead of re-guessing.
+
+### Fixed
+
+- **Idle reclaim could kill a model load in flight.** A load takes 14-34 s and touches
+  nothing else, so the reaper read a loading worker as an unused one. With
+  `--idle-stop-secs 20` the process was killed mid-load and `/api/warm` returned
+  `model_load_failed: engine unreachable` after 79 s. A load now counts as activity
+  (`Worker::idle_for` returns zero while one is in flight), which is why warming works at any
+  idle setting rather than only at the 900 s default that hid the bug.
+- **Tier-1 idle reclaim left no trace on disk.** Releasing VRAM reported only to the
+  in-memory event bus, so with no frontend subscribed there was nothing to read afterwards,
+  while tier 2 (stopping the process) did log. Both tiers now write to
+  `tts-worker.out.log`, and the worker's own `model.unload.done` line moved from stderr to
+  stdout — an unload is a lifecycle event, not an error, and the cold path has to be readable
+  end to end in one file.
+
 ## [1.0.0] - 2026-09-04
 
 First public release. The runtime, the client, the Python worker and the WinUI 3 tray are

@@ -1,0 +1,169 @@
+# LoRA fine-tuning template for the Irodori (Japanese) backend, Irodori-TTS-v4.1-Small.
+#
+#   run_training.py --config lora --manifest <train_manifest.jsonl> --output-dir <out>
+#
+# Values are the ones a reference run on an RTX 5060 Ti 16 GB actually used, on a 69-clip
+# / ~7 min single-speaker Japanese dataset: steady 1.9-2.3 s/step at batch 16 (~6.4
+# samples/s), 2000 steps in 50-90 minutes. Every comment below says WHY a number is what
+# it is; the ones without a comment are architecture, not taste.
+
+# DO NOT EDIT THIS BLOCK. It describes the shape of the v4.1-Small checkpoint you are
+# adapting. A value that disagrees with the checkpoint either fails to load or loads into
+# the wrong tensors. The two `*_tokenizer_repo` lines are also the honest reason this
+# backend is Japanese: the text encoder is a Japanese ModernBERT, and a transcript in
+# another language teaches the adapter a text->voice mapping that does not hold when you
+# generate from Japanese text.
+model:
+  latent_dim: 32
+  latent_patch_size: 1
+  text_vocab_size: 102400
+  text_tokenizer_repo: sbintuitions/modernbert-ja-310m
+  text_encoder_revision: 77675fc96a7e445e982e2ba90246b816efc74ec6
+  text_encoder_type: pretrained
+  text_add_bos: true
+  pretrained_projector_type: residual_mlp
+  pretrained_projector_hidden_ratio: 2.0
+  pretrained_projector_dropout: 0.0
+  model_dim: 1280
+  num_layers: 12
+  num_heads: 20
+  mlp_ratio: 2.875
+  speaker_mlp_ratio: 2.6
+  text_dim: 512
+  speaker_dim: 768
+  speaker_layers: 8
+  speaker_heads: 12
+  speaker_patch_size: 4
+  timestep_embed_dim: 512
+  adaln_rank: 192
+  use_caption_condition: true
+  use_speaker_condition: true
+  caption_vocab_size: 102400
+  caption_tokenizer_repo: sbintuitions/modernbert-ja-310m
+  caption_add_bos: true
+  caption_dim: 512
+  use_duration_predictor: true
+  duration_aux_dim: 14
+  duration_hidden_dim: 1024
+  duration_layers: 3
+  duration_dropout: 0.1
+  duration_attention_heads: 8
+  duration_architecture: token_sum_dual_adarn_zero_no_aux
+  duration_token_init_frames: 9.0
+  duration_speaker_fusion: adarn_zero
+  duration_caption_fusion: adarn_zero
+  duration_caption_pooling: masked_mean
+
+train:
+  train_mode: rf
+
+  # ---- the LoRA itself -----------------------------------------------------------
+  lora_enabled: true
+  # r=16 / alpha=32 (scale 2.0) is the upstream default and what the reference run used.
+  # Raising r buys capacity you do not have data for at ~60 clips; the adapter is already
+  # ~100 MiB on disk at r=16 because `lora_modules_to_save: auto` also saves the whole
+  # duration predictor with it.
+  lora_r: 16
+  lora_alpha: 32
+  lora_dropout: 0.0
+  lora_bias: none
+  # `diffusion_attn` adapts the attention projections of the 12 diffusion blocks and
+  # leaves the shared ModernBERT text backbone alone. That is the right target for
+  # "sound like this person": prosody and timbre live in the diffusion body, not in the
+  # text encoder. `pretrained_backbone_attn` / `pretrained_backbone_attn_mlp` exist for
+  # adapting the text side, which is a different job and needs far more data.
+  lora_target_modules: diffusion_attn
+  # `auto` keeps the duration predictor trainable and stores it in the adapter, so the
+  # pack carries this speaker's speaking rate as well as their voice.
+  lora_modules_to_save: auto
+
+  # ---- schedule ------------------------------------------------------------------
+  # 16 fits comfortably in 16 GB VRAM at bf16 for this model. Lower it first if you OOM.
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  # 2000 steps is the budget, NOT the answer. In the reference run the best validation
+  # loss was at step 1000 and step 2000 had visibly overfit (similarity dropped, and the
+  # val-loss curve agreed). Pick the checkpoint by val loss, never by "the last one".
+  max_steps: 2000
+  optimizer: adamw
+  learning_rate: 0.0001
+  # The shared pretrained text encoder moves 10x slower than the adapter when it moves at
+  # all. Leave it.
+  pretrained_text_encoder_learning_rate: 0.00001
+  weight_decay: 0.01
+  # warmup -> stable -> decay. 100 + 1500 leaves 400 steps of decay at the end of a
+  # 2000-step budget. If you change max_steps, change stable_steps with it.
+  lr_scheduler: wsd
+  warmup_steps: 100
+  stable_steps: 1500
+  min_lr_scale: 0.01
+  precision: bf16
+  seed: 0
+
+  # ---- checkpoint selection ------------------------------------------------------
+  # 5% held out. On 69 rows that is 3 clips - small, and the val loss is correspondingly
+  # noisy, but it is what found step 1000 in the reference run. Do not set this to 0: no
+  # val loss means no best-checkpoint selection, which is the whole selection mechanism.
+  valid_ratio: 0.05
+  valid_every: 500
+  # Keeps the 5 best-by-val-loss adapters as
+  # `checkpoint_best_val_loss_<step>_<loss>/` directories beside the periodic ones.
+  checkpoint_best_n: 5
+  save_every: 500
+  log_every: 100
+
+  # ---- dataloader: this is the GPU-starvation fix, read the comment ---------------
+  # A few hundred clips at batch 16 is ~4 batches per epoch, so the epoch boundary comes
+  # around constantly. With persistent_workers false, Windows re-spawns every worker at
+  # each boundary (1-3 s each, because each one re-imports torch) and the GPU sits idle
+  # between them: measured 20% duty cycle over 30 samples, with CPU at only 30%.
+  # `dataloader_persistent_workers: true` took that to 99-100%. THAT is the fix.
+  #
+  # num_workers is NOT the fix, and it is not free: each Windows worker is ~700 MB
+  # resident and persistent workers hold it for the whole run. `num_workers: 8` with a
+  # train and a valid loader meant 16 workers and ~11.4 GB, which nearly filled a 32 GB
+  # machine. 0-2 is right for a dataset this size. 0 is legal and disables both flags
+  # below with a warning.
+  num_workers: 2
+  dataloader_persistent_workers: true
+  dataloader_prefetch_factor: 4
+  dataloader_cuda_prefetch: true
+  length_bucket_enabled: true
+  length_bucket_window_batches: 64
+  latent_length_bucket_size: 0
+  allow_tf32: true
+  compile_model: false
+
+  # ---- objective and conditioning ------------------------------------------------
+  # 750 frames at 25 latent frames/s = 30 s. A longer clip is truncated here while its
+  # full transcript is still fed in, which is why prepare_dataset.py drops clips over 30 s.
+  max_latent_steps: 750
+  # References are drawn from other clips of the same speaker_id and concatenated to a
+  # length sampled in this range.
+  ref_min_seconds: 1.0
+  ref_max_seconds: 120.0
+  max_text_len: 256
+  max_caption_len: 512
+  # 10% of samples drop each condition, which is what keeps unconditional generation
+  # working - and generating from a LoRA pack uses exactly that path (no reference audio,
+  # the adapter carries the voice).
+  text_condition_dropout: 0.1
+  speaker_condition_dropout: 0.1
+  caption_condition_dropout: 0.1
+  timestep_stratified: true
+  fixed_target_latent_steps:
+  fixed_target_full_mask: false
+  rf_loss_mode: utterance_mean
+  duration_loss_weight: 1.0
+  duration_backprop_to_condition: false
+  duration_speaker_dropout: 0.1
+  duration_caption_dropout: 0.1
+  duration_huber_delta: 0.1
+
+  # ---- off ------------------------------------------------------------------------
+  wandb_enabled: false
+  wandb_project:
+  wandb_entity:
+  wandb_run_name:
+  wandb_mode: online
+  ddp_find_unused_parameters: false

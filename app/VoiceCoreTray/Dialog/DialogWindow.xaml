@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="VoiceCoreTray.Dialog.DialogWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!--
+      Structure only. Every colour, size, padding and duration comes from
+      DialogTheme through ApplyTheme() in the code behind, so the look lives in
+      exactly one place.
+
+      The window IS the box: its client area is resized to the laid out box on every
+      relayout, so DWM can decorate it - system acrylic behind it, system rounding on
+      its corners, system shadow around it. Nothing here paints a plate, a shadow or a
+      transparency key. See DialogWindow.xaml.cs.
+
+      Careful with comments in here: a double hyphen is illegal inside XML comments
+      and makes the WindowsAppSDK 1.6 XAML compiler die with no diagnostic at all.
+    -->
+    <Grid x:Name="RootGrid">
+
+        <!--
+          The plate IS the client area: the window is resized to this Border's measured
+          size, so it stretches in BOTH directions rather than hugging its content. During
+          a resize the client area is briefly larger than the last arranged layout, and a
+          Top aligned box would leave that strip unpainted and unbordered.
+        -->
+        <Border x:Name="DialogBox"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Stretch">
+            <Grid>
+                <Grid x:Name="BoxContent">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <!--
+                      Top band: no title bar and no plate of its own, just breathing
+                      room that doubles as the drag handle. It is the ONLY caption
+                      region, and a caption region hands its pointer input to the OS
+                      move loop, so the controls sitting in it need a Passthrough hole
+                      punched over their laid out bounds; the code behind does that.
+                    -->
+                    <Border x:Name="TopBand" Grid.Row="0">
+                        <Grid>
+                            <!-- History readout ("2 / 12"), only while backtracking. -->
+                            <TextBlock x:Name="HistoryBadge" VerticalAlignment="Center"
+                                       Visibility="Collapsed"/>
+
+                            <!-- Contextual micro-controls: 历史 and 关闭, nothing else. A pin
+                                 control was here and is gone on purpose - the dwell mode is
+                                 one hotkey (Ctrl+Alt+H) with a readout in this band, not an
+                                 icon whose state you have to decode. Inside the caption band,
+                                 so the code behind punches a Passthrough hole over this panel
+                                 AND answers WM_NCHITTEST with HTCLIENT over it; a caption
+                                 answer there hands the press to the OS move loop and the
+                                 icons look decorative. Icons are Fluent geometry from
+                                 Iconify, filled in the code behind.
+                                 No hover state: pointer enter/exit fire whenever the
+                                 pointer crosses a gap between icons or the hole's edge,
+                                 so anything reacting to them flickers. -->
+                            <StackPanel x:Name="BandControls" Orientation="Horizontal" Spacing="6"
+                                        HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <!-- Each icon needs a Border around it as the hit target: a
+                                     Path is hit-testable only where its geometry is FILLED,
+                                     and these glyphs are thin strokes, so pressing one is
+                                     otherwise a game of hitting a 1 px diagonal. The Border
+                                     carries a transparent background (null is not
+                                     hit-testable) and the padding is the target size.
+
+                                     The Canvas inside it is what makes the icons one size:
+                                     Canvas children do not contribute to layout, so each cell
+                                     is exactly IconSize regardless of how much of its 16x16
+                                     viewBox a given glyph fills. -->
+
+                                <!-- Replay: only while browsing the backlog, because it acts
+                                     on a past line. It replaces "click the box to replay",
+                                     which had to go once the whole box became a drag
+                                     handle. -->
+                                <Border x:Name="ReplayHit" Visibility="Collapsed">
+                                    <Canvas x:Name="ReplayBox">
+                                        <Path x:Name="ReplayButton" Stretch="None" IsHitTestVisible="False"/>
+                                    </Canvas>
+                                </Border>
+                                <Border x:Name="LogsHit">
+                                    <Canvas x:Name="LogsBox">
+                                        <Path x:Name="LogsButton" Stretch="None" IsHitTestVisible="False"/>
+                                    </Canvas>
+                                </Border>
+                                <Border x:Name="CloseHit">
+                                    <Canvas x:Name="CloseBox">
+                                        <Path x:Name="CloseButton" Stretch="None" IsHitTestVisible="False"/>
+                                    </Canvas>
+                                </Border>
+                            </StackPanel>
+                        </Grid>
+                    </Border>
+
+                    <Grid x:Name="Body" Grid.Row="1">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+
+                        <!-- Character: portrait with the name under it, one unit. Hidden
+                             until SetCharacter fills it. -->
+                        <StackPanel x:Name="CharacterColumn" Grid.Column="0"
+                                    VerticalAlignment="Top" Visibility="Collapsed">
+                            <Border x:Name="AvatarFrame">
+                                <Image x:Name="AvatarImage" Stretch="UniformToFill"/>
+                            </Border>
+                            <TextBlock x:Name="NameText" HorizontalAlignment="Center"
+                                       TextAlignment="Center"/>
+                        </StackPanel>
+
+                        <StackPanel x:Name="TextColumn" Grid.Column="1">
+                            <!--
+                              One row per WRAPPED line of the utterance, each carrying its
+                              own slice of the source line directly above or below it (which
+                              side comes from config.json). The code behind builds these:
+                              the source is an annotation in the Galgame descent of ruby
+                              text, so it has to sit with the run it annotates - a single
+                              block under a single block puts it after the whole wrapped
+                              utterance instead, which is what made it read as a second
+                              subtitle.
+                            -->
+                            <StackPanel x:Name="LineStack"/>
+
+                            <!-- Waiting indicator: a Path, so the shape is ours and stays
+                                 crisp, rather than a glyph borrowed from a font. It breathes
+                                 and bobs instead of hard blinking. -->
+                            <Path x:Name="WaitingIndicator" Opacity="0"
+                                  HorizontalAlignment="Right" VerticalAlignment="Center"
+                                  RenderTransformOrigin="0.5,0.5">
+                                <Path.RenderTransform>
+                                    <TranslateTransform x:Name="IndicatorShift"/>
+                                </Path.RenderTransform>
+                            </Path>
+                        </StackPanel>
+                    </Grid>
+                </Grid>
+
+                <!-- Inner top highlight: one hairline of light just inside the stroke, so
+                     the edge reads as thickness instead of a printed white outline. -->
+                <Border x:Name="InnerEdge" IsHitTestVisible="False"/>
+
+                <!--
+                  Dwell countdown: a hairline along the plate's BOTTOM EDGE, full width,
+                  not a bar inside the text column. It belongs to the box rather than to
+                  the content, it costs the text no room, and its appearing or vanishing
+                  no longer changes the box's height. DialogBox's CornerRadius clips it,
+                  so the line follows the rounded corners.
+
+                  A bare fill with a left-anchored ScaleTransform, not a ProgressBar: the
+                  ProgressBar template scales its indicator about its own centre, which
+                  made the bar creep in from both ends.
+                -->
+                <Border x:Name="CountdownTrack" VerticalAlignment="Bottom"
+                        HorizontalAlignment="Stretch" IsHitTestVisible="False"
+                        Visibility="Collapsed">
+                    <Border x:Name="CountdownFill" RenderTransformOrigin="0,0.5"
+                            HorizontalAlignment="Stretch">
+                        <Border.RenderTransform>
+                            <ScaleTransform x:Name="CountdownScale" ScaleX="1"/>
+                        </Border.RenderTransform>
+                    </Border>
+                </Border>
+            </Grid>
+        </Border>
+
+        <!-- Hidden probes: Canvas children never contribute to layout, so these cost
+             nothing. WrapProbe measures candidate line widths for RubyLayout (styled like
+             the primary line, never wrapping). The two font probes let the selftest prove
+             the bundled face really loaded - its metrics differ from the system fallback -
+             rather than trusting the FontFamily string. -->
+        <Canvas IsHitTestVisible="False" Opacity="0">
+            <TextBlock x:Name="WrapProbe" TextWrapping="NoWrap"/>
+            <TextBlock x:Name="RubyProbe" TextWrapping="NoWrap"/>
+            <TextBlock x:Name="FontProbeBundled"/>
+            <TextBlock x:Name="FontProbeSystem" FontFamily="Segoe UI"/>
+        </Canvas>
+    </Grid>
+</Window>

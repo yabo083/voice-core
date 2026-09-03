@@ -1,0 +1,37 @@
+# Build output.
+/target/
+/dist/
+*.pdb
+app/**/bin/
+app/**/obj/
+__pycache__/
+*.pyc
+
+# Runtime state: the token, the settings file with absolute pack paths, generated audio,
+# logs, avatars. Nothing here belongs to the project; everything here belongs to one
+# machine.
+/data/
+
+# Belt to the /data/ and /dist/ braces above. Those two patterns are anchored to the repo
+# root, so an artefact dropped anywhere else — a scratch export beside the worker, a
+# checkpoint copied into src/ by mistake — would be tracked. Voice packs trained on
+# copyrighted game voice data are personal-use only and must never reach a published
+# artefact (v1 ADR-0007), and the same goes for the audio they were trained on, so the
+# net is by file type rather than by location.
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.wav
+*.ogg
+*.mp3
+*.flac
+*_manifest.jsonl
+token.txt
+
+# Working notes from a design-advice tool: first-party content with no third-party rights,
+# but it is scratch, not documentation, and does not belong in a published tree.
+/.gemini-designer/

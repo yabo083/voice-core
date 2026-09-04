@@ -1,0 +1,146 @@
+# Speaker Inversion template for the Irodori (Japanese) backend, Irodori-TTS-v4.1-Small.
+#
+#   run_training.py --config speaker-embedding --manifest <train_manifest.jsonl> \
+#                   --output-dir <out>
+#
+# This trains 16 speaker tokens and NOTHING else: the base model stays frozen, so the
+# result is one small file that replaces "here is reference audio" at synthesis time. It
+# learns WHO, not HOW - identity transfers, prosody and speaking style do not. The
+# reference run measured Speaker Inversion, one-clip cloning and eight-clip cloning as
+# indistinguishable on timbre similarity (0.77-0.82); a LoRA beat all three (0.815-0.818
+# with much lower spread) because it also learns delivery.
+#
+# Output is `checkpoint_<step>.speaker.safetensors` files - 49,264 bytes each (16 tokens x
+# 768 dims x fp32, plus header). The `.speaker.safetensors` suffix is load-bearing: the
+# engine refuses a file without it, by name.
+
+# DO NOT EDIT THIS BLOCK. Same architecture as the LoRA template: it describes the
+# checkpoint, not a preference.
+model:
+  latent_dim: 32
+  latent_patch_size: 1
+  text_vocab_size: 102400
+  text_tokenizer_repo: sbintuitions/modernbert-ja-310m
+  text_encoder_revision: 77675fc96a7e445e982e2ba90246b816efc74ec6
+  text_encoder_type: pretrained
+  text_add_bos: true
+  pretrained_projector_type: residual_mlp
+  pretrained_projector_hidden_ratio: 2.0
+  pretrained_projector_dropout: 0.0
+  model_dim: 1280
+  num_layers: 12
+  num_heads: 20
+  mlp_ratio: 2.875
+  speaker_mlp_ratio: 2.6
+  text_dim: 512
+  speaker_dim: 768
+  speaker_layers: 8
+  speaker_heads: 12
+  speaker_patch_size: 4
+  timestep_embed_dim: 512
+  adaln_rank: 192
+  use_caption_condition: true
+  use_speaker_condition: true
+  caption_vocab_size: 102400
+  caption_tokenizer_repo: sbintuitions/modernbert-ja-310m
+  caption_add_bos: true
+  caption_dim: 512
+  use_duration_predictor: true
+  duration_aux_dim: 14
+  duration_hidden_dim: 1024
+  duration_layers: 3
+  duration_dropout: 0.1
+  duration_attention_heads: 8
+  duration_architecture: token_sum_dual_adarn_zero_no_aux
+  duration_token_init_frames: 9.0
+  duration_speaker_fusion: adarn_zero
+  duration_caption_fusion: adarn_zero
+  duration_caption_pooling: masked_mean
+
+train:
+  train_mode: rf
+
+  # ---- the embedding itself ------------------------------------------------------
+  speaker_inversion_enabled: true
+  # 16 tokens of 768 dims. Upstream's default and what the reference run used. More tokens
+  # is more capacity to memorise the training clips, which is not what you want from an
+  # identity vector.
+  speaker_inversion_tokens: 16
+  speaker_inversion_init_std: 0.02
+  # Point this at an existing .speaker.safetensors to continue from it. Full `--resume` is
+  # deliberately not supported for these runs.
+  speaker_inversion_init_embedding:
+
+  # ---- schedule ------------------------------------------------------------------
+  # lr 0.01 with no weight decay and no schedule: this is textual-inversion style tuning
+  # of a handful of vectors, not fine-tuning of a network. These are not LoRA numbers and
+  # must not be copied across.
+  optimizer: adamw
+  learning_rate: 0.01
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 0.00000001
+  lr_scheduler: none
+  # Upstream's template says 3000. The reference run used 1000 over 80 clips and the
+  # result was usable; with save_every 100 you get ten waypoints to compare and each one
+  # costs 49 KB, so there is no reason to guess.
+  max_steps: 1000
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  precision: bf16
+  # Trades compute for VRAM. The base model is frozen but still runs forward, and this is
+  # upstream's default for these runs; turn it off if you have headroom and want speed.
+  gradient_checkpointing: true
+  allow_tf32: true
+  compile_model: false
+  seed: 0
+
+  # ---- checkpoints ---------------------------------------------------------------
+  # No validation split, so there is no best-by-val-loss selection here: you choose by
+  # listening and by evaluate_similarity.py across the waypoints. `checkpoint_final` is
+  # simply the last step, which is not the same thing as the best one.
+  valid_ratio: 0.0
+  valid_every: 0
+  checkpoint_best_n: 0
+  save_every: 100
+  log_every: 20
+
+  # ---- dataloader ----------------------------------------------------------------
+  # Upstream's template says 8. On Windows each worker is ~700 MB resident and persistent
+  # workers hold that for the whole run; for the ~80-clip dataset this recipe is for, the
+  # starvation fix is `dataloader_persistent_workers: true`, not more workers.
+  num_workers: 2
+  dataloader_persistent_workers: true
+  dataloader_prefetch_factor: 4
+
+  # ---- objective and conditioning ------------------------------------------------
+  # All condition dropout is 0 here: only the speaker tokens are being learned, and
+  # dropping the very condition under training would just add noise to the gradient.
+  text_condition_dropout: 0.0
+  speaker_condition_dropout: 0.0
+  caption_condition_dropout: 0.0
+  duration_speaker_dropout: 0.0
+  duration_caption_dropout: 0.0
+  # The duration predictor is frozen with the rest of the base model; this weight only
+  # affects the loss the embedding sees.
+  duration_loss_weight: 0.1
+  duration_backprop_to_condition: false
+  duration_huber_delta: 0.1
+  timestep_stratified: true
+  max_latent_steps: 750
+  ref_min_seconds: 1.0
+  ref_max_seconds: 120.0
+  max_text_len: 256
+  max_caption_len: 512
+  fixed_target_latent_steps:
+  fixed_target_full_mask: false
+  rf_loss_mode: utterance_mean
+
+  # ---- off -----------------------------------------------------------------------
+  wandb_enabled: false
+  wandb_project:
+  wandb_entity:
+  wandb_run_name:
+  wandb_mode: online
+  ddp_find_unused_parameters: false

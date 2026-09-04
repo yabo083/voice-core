@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The frontend may listen for the two events this app emits and show or hide its own window. Everything else it needs goes through an application command, which is why there is no fs, shell, dialog, opener, path or clipboard permission here: those plugins exist only on the Rust side, where the paths are validated before anything is touched.",
+  "local": true,
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "core:window:allow-show",
+    "core:window:allow-hide",
+    "core:window:allow-set-focus",
+    "core:window:allow-is-visible"
+  ]
+}

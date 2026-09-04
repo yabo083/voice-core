@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <title>voice-core</title>
+    <!--
+      No viewport meta and no favicon link: this document is only ever rendered
+      inside one fixed desktop window, and the window icon comes from the exe.
+
+      The stylesheets are linked here rather than imported from main.ts so the
+      window's first paint already has the app's background. Importing them from
+      the module would show one white frame on every launch, which on a dark app
+      reads as a flash of broken.
+    -->
+    <link rel="stylesheet" href="/src/styles/tokens.css" />
+    <link rel="stylesheet" href="/src/styles/app.css" />
+  </head>
+  <body>
+    <div id="app">
+      <p class="boot" role="status">正在启动 voice-core 控制台…</p>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

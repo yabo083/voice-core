@@ -1,0 +1,57 @@
+# Build output.
+/target/
+/dist/
+*.pdb
+app/**/bin/
+app/**/obj/
+__pycache__/
+*.pyc
+
+# The panel is a second build tree: a Vite frontend over a Cargo workspace of its own, so
+# neither of the anchored patterns above reaches it.
+node_modules/
+manager/dist/
+manager/src-tauri/target/
+manager/src-tauri/gen/
+
+# Runtime state: the token, the settings file with absolute pack paths, generated audio,
+# logs, avatars. Nothing here belongs to the project; everything here belongs to one
+# machine.
+/data/
+
+# Belt to the /data/ and /dist/ braces above. Those two patterns are anchored to the repo
+# root, so an artefact dropped anywhere else — a scratch export beside the worker, a
+# checkpoint copied into src/ by mistake — would be tracked. Voice packs trained on
+# copyrighted game voice data are personal-use only and must never reach a published
+# artefact (v1 ADR-0007), and the same goes for the audio they were trained on, so the
+# net is by file type rather than by location.
+*.safetensors
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.npy
+*.npz
+*.wav
+*.ogg
+*.mp3
+*.flac
+*_manifest.jsonl
+token.txt
+
+# Development documentation. It is written for us, on this machine, and stays here: not in
+# the repository and not in the installer. What has to travel is written to stand alone -
+# README.md, skills/voice-core/SKILL.md and the packaged README.txt.
+/docs/
+
+# Local assets carried over from the v1 checkout: candidate engine weights, the upstream
+# WebUI and its venv, the training corpus, pruned adapters and finished deliverables. Tens of
+# GB of "expensive to reproduce, not source". `assets/README.md` says what each subtree is and
+# how to rebuild what is rebuildable.
+/assets/
+
+# Working notes from a design-advice tool, and the standalone HTML prototypes that came out
+# of it: first-party content with no third-party rights, but scratch rather than
+# documentation, and nothing in the shipped tree reads them.
+/.gemini-designer/
+/UI/

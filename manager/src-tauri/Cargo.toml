@@ -1,0 +1,70 @@
+[package]
+name = "voice-core-manager"
+version = "1.2.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "VoiceCore desktop shell: the one launcher, owning the tray, the runtime and the subtitle presenter."
+publish = false
+
+# Named for what the user sees, because this is the only executable a user ever
+# launches. `productName` and `mainBinaryName` in tauri.conf.json repeat the
+# name; all three must agree or the bundler looks for a file cargo never wrote.
+[[bin]]
+name = "VoiceCore"
+path = "src/main.rs"
+
+# Deliberately its own workspace root. The repo-root manifest is the runtime
+# crate's and is not a workspace, and this crate must not silently become a
+# member if that ever changes: the packager resolves
+# `manager/src-tauri/target/release/VoiceCore.exe`, and a shared `target/` would
+# make a GUI build and a runtime build queue behind one another's lock.
+[workspace]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+# Registered for its Rust API only (`app.dialog()`); its JS commands are granted
+# no permission, so the frontend cannot open a file dialog on its own. Native
+# pickers are the alternative to hand-rolling IFileOpenDialog COM plumbing.
+tauri-plugin-dialog = "2"
+# NOT registered: `open_path` is a free function, so this plugin's JS commands
+# never exist in the app at all.
+tauri-plugin-opener = "2"
+tauri-plugin-single-instance = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# No TLS. Every request this app makes is plain HTTP to 127.0.0.1:8760; linking
+# schannel or rustls for loopback traffic would be dead weight in the notices.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+# `time` for the supervisor's poll interval, `sync` for one-shot dialog results.
+# tauri already builds tokio, so these two features add no new crate.
+tokio = { version = "1", features = ["time", "sync"] }
+
+# Kernel-enforced process ownership, the same mechanism the runtime uses for its
+# engine worker: a job object with KILL_ON_JOB_CLOSE cannot leak a child and
+# cannot kill the wrong PID.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  # CreateJobObjectW takes a *const SECURITY_ATTRIBUTES and the extended limit struct
+  # embeds the basic limit info, and windows-sys only emits an item when every type in
+  # its signature is enabled — so these two features are what make the job-object
+  # imports resolve at all. Same list as the runtime crate's, which is the working one.
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+  # DwmSetWindowAttribute, for painting the native caption in the app's own colours
+  # instead of the system's. See `caption.rs`.
+  "Win32_Graphics_Dwm",
+  # Process-tree walk and working-set reads for the resource panel. See `usage.rs`.
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
+] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

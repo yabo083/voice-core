@@ -1,0 +1,222 @@
+/* =============================================================================
+   voice-core manager - design tokens
+   The whole visual language of VoiceCore.exe lives in this file. Nothing else
+   is allowed to invent a colour, a radius, a duration or a font stack.
+
+   Design read: a local control panel for a self-hosted voice runtime, read by
+   its technical owner on Windows 11. Obsidian's aesthetic - hueless graphite
+   surfaces, one violet accent, content-first chrome - and WinUI 3's geometry, so
+   the window sits inside Windows 11 without pretending to be a web page.
+   Variance 4 / motion 3 / density 6: during a 4.8 GiB download the screen must
+   be scannable, and novelty in an installer is a liability, so the character
+   sits in the palette and the typography, not in the layout.
+
+   Three locks a reviewer can check mechanically:
+   - PALETTE LOCK. Surfaces carry no hue at all; every colour in the window comes
+     from one violet ramp plus four state hues, and state hues are used only for
+     state, never for decoration.
+   - SHAPE LOCK. Controls 4px, cards 8px, window-level containers 12px, chips and
+     bars pill. These are WinUI 3's steps, not ours.
+   - THEME LOCK. Dark only. This app sits beside a game overlay and never shows a
+     document; a second theme would double the token surface for no user gain.
+     `color-scheme: dark` is set so native scrollbars and controls follow.
+
+   Colours are written as literal hex/rgba rather than color-mix() so that the
+   ramp is readable here and so nothing depends on a WebView2 newer than the
+   Chromium the build targets.
+   ============================================================================= */
+
+/* Bundled, not system-resolved and not fetched. An offline desktop app must not
+   wait on a font CDN, and it must not look different on a machine that happens
+   not to have these faces installed - the file sitting next to the binary is the
+   only way to get both. Variable weights so 400/500/600 are one download. */
+@font-face {
+  font-family: "Noto Sans SC";
+  src: url("../fonts/NotoSansSC.woff2") format("woff2-variations");
+  font-weight: 100 900;
+  font-style: normal;
+  /* A local file resolves in milliseconds; `block` avoids a flash of the system
+     fallback with different CJK metrics on every window open. */
+  font-display: block;
+}
+@font-face {
+  font-family: "Sarasa Mono SC";
+  src: url("../fonts/SarasaMonoSC-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* --- surfaces -------------------------------------------------------------
+     Hueless graphite. Each step is a real depth: rail < window < panel < raised,
+     and sunken is only for the log pane and code blocks, which are content the
+     app did not compose. The rail is *darker* than the content it frames, which
+     is what makes the content read as the subject rather than as one more
+     surface. */
+  --bg-window: #1c1c1c;
+  --bg-rail: #161616;
+  --bg-panel: #212121;
+  --bg-raised: #292929;
+  --bg-sunken: #131313;
+  --bg-inset: #191919;
+
+  /* Interaction fills. Kept as white alphas so one value works on every surface.
+     `selected` is deliberately neutral: the accent in a selected nav item is
+     carried by its 3x16 indicator bar, and tinting the fill as well would make
+     the rail the loudest thing in the window. */
+  --bg-hover: rgba(255, 255, 255, 0.045);
+  --bg-active: rgba(255, 255, 255, 0.08);
+  --bg-selected: rgba(255, 255, 255, 0.08);
+
+  /* --- lines ---------------------------------------------------------------- */
+  --line: rgba(255, 255, 255, 0.09);
+  --line-strong: rgba(255, 255, 255, 0.17);
+
+  /* --- ink -----------------------------------------------------------------
+     Measured against --bg-panel, the worst case: ink 11.4:1, muted 6.3:1,
+     faint 3.4:1. Ink and muted clear AA for body text; faint is reserved for
+     11-12px metadata that is always duplicated by a chip, an icon or a value
+     next to it, never for a sentence that carries meaning on its own. */
+  --ink: #dadada;
+  --ink-muted: #a3a3a3;
+  --ink-faint: #757575;
+  --ink-on-accent: #ffffff;
+
+  /* --- accent ---------------------------------------------------------------
+     Three violets because one value cannot do three jobs and stay legible:
+     --accent      strokes, indicator bars, progress fill, focus ring
+     --accent-fill filled button backgrounds - white on it is 5.8:1
+     --accent-text accent-coloured text and glyphs - 5.4:1 on --bg-panel
+     --accent itself is 4.2:1 as 12-13px text, under AA, so it never carries
+     text. --accent-dim is kept as the old name for the filled-button colour so
+     nothing outside this file had to be renamed. */
+  --accent: #8b6cef;
+  --accent-fill: #6c49df;
+  --accent-dim: #6c49df;
+  --accent-text: #a48bff;
+  --accent-wash: rgba(139, 108, 239, 0.14);
+
+  /* --- state ---------------------------------------------------------------
+     ok / reuse / run / fail / warn / idle, taken from Obsidian's own callout
+     hues so the two products read as one family. `reuse` keeps its own cool hue
+     on purpose: "already on this machine, nothing downloaded" is the single most
+     valuable thing this app can tell a user, and it must not read as a
+     second-class version of done. Every use is paired with an icon and a word,
+     so none of this is colour-only.
+
+     `fail` is Obsidian's red lifted to 5.4:1; the original #e93147 is 3.9:1 as
+     small text. The wash and line variants keep the original hue, because a
+     background and a hairline are not text. */
+  --st-ok: #08b94e;
+  --st-ok-wash: rgba(8, 185, 78, 0.14);
+  --st-ok-line: rgba(8, 185, 78, 0.35);
+  --st-reuse: #00bfbc;
+  --st-reuse-wash: rgba(0, 191, 188, 0.14);
+  --st-reuse-line: rgba(0, 191, 188, 0.35);
+  --st-run: var(--accent);
+  --st-run-wash: rgba(139, 108, 239, 0.13);
+  --st-run-line: rgba(139, 108, 239, 0.35);
+  --st-fail: #f0697a;
+  --st-fail-wash: rgba(233, 49, 71, 0.14);
+  --st-fail-line: rgba(233, 49, 71, 0.4);
+  --st-warn: #e0ac00;
+  --st-warn-wash: rgba(224, 172, 0, 0.14);
+  --st-warn-line: rgba(224, 172, 0, 0.35);
+  --st-idle: var(--ink-faint);
+  --st-idle-wash: rgba(255, 255, 255, 0.05);
+
+  /* --- type ---------------------------------------------------------------
+     Noto Sans SC for everything the app writes: it is Source Han Sans' lineage,
+     so the Latin and the Chinese are one design rather than Segoe bolted to
+     Microsoft YaHei, and it ships with the app.
+
+     Sarasa Mono SC for paths, ids and the log. This is correctness, not taste:
+     Sarasa's CJK advances are exactly twice its Latin advance, so a log line
+     that mixes a Chinese message with an ASCII path still lines up in columns.
+     Cascadia has no CJK at all and falls back mid-line. */
+  --font-ui: "Noto Sans SC", "Source Sans 3", "Segoe UI Variable Text", "Segoe UI", system-ui,
+    sans-serif;
+  --font-display: "Noto Sans SC", "Source Sans 3", "Segoe UI Variable Display", "Segoe UI",
+    system-ui, sans-serif;
+  --font-mono: "Sarasa Mono SC", "Cascadia Mono", Consolas, ui-monospace, monospace;
+
+  --fs-micro: 11px; /* uppercase chip labels only, never a sentence */
+  --fs-sm: 12px;
+  --fs-body: 13px;
+  --fs-md: 14px;
+  --fs-lg: 17px;
+  --fs-xl: 21px;
+  --fs-2xl: 27px;
+
+  --lh-tight: 1.25;
+  --lh: 1.55;
+  --lh-mono: 1.55;
+
+  --tracking-caps: 0.06em;
+  /* Noto Sans SC has no optical size axis, so large sizes get their tightening
+     here instead of from a display cut. */
+  --tracking-title: -0.02em;
+
+  /* --- spacing (4px grid, 2px only for hairline gaps) --------------------- */
+  --sp-1: 2px;
+  --sp-2: 4px;
+  --sp-3: 6px;
+  --sp-4: 8px;
+  --sp-5: 12px;
+  --sp-6: 16px;
+  --sp-7: 20px;
+  --sp-8: 24px;
+  --sp-9: 32px;
+  --sp-10: 40px;
+
+  /* --- radius (shape lock) -----------------------------------------------
+     WinUI 3's steps. 8px on a button is what makes a Windows app look like a
+     web page or an iOS port; 4px is the platform's control radius. */
+  --r-panel: 8px;
+  --r-control: 4px;
+  --r-inset: 4px;
+  --r-window: 12px;
+  --r-chip: 999px;
+
+  /* --- elevation ---------------------------------------------------------
+     Flat cards in WinUI 3 have no outer shadow: they are separated by a hairline
+     and a top highlight that reads as material thickness. `--shadow-panel` keeps
+     its name and delivers that highlight, so every panel rule stayed put while
+     the look changed. Real elevation - popovers, toasts, menus - still gets a
+     cast shadow, because those genuinely float. */
+  --shadow-panel: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --shadow-pop: 0 12px 32px rgba(0, 0, 0, 0.5), 0 2px 6px rgba(0, 0, 0, 0.4);
+
+  /* --- motion ------------------------------------------------------------
+     Three durations: press feedback, state change, screen change. Anything
+     longer than dur-3 in a window that reports a download is noise competing
+     with the progress bar. */
+  --dur-1: 90ms;
+  --dur-2: 160ms;
+  --dur-3: 260ms;
+  --ease: cubic-bezier(0.33, 0, 0.67, 1);
+  --ease-out: cubic-bezier(0.1, 0.9, 0.2, 1);
+
+  /* --- focus -------------------------------------------------------------- */
+  --focus-ring: 2px;
+  --focus-offset: 2px;
+
+  /* --- layout ------------------------------------------------------------- */
+  --rail-w: 216px;
+  --content-max: 1000px;
+  --z-pop: 30;
+  --z-toast: 40;
+}
+
+/* One override switches the whole app to static: every transition and animation
+   in app.css is expressed through these three durations. */
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --dur-1: 1ms;
+    --dur-2: 1ms;
+    --dur-3: 1ms;
+  }
+}

@@ -1,0 +1,1718 @@
+/* =============================================================================
+   voice-core manager - components
+   Every value here comes from tokens.css. Sections follow the app's structure:
+   base, shell, screen, panel, controls, state, setup, voices, status, toast.
+   ============================================================================= */
+
+/* --- base ----------------------------------------------------------------- */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+/* Screens are display:grid, and the `hidden` attribute loses to a display rule.
+   Without this the router would stack all three screens on top of each other. */
+[hidden] {
+  display: none !important;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg-window);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-body);
+  line-height: var(--lh);
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1,
+h2,
+h3,
+p,
+ul,
+ol {
+  margin: 0;
+  padding: 0;
+}
+
+ul,
+ol {
+  list-style: none;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--ink-on-accent);
+}
+
+:focus-visible {
+  outline: var(--focus-ring) solid var(--accent);
+  outline-offset: var(--focus-offset);
+  border-radius: var(--r-inset);
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.icon {
+  display: block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+}
+
+.spin {
+  animation: spin 900ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.boot {
+  display: grid;
+  place-items: center;
+  height: 100dvh;
+  color: var(--ink-faint);
+}
+
+/* --- shell ---------------------------------------------------------------- */
+
+/* The row track is pinned, not just the container: an `auto` row sizes to its
+   content's min-content height, so a long deploy page would push the command bar
+   past the bottom of a window whose height was already fixed. */
+.app {
+  display: grid;
+  grid-template-columns: var(--rail-w) 1fr;
+  grid-template-rows: 100dvh;
+  height: 100dvh;
+}
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-6);
+  /* No bottom padding: .rail__foot is bottom-aligned and has to share its top border
+     line with .cmdbar, which sits flush against the window edge. */
+  padding: var(--sp-6) var(--sp-2) 0;
+  background: var(--bg-rail);
+  border-right: 1px solid var(--line);
+  /* A short window must not clip the nav out of existence. */
+  overflow-y: auto;
+  scrollbar-width: thin;
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-5);
+}
+
+.brand__mark {
+  width: 26px;
+  height: 26px;
+}
+
+.brand__name {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.brand__role {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.rail__list {
+  display: grid;
+  gap: var(--sp-1);
+  flex: 1 1 auto;
+  align-content: start;
+}
+
+.navitem {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  width: 100%;
+  padding: 9px var(--sp-5) 9px var(--sp-6);
+  border: 0;
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background var(--dur-2) var(--ease),
+    color var(--dur-2) var(--ease);
+}
+
+.navitem:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.navitem:active {
+  transform: translateY(1px);
+}
+
+.navitem.is-active {
+  background: var(--bg-selected);
+  color: var(--ink);
+}
+
+/* The active rail item is marked by an accent bar as well as by fill, because fill
+   alone is a colour-only signal. WinUI 3 puts that bar *inside* the item's rounded
+   rect rather than in the gutter, so the item still reads as one island. */
+.navitem.is-active::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: var(--sp-2);
+  width: 3px;
+  height: 16px;
+  transform: translateY(-50%);
+  border-radius: var(--r-chip);
+  background: var(--accent);
+}
+
+
+.navitem__label {
+  flex: 1 1 auto;
+  /* A wrapped nav label reads as two entries. Elide instead. */
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.navitem__badge:not(:empty) {
+  padding: 1px var(--sp-3);
+  border-radius: var(--r-chip);
+  background: var(--accent-wash);
+  color: var(--accent-text);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-caps);
+}
+
+/* Same height and the same hairline as .cmdbar, because they meet at the rail's edge:
+   two footers whose top borders miss each other by a few pixels is the kind of detail
+   that makes a window look assembled rather than designed. */
+.rail__foot {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: 56px;
+  margin-top: auto;
+  padding: 0 var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+
+.livestate {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  font-size: var(--fs-sm);
+}
+
+.livestate__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: var(--r-chip);
+  background: var(--st-idle);
+}
+
+.livestate--up .livestate__dot {
+  background: var(--st-ok);
+  box-shadow: 0 0 0 3px var(--st-ok-wash);
+}
+
+.content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* The shell's slot for the active screen's command bar: outside .main, so it does
+   not scroll, and collapsed to nothing on screens that have no primary action. */
+.cmdslot {
+  flex: 0 0 auto;
+}
+
+.main {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--sp-9);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* --- screen --------------------------------------------------------------- */
+
+.screen {
+  display: grid;
+  gap: var(--sp-7);
+  max-width: var(--content-max);
+  margin: 0 auto;
+}
+
+/* The cards of a screen, swapped as a group: an unprovisioned Status screen shows an
+   empty state instead of four cards reporting on an engine that does not exist. */
+.screen__cards {
+  display: grid;
+  gap: var(--sp-7);
+}
+
+/* A panel's own one-line fact, under its rows. Never an explanation - only data the
+   rows above cannot carry, like a version and an uptime. */
+.panel__meta {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.screen__head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--sp-6);
+}
+
+.screen__titles {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.screen__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-2xl);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+  letter-spacing: var(--tracking-title);
+}
+
+.screen__title:focus {
+  outline: none;
+}
+
+.screen__title:focus-visible {
+  outline: var(--focus-ring) solid var(--accent);
+  outline-offset: var(--focus-offset);
+}
+
+.screen__sub {
+  max-width: 68ch;
+  color: var(--ink-muted);
+  font-size: var(--fs-md);
+}
+
+/* Back arrow plus title on one baseline: the arrow belongs to the title, not to the
+   card below it. */
+.screen__titlerow {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.screen__back:empty {
+  display: none;
+}
+
+/* A panel's right-hand summary. Same slot as .panel__actions, for panels whose head
+   carries a count or a timer instead of a button. */
+.panel__tail {
+  margin-left: auto;
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- disk ----------------------------------------------------------------- */
+.disk {
+  display: grid;
+  gap: var(--sp-4);
+  padding-top: var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+
+.disk__line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+.disk__line strong {
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-variant-numeric: tabular-nums;
+}
+
+.track {
+  display: flex;
+  height: 6px;
+  border-radius: var(--r-chip);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.track__need {
+  flex: 0 0 auto;
+  min-width: 4px;
+  background: var(--accent);
+  border-radius: var(--r-chip);
+}
+
+.track--short .track__need {
+  background: var(--st-fail);
+}
+
+/* --- success banner ------------------------------------------------------- */
+.banner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-5) var(--sp-6);
+  border: 1px solid var(--st-ok-line);
+  border-radius: var(--r-inset);
+  background: var(--st-ok-wash);
+}
+
+.banner__icon {
+  width: 20px;
+  height: 20px;
+  color: var(--st-ok);
+}
+
+.banner__meta {
+  margin-left: auto;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+/* --- panel ---------------------------------------------------------------- */
+
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  box-shadow: var(--shadow-panel);
+}
+
+.panel__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--sp-6);
+  padding: var(--sp-6);
+  border-bottom: 1px solid var(--line);
+}
+
+.panel__titles {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.panel__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.panel__hint {
+  max-width: 72ch;
+  color: var(--ink-faint);
+}
+
+.panel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3);
+  flex: 0 0 auto;
+}
+
+.panel__body {
+  display: grid;
+  gap: var(--sp-5);
+  padding: var(--sp-6);
+}
+
+/* --- expander ------------------------------------------------------------
+   Same head metrics as .panel__head, because a Settings card and a Settings
+   expander that look different are two components pretending to be one. */
+.expander__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  width: 100%;
+  padding: var(--sp-5) var(--sp-6);
+  border: 0;
+  border-radius: var(--r-panel) var(--r-panel) 0 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background var(--dur-2) var(--ease);
+}
+
+.expander__head:hover {
+  background: var(--bg-hover);
+}
+
+.expander__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.expander__tail {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin-left: auto;
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+.expander__caret {
+  flex: 0 0 auto;
+  color: var(--ink-faint);
+  transition: transform var(--dur-2) var(--ease);
+}
+
+.expander__head[aria-expanded="true"] .expander__caret {
+  transform: rotate(90deg);
+}
+
+.expander > .panel__body {
+  border-top: 1px solid var(--line);
+}
+
+/* --- command bar ---------------------------------------------------------
+   Pinned below the scroll region by the shell, not inside the screen, so the
+   primary action of a seven-stage wizard cannot scroll out of reach. */
+.cmdbar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-height: 56px;
+  padding: 0 var(--sp-9);
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+}
+
+.cmdbar__left,
+.cmdbar__right {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.cmdbar__right {
+  margin-left: auto;
+}
+
+/* --- tooltip -------------------------------------------------------------
+   The home for every hint that used to be a paragraph of small print. Opens on
+   hover *and* on focus, so it is reachable without a pointer. */
+.tipwrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.tip {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + var(--sp-4));
+  z-index: var(--z-pop);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-pop);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  opacity: 0;
+  pointer-events: none;
+  /* Delayed in, instant out: Windows tooltips do not follow a pointer that is
+     just passing over a toolbar. */
+  transition: opacity var(--dur-1) var(--ease) 350ms;
+}
+
+.tipwrap:hover .tip,
+.tipwrap:focus-within .tip {
+  opacity: 1;
+}
+
+/* Inert but focusable - see blockedButton() for why this is not :disabled. */
+.btn[aria-disabled="true"],
+.btn[aria-disabled="true"]:hover {
+  background: var(--bg-raised);
+  border-color: var(--line);
+  color: var(--ink-faint);
+  font-weight: 400;
+  cursor: default;
+}
+
+.btn[aria-disabled="true"]:active {
+  transform: none;
+}
+
+/* --- buttons -------------------------------------------------------------- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-3);
+  padding: var(--sp-4) var(--sp-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-raised);
+  color: var(--ink);
+  font: inherit;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease),
+    transform var(--dur-1) var(--ease);
+}
+
+.btn:hover:not(:disabled) {
+  background: var(--bg-active);
+  border-color: var(--ink-faint);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Filled accent: the darker violet, because white text on --accent is 3.5:1 and
+   on --accent-fill it is 5.8:1. Hover goes *lighter* rather than darker - a
+   filled Fluent button brightens on hover, and there is no room below
+   --accent-fill before the label stops passing AA. */
+.btn--primary {
+  background: var(--accent-fill);
+  border-color: transparent;
+  color: var(--ink-on-accent);
+  font-weight: 500;
+}
+
+.btn--primary:hover:not(:disabled) {
+  background: var(--accent);
+  border-color: transparent;
+}
+
+.btn--danger {
+  background: transparent;
+  border-color: var(--st-fail);
+  color: var(--st-fail);
+}
+
+.btn--danger:hover:not(:disabled) {
+  background: var(--st-fail-wash);
+  border-color: var(--st-fail);
+}
+
+.btn--quiet {
+  background: transparent;
+  border-color: transparent;
+  color: var(--ink-muted);
+}
+
+.btn--quiet:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: transparent;
+  color: var(--ink);
+}
+
+.btn--sm {
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-sm);
+}
+
+.btn--icon {
+  padding: var(--sp-3);
+}
+
+/* One caret glyph for both collapsed and expanded, rotated rather than swapped. */
+.btn[aria-expanded] .icon {
+  transition: transform var(--dur-2) var(--ease);
+}
+
+.btn[aria-expanded="true"] .icon {
+  transform: rotate(90deg);
+}
+
+/* --- inputs --------------------------------------------------------------- */
+
+.field {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.field__label {
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+.field__hint {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.input {
+  width: 100%;
+  padding: var(--sp-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-inset);
+  color: var(--ink);
+  font: inherit;
+}
+
+.input--mono {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+.input::placeholder {
+  color: var(--ink-faint);
+}
+
+.input:hover {
+  border-color: var(--ink-faint);
+}
+
+select.input {
+  cursor: pointer;
+}
+
+/* --- chips, notes, paths -------------------------------------------------- */
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 2px var(--sp-4) 2px var(--sp-3);
+  border-radius: var(--r-chip);
+  background: var(--st-idle-wash);
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}
+
+.chip__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.chip--ok {
+  background: var(--st-ok-wash);
+  color: var(--st-ok);
+}
+
+.chip--reuse {
+  background: var(--st-reuse-wash);
+  color: var(--st-reuse);
+}
+
+.chip--run {
+  background: var(--st-run-wash);
+  color: var(--st-run);
+}
+
+.chip--fail {
+  background: var(--st-fail-wash);
+  color: var(--st-fail);
+}
+
+.chip--warn {
+  background: var(--st-warn-wash);
+  color: var(--st-warn);
+}
+
+.chip--accent {
+  background: var(--accent-wash);
+  color: var(--accent);
+}
+
+.note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  background: var(--bg-raised);
+}
+
+.note__icon {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--ink-muted);
+}
+
+.note__body {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.note__title {
+  font-weight: 600;
+}
+
+.note__body p {
+  color: var(--ink-muted);
+}
+
+.note__detail {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.note--warn {
+  border-color: var(--st-warn-line);
+  background: var(--st-warn-wash);
+}
+
+.note--warn .note__icon {
+  color: var(--st-warn);
+}
+
+.note--fail {
+  border-color: var(--st-fail-line);
+  background: var(--st-fail-wash);
+}
+
+.note--fail .note__icon {
+  color: var(--st-fail);
+}
+
+.note--reuse {
+  border-color: var(--st-reuse-line);
+  background: var(--st-reuse-wash);
+}
+
+.note--reuse .note__icon {
+  color: var(--st-reuse);
+}
+
+.remedy {
+  color: var(--ink) !important;
+}
+
+.path {
+  display: inline-block;
+  max-width: 100%;
+  padding: 1px var(--sp-3);
+  border-radius: var(--r-inset);
+  background: var(--bg-inset);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.code-block {
+  display: block;
+  padding: var(--sp-5);
+  border-radius: var(--r-inset);
+  background: var(--bg-sunken);
+  color: var(--ink);
+  line-height: var(--lh-mono);
+  white-space: pre;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* A grid item's default min-width is min-content, so one long unbreakable line - the
+   PowerShell snippet - widens the .screen grid itself and pushes every card past the
+   window edge. The block already scrolls; these three let it, instead of making the
+   whole layout do the scrolling. */
+.screen > *,
+.panel__body > *,
+.copyrow > * {
+  min-width: 0;
+}
+
+/* --- copy rows ------------------------------------------------------------ */
+
+.copyrow {
+  display: grid;
+  gap: var(--sp-3);
+}
+
+.copyrow__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+}
+
+.copyrow__icon {
+  color: var(--ink-faint);
+}
+
+.copyrow__label {
+  flex: 1 1 auto;
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+.copyrow__hint {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+/* --- empty & loading ------------------------------------------------------ */
+
+.empty {
+  display: grid;
+  justify-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-9) var(--sp-6);
+  text-align: center;
+}
+
+.empty__icon {
+  width: 40px;
+  height: 40px;
+  color: var(--accent);
+}
+
+.empty__title {
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+}
+
+.empty__lines {
+  display: grid;
+  gap: var(--sp-4);
+  max-width: 62ch;
+  color: var(--ink-muted);
+}
+
+.empty__doc {
+  color: var(--ink) !important;
+}
+
+.empty__actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: var(--sp-4);
+  margin-top: var(--sp-2);
+}
+
+/* Skeletons match the shape of the rows they stand in for, so the layout does not
+   jump when detect() answers. */
+.skeletons {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.skeleton {
+  height: 44px;
+  border-radius: var(--r-inset);
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.04),
+    rgba(255, 255, 255, 0.09),
+    rgba(255, 255, 255, 0.04)
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.6s var(--ease) infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 150% 0;
+  }
+  to {
+    background-position: -50% 0;
+  }
+}
+
+/* --- setup: inventory ----------------------------------------------------- */
+
+.inv {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--sp-5);
+  padding: var(--sp-4) 0;
+  border-top: 1px solid var(--line);
+}
+
+.inv:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.inv__icon {
+  width: 20px;
+  height: 20px;
+  color: var(--ink-faint);
+}
+
+.inv__main {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.inv__label {
+  font-weight: 600;
+}
+
+.inv__value {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.inv__miss,
+.inv__text {
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+
+.models {
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-4) 0 var(--sp-4) calc(20px + var(--sp-5));
+}
+
+.models__item {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  align-items: center;
+  gap: var(--sp-4);
+  color: var(--ink-faint);
+}
+
+.models__item.is-present {
+  color: var(--ink-muted);
+}
+
+.models__icon {
+  width: 14px;
+  height: 14px;
+}
+
+.models__item.is-present .models__icon {
+  color: var(--st-reuse);
+}
+
+.models__repo {
+  overflow-wrap: anywhere;
+}
+
+.models__size {
+  font-variant-numeric: tabular-nums;
+}
+
+
+.models__none {
+  color: var(--ink-faint);
+}
+
+/* --- setup: reuse pickers ------------------------------------------------- */
+
+.picker {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: start;
+  gap: var(--sp-5);
+  padding: var(--sp-5) 0;
+  border-top: 1px solid var(--line);
+}
+
+.picker:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.picker__main {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+.picker__label {
+  font-weight: 600;
+}
+
+.picker__hint {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.picker__value {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  margin-top: var(--sp-2);
+}
+
+.picker__empty {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+/* --- setup: stages -------------------------------------------------------- */
+
+.stages {
+  display: grid;
+}
+
+.stage {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-5);
+  padding: var(--sp-5);
+  border-top: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  transition: background var(--dur-3) var(--ease);
+}
+
+.stage:first-child {
+  border-top: 0;
+}
+
+/* Spotlight: a step that has not started is one muted line. Seven rows each with a
+   description, a chip, a timer and a bar is a wall, and a wall is where a failure
+   hides. */
+.stage.is-pending {
+  padding-top: var(--sp-4);
+  padding-bottom: var(--sp-4);
+}
+
+.stage.is-pending .stage__title {
+  color: var(--ink-faint);
+}
+
+.stage.is-running {
+  background: var(--st-run-wash);
+}
+
+.stage.is-fail {
+  background: var(--st-fail-wash);
+}
+
+.stage__glyph .icon {
+  width: 20px;
+  height: 20px;
+  margin-top: 1px;
+  color: var(--ink-faint);
+}
+
+.stage.is-running .stage__glyph .icon {
+  color: var(--st-run);
+}
+
+.stage.is-ok .stage__glyph .icon {
+  color: var(--st-ok);
+}
+
+.stage.is-skip .stage__glyph .icon {
+  color: var(--st-reuse);
+}
+
+.stage.is-fail .stage__glyph .icon {
+  color: var(--st-fail);
+}
+
+.stage__main {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.stage__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.stage__title {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+
+.stage__elapsed {
+  flex: 1 1 auto;
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.stage__message {
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+.stage__progress {
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-2);
+}
+
+.stage__bartext {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.stage__detail {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.stage__detail:empty {
+  display: none;
+}
+
+.stage__notes {
+  display: grid;
+  gap: var(--sp-4);
+}
+
+.stage__note {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-4);
+  color: var(--ink-muted);
+}
+
+.stage__noteicon {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  color: var(--st-warn);
+}
+
+/* --- progress bars -------------------------------------------------------- */
+
+.bar {
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border: 0;
+  border-radius: var(--r-chip);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.bar::-webkit-progress-bar {
+  background: var(--bg-inset);
+  border-radius: var(--r-chip);
+}
+
+.bar::-webkit-progress-value {
+  background: var(--accent);
+  border-radius: var(--r-chip);
+  transition: width var(--dur-2) var(--ease-out);
+}
+
+/* No total yet: a sweeping block says "working, size unknown". A bar pinned at zero
+   during a multi-GiB download says "stuck". The block is a solid 30% of the track
+   easing across it, which is WinUI 3's indeterminate ProgressBar; a scrolling
+   gradient reads as a texture, not as motion. */
+.bar:not([value])::-webkit-progress-bar {
+  background-image: linear-gradient(90deg, var(--accent), var(--accent));
+  background-size: 30% 100%;
+  background-repeat: no-repeat;
+  animation: sweep 1.5s ease-in-out infinite;
+}
+
+@keyframes sweep {
+  from {
+    background-position: -30% 0;
+  }
+  to {
+    background-position: 130% 0;
+  }
+}
+
+/* --- setup: log pane ------------------------------------------------------ */
+
+.logpane {
+  display: grid;
+  gap: var(--sp-4);
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--line);
+}
+
+.logpane__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.logpane__count {
+  flex: 1 1 auto;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.logscroll {
+  max-height: 320px;
+  overflow-y: auto;
+  padding: var(--sp-4) 0;
+  border-radius: var(--r-inset);
+  background: var(--bg-sunken);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+.log {
+  display: grid;
+}
+
+/* A failed models stage forwards the whole Python traceback line by line, so a log
+   line must wrap anywhere and never widen the pane. */
+.logline {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: var(--sp-4);
+  padding: 1px var(--sp-5);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.logline__stage {
+  color: var(--ink-faint);
+  font-size: var(--fs-micro);
+  text-align: right;
+}
+
+.logline__text {
+  color: var(--ink-muted);
+}
+
+.logline--start .logline__text {
+  color: var(--ink);
+}
+
+.logline--ok .logline__text {
+  color: var(--st-ok);
+}
+
+.logline--skip .logline__text {
+  color: var(--st-reuse);
+}
+
+.logline--fail .logline__text {
+  color: var(--st-fail);
+}
+
+.runsummary:empty {
+  display: none;
+}
+
+/* --- voices --------------------------------------------------------------- */
+
+.draft-host:empty {
+  display: none;
+}
+
+.draft {
+  display: grid;
+  gap: var(--sp-5);
+  padding: var(--sp-6);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-panel);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-panel);
+}
+
+.draft__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+}
+
+.draft__title {
+  flex: 1 1 auto;
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+}
+
+.draft__path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.draft__hint {
+  color: var(--ink-faint);
+}
+
+.draft__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: var(--sp-5);
+}
+
+.draft__error:empty {
+  display: none;
+}
+
+.draft__problems {
+  display: grid;
+  gap: var(--sp-2);
+  color: var(--ink);
+}
+
+.draft__problems li::before {
+  content: "";
+  display: inline-block;
+  width: 4px;
+  height: 4px;
+  margin: 0 var(--sp-4) 2px 0;
+  border-radius: var(--r-chip);
+  background: var(--st-fail);
+}
+
+.draft__actions {
+  display: flex;
+  gap: var(--sp-4);
+}
+
+.packs {
+  display: grid;
+}
+
+.pack {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--sp-5);
+  padding: var(--sp-5) 0;
+  border-top: 1px solid var(--line);
+}
+
+.pack:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.pack__icon {
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--accent);
+}
+
+.pack__main {
+  display: grid;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.pack__head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--sp-4);
+}
+
+.pack__name {
+  font-size: var(--fs-md);
+  font-weight: 600;
+}
+
+.pack__id {
+  color: var(--ink-muted);
+}
+
+.pack__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-3) var(--sp-6);
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.pack__path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+}
+
+.pack__actions {
+  display: flex;
+  gap: var(--sp-3);
+}
+
+/* --- status --------------------------------------------------------------- */
+
+.procs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: var(--sp-4);
+}
+
+.procs__item {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  background: var(--bg-raised);
+}
+
+.procs__icon {
+  width: 18px;
+  height: 18px;
+  color: var(--ink-faint);
+}
+
+.procs__label {
+  flex: 1 1 auto;
+  color: var(--ink-muted);
+}
+
+.tiles {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: var(--sp-4);
+}
+
+.tile {
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  background: var(--bg-raised);
+}
+
+/* No tone bar down the side of a tile: a metrics grid where every card wears a
+   coloured rule reads as an alert board, and the tone is already in the word the
+   tile shows. Only the two tones that mean "look here" tint that word. */
+.tile--warn .tile__value {
+  color: var(--st-warn);
+}
+
+.tile--fail .tile__value {
+  color: var(--st-fail);
+}
+
+.tile__label {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.tile__value {
+  font-family: var(--font-display);
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  line-height: var(--lh-tight);
+}
+
+.tile__sub {
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+.spool {
+  display: grid;
+  gap: var(--sp-3);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
+.spool__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-5);
+}
+
+.spool__label {
+  font-weight: 600;
+}
+
+.spool__value {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.spool__hint {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+.missing {
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.wiring__paths {
+  display: grid;
+  gap: var(--sp-4);
+  padding-top: var(--sp-4);
+  border-top: 1px solid var(--line);
+}
+
+.wiring__path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+}
+
+/* --- toasts --------------------------------------------------------------- */
+
+.toasts {
+  position: fixed;
+  right: var(--sp-6);
+  bottom: var(--sp-6);
+  z-index: var(--z-toast);
+  display: grid;
+  gap: var(--sp-4);
+  width: min(420px, calc(100vw - var(--sp-9)));
+}
+
+.toast {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: start;
+  gap: var(--sp-4);
+  padding: var(--sp-5);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-raised);
+  box-shadow: var(--shadow-pop);
+  animation: toast-in var(--dur-3) var(--ease-out);
+}
+
+.toast__icon {
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
+  color: var(--ink-muted);
+}
+
+.toast__text {
+  overflow-wrap: anywhere;
+}
+
+.toast--ok .toast__icon {
+  color: var(--st-ok);
+}
+
+.toast--fail {
+  border-color: var(--st-fail-line);
+}
+
+.toast--fail .toast__icon {
+  color: var(--st-fail);
+}
+
+@keyframes toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* --- narrow window -------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  :root {
+    --rail-w: 188px;
+  }
+
+  /* Reclaimed from the item's own inset so the label and its badge still fit on
+     one line in the narrower rail. */
+  .navitem {
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
+  }
+
+  .main {
+    padding: var(--sp-7) var(--sp-6);
+  }
+}
+
+/* --- reduced motion ------------------------------------------------------
+   The three durations are already collapsed in tokens.css; what is left is the
+   infinite animations, which are the whole point of the preference. */
+@media (prefers-reduced-motion: reduce) {
+  .spin,
+  .skeleton,
+  .toast,
+  .bar:not([value])::-webkit-progress-bar {
+    animation: none;
+  }
+}

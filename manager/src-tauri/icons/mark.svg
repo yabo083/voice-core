@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" viewBox="0 0 64 64">
+  <!-- Single source for the voice-core mark. Every PNG and every .ico frame in this
+       directory, plus app/VoiceCoreTray/assets/{icon,tray}.ico, is rasterised from these
+       coordinates - edit here, never the bitmaps.
+
+       What renders below is the A slot (light brackets, purple core): the mark as the dark
+       UI itself carries it. The shipped bitmaps differ in two ways a rebuild has to know:
+         * frames of 24 px and under use #mk16 in <defs>, not a scaled-down main form.
+           The 6.5 stroke lands on 1.6 device px at 16 px and the light facet becomes a
+           shimmering sliver, which is why the small form exists at all.
+         * every .ico frame and every PNG here sits on the rounded square from UI/logo.html
+           (.tile) - rx 13 of 64, radial-gradient(120% 120% at 30% 0%, #302846, #141218) -
+           with the mark in the brightened tile slot (#efefef / #7c5ce8 / #a48bff /
+           #c4b4ff), scaled about the centre by 0.85, or 0.95 at 16 and 24 px where there
+           is no margin to spare. The tile is what keeps the icon legible on a light-theme
+           taskbar and in Explorer; a bare #dadada mark would vanish there.
+           app/VoiceCoreTray/assets/tray.ico is the exception: slot C (#dadada flat, no
+           tile), because a notification-area icon sits among system glyphs.
+       Slots and coordinates come from UI/logo.html, which is the approved prototype. -->
+  <defs>
+    <symbol id="mk16" viewBox="0 0 64 64">
+      <path d="M24 10H8V26" fill="none" stroke="#dadada" stroke-width="9" stroke-linecap="square"/>
+      <path d="M40 54H56V38" fill="none" stroke="#dadada" stroke-width="9" stroke-linecap="square"/>
+      <g transform="rotate(-8 32 32)">
+        <path d="M32 15 22 28l2.5 15.5L32 50z" fill="#6c49df"/>
+        <path d="M32 15l10 13-2.5 15.5L32 50z" fill="#8b6cef"/>
+      </g>
+    </symbol>
+  </defs>
+  <path d="M25 12H10V27" fill="none" stroke="#dadada" stroke-width="6.5" stroke-linecap="square"/>
+  <path d="M39 52H54V37" fill="none" stroke="#dadada" stroke-width="6.5" stroke-linecap="square"/>
+  <g transform="rotate(-8 32 32)">
+    <path d="M32 13 20 27.5l3.5 16.5L32 51z" fill="#6c49df"/>
+    <path d="M32 13l12 14.5-3.5 16.5L32 51z" fill="#8b6cef"/>
+    <path d="M32 13l12 14.5-12 3.5z" fill="#a48bff"/>
+  </g>
+</svg>

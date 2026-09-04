@@ -1,0 +1,53 @@
+[package]
+name = "voice-core"
+version = "1.2.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Local-first TTS runtime for AI agents and humans: one API surface, many frontends."
+
+# Two binaries, two jobs. The daemon only runs; every control action goes
+# through the client. v1's `voice-core-cli serve` conflated the two.
+[[bin]]
+name = "voice-core-runtime"
+path = "src/bin/voice-core-runtime.rs"
+
+[[bin]]
+name = "voice-core"
+path = "src/bin/voice-core.rs"
+
+[dependencies]
+axum = "0.7"
+tokio = { version = "1", features = [
+  "rt-multi-thread",
+  "macros",
+  "signal",
+  "time",
+  "process",
+  "sync",
+  "fs",
+  "io-util",
+] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = { version = "0.7", features = ["io"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+reqwest = { version = "0.12", features = ["json"] }
+clap = { version = "4", features = ["derive", "env"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+anyhow = "1"
+
+# Kernel-enforced worker ownership: a job object with KILL_ON_JOB_CLOSE means
+# the runtime cannot leak or mis-target a process. Replaces v1's PID ledger.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_JobObjects",
+  "Win32_System_Threading",
+] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -334,14 +334,13 @@ def build(args: argparse.Namespace) -> tuple[list[dict], dict]:
         # threshold in `_audio_qa` carries the source it came from, which is why those checks
         # live there and not inline here. This loop only records what it reported.
         #
-        # Note what the old inline checks got wrong and this replaces. `peak >= 0.999` called
-        # every grazed sample "clipping"; on this project's own corpus that flagged 96 of 163
-        # clips, and a flat-top count showed only 77 were actually saturated while 19 merely
-        # touched full scale - a real difference, because the harmonic splatter comes from the
-        # flat top. And `sample_rate < 48000` never fired on a corpus that was upsampled TO
-        # 48 kHz from far below: the container is what `sf.info` reports, so a 16 kHz recording
-        # resampled up reads as clean 48 kHz. The spectral rolloff is what catches those, and it
-        # caught clips whose energy stops at 2.0-10.6 kHz inside a 48 kHz container.
+        # Two of those thresholds are deliberately not the obvious ones. `peak >= 0.999` counts
+        # every grazed sample as clipping - on this project's own corpus it flags 96 of 163 clips,
+        # while a flat-top run count shows 77 actually saturated and 19 merely touching full
+        # scale, a real difference because the harmonic splatter comes from the flat top. And
+        # `sample_rate < 48000` cannot see a container filled from a lower rate: `sf.info`
+        # reports the container, so a 16 kHz recording resampled up reads as clean 48 kHz.
+        # Measured bandwidth is what answers that, and only measured bandwidth does.
         for issue in measured.get("quality_issues", ()):
             problems.append({"clip": clip.name, "issue": issue})
         if "quality_error" in measured:

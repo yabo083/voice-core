@@ -237,20 +237,18 @@ def _silence_and_speech(mono: np.ndarray, sample_rate: int) -> tuple[float, floa
 def _bandwidth_hz(mono: np.ndarray, sample_rate: int, drop_db: float = 50.0) -> float | None:
     """Highest frequency still carrying signal: the audio's real bandwidth.
 
-    This replaces a 95%-energy spectral rolloff, which was the wrong tool and produced a wrong
-    conclusion before it was caught. Rolloff measures where energy is CONCENTRATED, and speech
-    energy concentrates in the fundamental and the low formants, so studio audio reported 3.6 kHz
-    while a website re-encode of the same kind of material reported 5.0 kHz - an impossible
-    ordering, which is what exposed it.
+    Bandwidth, not a 95%-energy spectral rolloff: rolloff finds where energy is CONCENTRATED, and
+    speech energy concentrates in the fundamental and the low formants, so it reports ~4 kHz for
+    full-band studio speech and ranks a brighter, louder recording ABOVE a quieter wide-band one.
+    It cannot answer "is the high band present", so do not substitute it here.
 
-    This one is calibrated. Ground truth was built by resampling a real clip down to a known rate
-    and back up, so the true cutoff is known, and measured on two unrelated sources:
+    Calibrated against ground truth built by resampling real clips to a known rate and back, so
+    the true cutoff is known, on two unrelated sources:
 
         forced cutoff   4 kHz  ->  reported 4.4 / 4.5 kHz
         forced cutoff   8 kHz  ->  reported 8.7 / 8.9 kHz
         forced cutoff  16 kHz  ->  reported 16.7 / 15.2 kHz
         untouched studio audio ->  reported 17.2 kHz
-        untouched web re-encode->  reported 15.3 kHz
 
     Method: average the power spectrum over speech frames only (a pause's spectrum is low-level
     noise and would drag the average down), then take the highest frequency whose average power

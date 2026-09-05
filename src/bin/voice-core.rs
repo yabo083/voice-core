@@ -3,8 +3,8 @@
 //! the runtime's reported presenter count rather than probing another
 //! frontend's port, which is how v1 guessed.
 
-use std::path::PathBuf;
-use std::time::Duration;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -53,12 +53,16 @@ enum Command {
         /// Segment alignment between `--display` and `--text`, as JSON:
         /// `[{"base":"欢迎回来","ruby":"おかえりなさい"}]`. A presenter renders these
         /// directly instead of guessing which fragment means which; `@path.json` reads
-        /// the array from a file. Optional.
+        /// the array from a file and `-` reads it from stdin. Optional.
         #[arg(long)]
         ruby_pairs: Option<String>,
         /// Voice pack id, see `voice-core voices`.
         #[arg(long)]
         voice: Option<String>,
+        /// What language `--text` is in (`ja`, `zh-CN`). Refused when the pack does not
+        /// declare it; omit it to speak whatever the text is.
+        #[arg(long)]
+        language: Option<String>,
         #[arg(long)]
         seed: Option<u64>,
         #[arg(long)]
@@ -72,6 +76,14 @@ enum Command {
         /// Keep the WAV at this path instead of a temporary file.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Return only once a frontend reports that the audio finished playing, instead
+        /// of as soon as it exists. This is how consecutive lines stay in order without
+        /// guessing a sleep; it works whether the presenter or this process played.
+        #[arg(long)]
+        wait: bool,
+        /// Whole budget for `--wait`, in ms. Defaults to the clip's `durationMs` + 5000.
+        #[arg(long, requires = "wait")]
+        wait_timeout_ms: Option<u64>,
     },
     /// List installed voice packs.
     Voices,
@@ -103,13 +115,17 @@ async fn main() -> Result<()> {
             display,
             ruby_pairs,
             voice,
+            language,
             seed,
             steps,
             display_seconds,
             timeout_ms,
             play,
             out,
+            wait,
+            wait_timeout_ms,
         } => {
+            let began = Instant::now();
             let token = resolve_token(&cli.token, &cli.data_dir)?;
             let mut body = serde_json::json!({ "text": text });
             if let Some(display) = &display {
@@ -120,6 +136,9 @@ async fn main() -> Result<()> {
             }
             if let Some(voice) = &voice {
                 body["voicePackId"] = Value::String(voice.clone());
+            }
+            if let Some(language) = &language {
+                body["language"] = Value::String(language.clone());
             }
             if let Some(seed) = seed {
                 body["seed"] = serde_json::json!(seed);
@@ -134,6 +153,14 @@ async fn main() -> Result<()> {
                 body["timeoutMs"] = serde_json::json!(ms);
             }
 
+            // Subscribed BEFORE the request: a playback report that lands between the
+            // reply and the wait must not be missed. It also makes this process a
+            // presenter, which is why `--play auto` below discounts one subscriber.
+            let mut events = match wait {
+                true => Some(EventStream::open(&http, &base, &token).await?),
+                false => None,
+            };
+
             let response = http
                 .post(format!("{base}/api/speak"))
                 .header(AUTHORIZATION, format!("Bearer {token}"))
@@ -146,53 +173,80 @@ async fn main() -> Result<()> {
             let result = decode(response).await?;
 
             let audio_id = result["audioId"].as_str().unwrap_or_default().to_string();
-            let presenters = result["presenters"].as_u64().unwrap_or(0);
+            // `presenters` counts every event-stream subscriber, this process included
+            // when it is waiting. What `--play auto` has to know is whether anybody ELSE
+            // is listening, and that is the number worth printing too.
+            let others = result["presenters"]
+                .as_u64()
+                .unwrap_or(0)
+                .saturating_sub(u64::from(events.is_some()));
             println!(
                 "{}",
                 result["displayText"].as_str().unwrap_or(text.as_str())
             );
-            eprintln!(
-                "request {} | {} ms total ({} ms synth{}) | {} presenter(s)",
-                result["requestId"].as_str().unwrap_or("?"),
-                result["totalMs"].as_u64().unwrap_or(0),
-                result["synthMs"].as_u64().unwrap_or(0),
-                if result["coldStart"].as_bool().unwrap_or(false) {
-                    ", cold start"
-                } else {
-                    ""
-                },
-                presenters
-            );
+            // Without `--wait` the runtime's own total is the whole story. With it, the
+            // number a caller cares about is not known until the audio has been heard.
+            if events.is_none() {
+                let total_ms = result["totalMs"].as_u64().unwrap_or(0);
+                eprintln!("{}", summary(&result, total_ms, others));
+            }
 
             let should_play = match play {
                 PlayMode::Never => false,
                 PlayMode::Always => true,
-                PlayMode::Auto => presenters == 0,
+                PlayMode::Auto => others == 0,
             };
-            if !should_play && out.is_none() {
-                return Ok(());
+            if should_play || out.is_some() {
+                let bytes = http
+                    .get(format!("{base}/api/audio/{audio_id}"))
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .timeout(Duration::from_secs(60))
+                    .send()
+                    .await
+                    .context("cannot fetch audio")?
+                    .bytes()
+                    .await
+                    .context("cannot read audio body")?;
+                let path = match out {
+                    Some(path) => path,
+                    None => std::env::temp_dir().join(format!("voice-core-{audio_id}.wav")),
+                };
+                std::fs::write(&path, &bytes)
+                    .with_context(|| format!("cannot write {}", path.display()))?;
+                if should_play {
+                    play_reported(&http, &base, &token, &audio_id, &path).await?;
+                } else {
+                    println!("{}", path.display());
+                }
             }
 
-            let bytes = http
-                .get(format!("{base}/api/audio/{audio_id}"))
-                .header(AUTHORIZATION, format!("Bearer {token}"))
-                .timeout(Duration::from_secs(60))
-                .send()
-                .await
-                .context("cannot fetch audio")?
-                .bytes()
-                .await
-                .context("cannot read audio body")?;
-            let path = match out {
-                Some(path) => path,
-                None => std::env::temp_dir().join(format!("voice-core-{audio_id}.wav")),
-            };
-            std::fs::write(&path, &bytes)
-                .with_context(|| format!("cannot write {}", path.display()))?;
-            if should_play {
-                play_wav(&path)?;
-            } else {
-                println!("{}", path.display());
+            if let Some(events) = events.as_mut() {
+                // `durationMs` plus enough for a presenter to fetch the bytes and open the
+                // device. Short enough that a frontend which never plays is a failure
+                // rather than a hang, and overridable for a machine where it is not.
+                let budget = Duration::from_millis(
+                    wait_timeout_ms
+                        .unwrap_or_else(|| result["durationMs"].as_u64().unwrap_or(0) + 5_000),
+                );
+                let closure = wait_for_playback(events, &audio_id, budget).await?;
+                eprintln!(
+                    "{}",
+                    summary(&result, began.elapsed().as_millis() as u64, others)
+                );
+                if !closure.finished {
+                    bail!(
+                        "--wait: nothing reported audio {audio_id} finished playing within \
+                         {} ms; {}",
+                        budget.as_millis(),
+                        match closure.started_by {
+                            Some(by) =>
+                                format!("{by} reported starting it but never reported the end"),
+                            None => "no frontend reported playing it at all: start the \
+                                     presenter, or pass --play always to play it here"
+                                .to_string(),
+                        }
+                    );
+                }
             }
         }
         Command::Voices => {
@@ -287,29 +341,197 @@ async fn decode(response: reqwest::Response) -> Result<Value> {
     }
 }
 
-async fn follow_events(http: &reqwest::Client, base: &str, token: &str) -> Result<()> {
-    let mut response = http
-        .get(format!("{base}/api/events"))
-        .header(AUTHORIZATION, format!("Bearer {token}"))
-        .send()
-        .await
-        .context("runtime unreachable")?;
-    if !response.status().is_success() {
-        return decode(response).await.map(|_| ());
+/// The one line this CLI prints about a call.
+///
+/// `total_ms` is the runtime's own end-to-end number, or this process's wall clock
+/// under `--wait` — which is the number a caller reading three paragraphs in order
+/// actually spends, because it includes the playback.
+fn summary(result: &Value, total_ms: u64, presenters: u64) -> String {
+    format!(
+        "request {} | {total_ms} ms total ({} ms synth{}) | {presenters} presenter(s)",
+        result["requestId"].as_str().unwrap_or("?"),
+        result["synthMs"].as_u64().unwrap_or(0),
+        if result["coldStart"].as_bool().unwrap_or(false) {
+            ", cold start"
+        } else {
+            ""
+        },
+    )
+}
+
+/// The runtime's event stream, one `data:` payload at a time. `voice-core events`
+/// prints them and `speak --wait` matches them; while this lives, the runtime counts
+/// this process as a presenter.
+struct EventStream {
+    response: reqwest::Response,
+    buffer: String,
+}
+
+impl EventStream {
+    async fn open(http: &reqwest::Client, base: &str, token: &str) -> Result<Self> {
+        let response = http
+            .get(format!("{base}/api/events"))
+            .header(AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .context("runtime unreachable")?;
+        let status = response.status();
+        if !status.is_success() {
+            // A refused stream is never usable, and its body carries the real reason.
+            return Err(decode(response)
+                .await
+                .err()
+                .unwrap_or_else(|| anyhow::anyhow!("event stream refused: HTTP {status}")));
+        }
+        Ok(Self {
+            response,
+            buffer: String::new(),
+        })
     }
-    let mut buffer = String::new();
-    while let Some(chunk) = response.chunk().await.context("event stream broke")? {
-        buffer.push_str(&String::from_utf8_lossy(&chunk));
-        while let Some(index) = buffer.find("\n\n") {
-            let frame: String = buffer.drain(..index + 2).collect();
-            for line in frame.lines() {
-                if let Some(payload) = line.strip_prefix("data:") {
-                    println!("{}", payload.trim());
-                }
+
+    /// Next payload verbatim, or `None` when the stream ended. Verbatim because
+    /// `voice-core events` prints it, and re-serializing a parsed envelope would
+    /// reorder the runtime's own fields.
+    ///
+    /// Unbounded on purpose: the caller owns the deadline, because only the caller
+    /// knows what it is waiting for.
+    async fn next(&mut self) -> Result<Option<String>> {
+        loop {
+            if let Some(payload) = self.take_frame() {
+                return Ok(Some(payload));
             }
+            let Some(chunk) = self.response.chunk().await.context("event stream broke")? else {
+                return Ok(None);
+            };
+            self.buffer.push_str(&String::from_utf8_lossy(&chunk));
         }
     }
+
+    /// One complete frame out of the buffer. SSE frames end with a blank line, so a
+    /// partial one has to stay buffered; a keep-alive frame carries no `data:` line.
+    fn take_frame(&mut self) -> Option<String> {
+        while let Some(index) = self.buffer.find("\n\n") {
+            let frame: String = self.buffer.drain(..index + 2).collect();
+            if let Some(payload) = frame.lines().find_map(|line| line.strip_prefix("data:")) {
+                return Some(payload.trim().to_string());
+            }
+        }
+        None
+    }
+}
+
+async fn follow_events(http: &reqwest::Client, base: &str, token: &str) -> Result<()> {
+    let mut events = EventStream::open(http, base, token).await?;
+    while let Some(payload) = events.next().await? {
+        println!("{payload}");
+    }
     Ok(())
+}
+
+/// What the wait observed. Reported even when the budget ran out, because "started but
+/// never finished" and "nobody ever played it" need different fixes.
+#[derive(Default)]
+struct Closure {
+    started_by: Option<String>,
+    finished: bool,
+}
+
+/// Waits for whoever played the audio to say it is over.
+///
+/// The reporter can be the tray presenter or this very process, and a caller must not
+/// have to know which: both publish `playbackFinished` for the same `audioId`, so the
+/// wait is one piece of code either way.
+async fn wait_for_playback(
+    events: &mut EventStream,
+    audio_id: &str,
+    budget: Duration,
+) -> Result<Closure> {
+    let mut seen = Closure::default();
+    // A broken stream is a real failure worth reporting; a spent budget is the caller's
+    // to report, since it knows what it was waiting for.
+    if let Ok(result) = tokio::time::timeout(budget, watch_playback(events, audio_id, &mut seen)).await
+    {
+        result?;
+    }
+    Ok(seen)
+}
+
+async fn watch_playback(
+    events: &mut EventStream,
+    audio_id: &str,
+    seen: &mut Closure,
+) -> Result<()> {
+    while let Some(payload) = events.next().await? {
+        let Ok(event) = serde_json::from_str::<Value>(&payload) else {
+            continue;
+        };
+        if event["audioId"].as_str() != Some(audio_id) {
+            continue;
+        }
+        match event["kind"].as_str() {
+            Some("playbackStarted") => {
+                seen.started_by = event["by"].as_str().map(str::to_string);
+            }
+            Some("playbackFinished") => {
+                seen.finished = true;
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+    // The stream ended without closure. The caller says so; there is nothing to retry.
+    Ok(())
+}
+
+/// Plays the clip and tells the runtime both ends of it, so `--wait` — here or in
+/// another process — closes on this playback exactly as it does on the presenter's.
+async fn play_reported(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    audio_id: &str,
+    path: &Path,
+) -> Result<()> {
+    if !PLAYS_AUDIO {
+        // Nothing was played, so there is nothing to report.
+        return play_wav(path).map(|_| ());
+    }
+    report_played(http, base, token, audio_id, "started", None).await?;
+    let played = play_wav(path)?;
+    report_played(
+        http,
+        base,
+        token,
+        audio_id,
+        "finished",
+        Some(played.as_millis() as u64),
+    )
+    .await
+}
+
+/// One playback fact into the event stream. The runtime cannot observe an audio device
+/// it does not own, so the frontend that played says so itself.
+async fn report_played(
+    http: &reqwest::Client,
+    base: &str,
+    token: &str,
+    audio_id: &str,
+    event: &str,
+    played_ms: Option<u64>,
+) -> Result<()> {
+    let mut body = serde_json::json!({ "audioId": audio_id, "event": event, "by": "cli" });
+    if let Some(ms) = played_ms {
+        body["playedMs"] = serde_json::json!(ms);
+    }
+    let response = http
+        .post(format!("{base}/api/played"))
+        .header(AUTHORIZATION, format!("Bearer {token}"))
+        .json(&body)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("cannot report playback to the runtime")?;
+    decode(response).await.map(|_| ())
 }
 
 async fn doctor(http: &reqwest::Client, base: &str, cli: &Cli) -> Result<()> {
@@ -417,13 +639,19 @@ fn resolve_token(explicit: &Option<String>, data_dir: &Option<PathBuf>) -> Resul
     )
 }
 
-/// Read the alignment array from inline JSON or, with a leading `@`, from a file. It is
-/// validated here rather than forwarded blindly: a malformed array is a caller bug worth
-/// a message, not a silently ignored field.
+/// Read the alignment array from inline JSON, from a file with a leading `@`, or from
+/// stdin with `-`. It is validated here rather than forwarded blindly: a malformed
+/// array is a caller bug worth a message, not a silently ignored field.
+///
+/// `-` exists because of Windows quoting: a JSON array full of quotes and CJK survives
+/// a pipe intact, while the same array on a PowerShell 5.1 command line often does not.
 fn parse_ruby_pairs(spec: &str) -> Result<Value> {
     let raw = match spec.strip_prefix('@') {
         Some(path) => std::fs::read_to_string(path)
             .with_context(|| format!("cannot read ruby pairs from {path}"))?,
+        None if spec == "-" => {
+            std::io::read_to_string(std::io::stdin()).context("cannot read ruby pairs from stdin")?
+        }
         None => spec.to_string(),
     };
 
@@ -444,10 +672,21 @@ fn parse_ruby_pairs(spec: &str) -> Result<Value> {
     Ok(parsed)
 }
 
+/// Whether this build has a real player. The playback reports must not claim a device
+/// that does not exist, and `--wait` must not close on a no-op.
 #[cfg(windows)]
-fn play_wav(path: &std::path::Path) -> Result<()> {
+const PLAYS_AUDIO: bool = true;
+#[cfg(not(windows))]
+const PLAYS_AUDIO: bool = false;
+
+/// Plays the clip and returns how long that took. The measurement is what the runtime
+/// is told (`playedMs`), so it has to be the real thing rather than the clip's own
+/// stated length.
+#[cfg(windows)]
+fn play_wav(path: &Path) -> Result<Duration> {
     let escaped = path.display().to_string().replace('\'', "''");
     let script = format!("(New-Object Media.SoundPlayer '{escaped}').PlaySync()");
+    let began = Instant::now();
     let status = std::process::Command::new("powershell")
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .status()
@@ -455,14 +694,14 @@ fn play_wav(path: &std::path::Path) -> Result<()> {
     if !status.success() {
         bail!("playback failed; the wav is at {}", path.display());
     }
-    Ok(())
+    Ok(began.elapsed())
 }
 
 #[cfg(not(windows))]
-fn play_wav(path: &std::path::Path) -> Result<()> {
+fn play_wav(path: &Path) -> Result<Duration> {
     // Honest limitation rather than a silent no-op: the only playback backend
     // implemented so far is the Windows one.
     println!("{}", path.display());
     eprintln!("playback is not implemented on this platform; the wav path is above");
-    Ok(())
+    Ok(Duration::ZERO)
 }

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -33,6 +34,20 @@ import _engine  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 UPSTREAM = "train.py"
+# This step's name in the progress protocol (`scripts/training/_layout.py`).
+STAGE = "train"
+
+# The three lines of upstream's output a caller can act on. `train.py` has no JSON mode:
+# it draws a tqdm bar on stderr, prints one metrics line every `log_every` steps, and
+# prints these two as they happen. Matched here, next to the process that writes them,
+# because a reader further away would be parsing a bar it can no longer see the shape of.
+LOSS = re.compile(r"\bloss=(?P<loss>[-\d.]+(?:[eE][-+]?\d+)?)")
+VALID = re.compile(r"^valid step=(?P<step>\d+)\s+loss=(?P<loss>[-\d.]+(?:[eE][-+]?\d+)?)")
+SAVED = re.compile(
+    r"^saved best val checkpoint:\s+(?P<name>\S+)(?:\s+\(loss=(?P<loss>[-\d.]+)\))?"
+)
+# `checkpoint_best_val_loss_0000500_0.906366` -> 500.
+CKPT_STEP = re.compile(r"_(\d{4,})_")
 
 # Windows spawns a fresh interpreter per DataLoader worker and each one re-imports torch:
 # ~700 MB resident, and persistent workers keep it for the whole run. Measured on a 32 GB
@@ -192,9 +207,90 @@ def main() -> None:
         "--check", action="store_true", help="Resolve and print everything, launch nothing."
     )
     parser.add_argument("passthrough", nargs="*", help=argparse.SUPPRESS)
+    _engine.add_json_flag(parser)
     _engine.add_engine_args(parser)
     args = parser.parse_args()
+    if args.json:
+        _engine.json_mode()
+    _engine.guard(STAGE, lambda: launch(args))
 
+
+def relay(seen: dict):
+    """Upstream's training output, as protocol events.
+
+    A bar refresh is re-emitted only when the step number or the loss actually moved:
+    tqdm redraws on a timer, up to ten times per step at 2 s/step, and an event per redraw
+    is an hour of events nobody reads. Both halves of that key matter - tqdm sets its
+    postfix once per `log_every` steps, so the first bar of a step often carries the
+    PREVIOUS loss, or none at all, and the line that adds it does not advance the step.
+
+    Bar lines stay out of the transcript for the same reason: the metrics line every
+    `log_every` steps says the same thing once, and a traceback must not be buried under
+    two thousand redraws.
+    """
+
+    def on_line(line: str) -> None:
+        text = line.strip()
+        if not text:
+            return
+
+        bar = _engine.parse_bar(text)
+        if bar is not None:
+            seen["total"] = bar["total"]
+            loss = LOSS.search(text)
+            loss = None if loss is None else loss["loss"]
+            if (bar["done"], loss) == seen["bar"]:
+                return
+            seen["bar"] = (bar["done"], loss)
+            seen["done"] = bar["done"]
+            detail = "" if loss is None else f"   loss {loss}"
+            _engine.emit(
+                STAGE,
+                "progress",
+                f"step {bar['done']}/{bar['total']}{detail}   {bar['rate']}   ETA {bar['eta']}",
+                done=bar["done"],
+                total=bar["total"],
+            )
+            return
+
+        print(text)
+        valid = VALID.match(text)
+        if valid is not None:
+            seen["val"] = valid["loss"]
+            _engine.emit(
+                STAGE,
+                "progress",
+                f"validation at step {valid['step']}: val loss {valid['loss']}",
+                done=int(valid["step"]),
+                total=seen["total"],
+            )
+            return
+
+        saved = SAVED.match(text)
+        if saved is not None:
+            seen["checkpoint"] = saved["name"]
+            step = CKPT_STEP.search(saved["name"])
+            loss = saved["loss"] or seen["val"] or "?"
+            # The name carries the loss, so the summary at the end has a number even when the
+            # `valid step=` line that produced it scrolled past before this run was watched.
+            if loss != "?":
+                seen["val"] = loss
+            _engine.emit(
+                STAGE,
+                "progress",
+                f"best checkpoint so far: {saved['name']} (val loss {loss})",
+                done=int(step[1]) if step is not None else seen["done"],
+                total=seen["total"],
+                checkpoint=saved["name"],
+            )
+            return
+
+        _engine.emit(STAGE, "log", text)
+
+    return on_line
+
+
+def launch(args: argparse.Namespace) -> None:
     engine = _engine.resolve_engine(args)
     engine.require_tree()
 
@@ -208,7 +304,11 @@ def main() -> None:
         else engine.checkpoint()
     )
     if not checkpoint.is_file():
-        raise SystemExit(f"--init-checkpoint is not a file: {checkpoint}")
+        raise SystemExit(
+            f"--init-checkpoint is not a file: {checkpoint}\n"
+            "  LoRA refuses to start without base weights; provision them first "
+            "(scripts/bootstrap.ps1 -Only models) or pass --init-checkpoint"
+        )
 
     argv = [
         "--config",
@@ -222,6 +322,7 @@ def main() -> None:
         *[item for item in args.passthrough if item != "--"],
     ]
 
+    train_cfg = load_train_section(config)
     print(engine.describe())
     print(f"  trainer       {engine.upstream / UPSTREAM}")
     print(f"  config        {config}")
@@ -231,18 +332,60 @@ def main() -> None:
     )
     print(f"  checkpoint    {checkpoint}")
     print(f"  output        {output_dir}")
-    for line in summarise(load_train_section(config), rows, output_dir):
+    for line in summarise(train_cfg, rows, output_dir):
         print(line)
     print("command:")
     print("  " + engine.command_line(UPSTREAM, argv))
+
+    steps = int(train_cfg.get("max_steps") or 0) or None
+    batch = int(train_cfg.get("batch_size") or 0) or None
     if args.check:
+        _engine.emit(
+            STAGE,
+            "ok",
+            f"check ok: {rows} row(s), {steps or '?'} step(s) at batch {batch or '?'}, "
+            "nothing was launched",
+        )
         return
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    log = args.log.expanduser() if args.log else None
-    if log is not None:
-        print(f"output -> {log}")
-    raise SystemExit(engine.run_upstream(UPSTREAM, argv, log=log))
+    if not _engine.json_enabled():
+        log = args.log.expanduser() if args.log else None
+        if log is not None:
+            print(f"output -> {log}")
+        raise SystemExit(engine.run_upstream(UPSTREAM, argv, log=log))
+
+    _engine.emit(
+        STAGE,
+        "start",
+        f"{steps or '?'} steps at batch {batch or '?'} over {rows} row(s) -> {output_dir}",
+    )
+    # `bar` is the dedupe key for tqdm redraws; the rest is what the `ok` event reports.
+    seen = {"total": steps, "done": -1, "bar": None, "checkpoint": None, "val": None}
+    status = engine.stream_upstream(UPSTREAM, argv, on_line=relay(seen))
+    if status != 0:
+        raise SystemExit(
+            f"{UPSTREAM} exited {status}\n"
+            "  its own traceback is in this step's log; a CUDA out-of-memory here means "
+            "batch_size is too high for this card or something else is holding the GPU"
+        )
+    if seen["checkpoint"] is None:
+        # No best-val checkpoint means no way to choose one, which is a finished run that
+        # produced nothing selectable.
+        raise SystemExit(
+            "the trainer finished without saving a best-validation checkpoint\n"
+            "  valid_ratio must be above 0 for best-checkpoint selection, and the run must "
+            "reach at least one valid_every boundary"
+        )
+    _engine.emit(
+        STAGE,
+        "ok",
+        f"{seen['done']} step(s) done; best checkpoint {seen['checkpoint']} "
+        f"(val loss {seen['val'] or '?'})",
+        done=seen["done"],
+        total=seen["total"],
+        checkpoint=seen["checkpoint"],
+    )
 
 
 if __name__ == "__main__":

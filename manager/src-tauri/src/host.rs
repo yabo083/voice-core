@@ -8,8 +8,8 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::detect::Probe;
+use crate::jsonstream::StreamRun;
 use crate::layout;
-use crate::provision::ProvisionRun;
 use crate::supervise::Stack;
 
 pub struct Host {
@@ -21,7 +21,12 @@ pub struct Host {
     pub base_url: String,
     pub http: reqwest::Client,
     pub stack: Mutex<Stack>,
-    pub provision: Mutex<ProvisionRun>,
+    /// The bootstrap run, and the LoRA training run. Two slots rather than one: they own
+    /// different directories, they are cancelled by different buttons, and training a
+    /// voice while an engine is being provisioned is a thing to refuse per slot, not a
+    /// thing to serialise globally.
+    pub provision: Mutex<StreamRun>,
+    pub training: Mutex<StreamRun>,
     /// Importing torch costs about 3 s and the whole interpreter probe about 5 s
     /// cold, which is too slow to repeat on every `detect()`. The answer is kept
     /// for the process lifetime and dropped when a provision run ends — the only
@@ -48,7 +53,8 @@ impl Host {
                 .build()
                 .unwrap_or_else(|_| reqwest::Client::new()),
             stack: Mutex::new(Stack::default()),
-            provision: Mutex::new(ProvisionRun::default()),
+            provision: Mutex::new(StreamRun::default()),
+            training: Mutex::new(StreamRun::default()),
             probe: Mutex::new(None),
         }
     }

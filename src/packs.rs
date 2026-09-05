@@ -19,6 +19,7 @@
 //! reloads itself when the file's mtime changes rather than demanding a restart, and it
 //! is parsed as JSONC because a human wrote it. Manifests are read the same way.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -90,6 +91,40 @@ fn native(path: &Path) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// Which file decided one effective field. Serialized as `pack` | `config` | `derived`,
+/// which is what a settings screen puts next to the value it shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Source {
+    Pack,
+    Config,
+    Derived,
+}
+
+/// One field of the merge, plus the record of who won it.
+///
+/// The record is produced by the same expression that produces the value - this is
+/// `Option::or` with a note taken - because a second pass that re-compares the two
+/// inputs afterwards is a second implementation of the precedence, and the panel exists
+/// precisely so nobody has to trust one of those.
+///
+/// `None` out means neither file spoke, so whatever `hydrate` falls back to is derived:
+/// the id, the payload on disk, an empty list, or the program's own behaviour.
+fn pick<T>(
+    sources: &mut BTreeMap<String, Source>,
+    key: &str,
+    from_pack: Option<T>,
+    from_config: Option<T>,
+) -> Option<T> {
+    let (value, source) = match (from_pack, from_config) {
+        (Some(value), _) => (Some(value), Source::Pack),
+        (None, Some(value)) => (Some(value), Source::Config),
+        (None, None) => (None, Source::Derived),
+    };
+    sources.insert(key.to_string(), source);
+    value
+}
+
 /// A pack as everything downstream sees it: the registry entry and the pack's own
 /// manifest already merged, every field concrete, `avatar` already absolute.
 ///
@@ -123,6 +158,9 @@ pub struct VoicePack {
     /// show it; nothing depends on it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manifest: Option<String>,
+    /// Which file decided each effective field, for a settings screen that must not lie.
+    /// Keys are the camelCase wire names; values are `pack` | `config` | `derived`.
+    pub sources: BTreeMap<String, Source>,
 }
 
 /// A `voicePacks` entry exactly as `config.json` holds it: a pointer, plus whatever the
@@ -444,24 +482,45 @@ impl Registry {
         let (manifest, manifest_path) = Manifest::beside(&path);
         let m = manifest.unwrap_or_default();
 
-        let name = m.name.or(entry.name).unwrap_or_else(|| entry.id.clone());
-        let kind = m.kind.or(entry.kind).unwrap_or_else(|| PackKind::infer(&path));
-        let languages = m.languages.or(entry.languages).unwrap_or_default();
+        let mut sources = BTreeMap::new();
+        let name =
+            pick(&mut sources, "name", m.name, entry.name).unwrap_or_else(|| entry.id.clone());
+        let kind = pick(&mut sources, "kind", m.kind, entry.kind)
+            .unwrap_or_else(|| PackKind::infer(&path));
+        let languages =
+            pick(&mut sources, "languages", m.languages, entry.languages).unwrap_or_default();
+        let engine = pick(&mut sources, "engine", m.engine, entry.engine).unwrap_or_default();
+        let character = pick(&mut sources, "character", m.character, entry.character);
+        let dialog = pick(&mut sources, "dialog", m.dialog, entry.dialog);
+        let synthesis = pick(&mut sources, "synthesis", m.synthesis, entry.synthesis);
+        // Where a pack lives is the one thing the registry is authoritative about, so
+        // there is nothing to pick between: an entry without a path never deserialized.
+        sources.insert("path".to_string(), Source::Config);
 
         // Two different bases, which is why this is resolved here and not downstream: a
         // manifest avatar is relative to the pack, a registry avatar is relative to the
         // data dir (that is where the retired `data/avatars/` layout put it).
-        let avatar = match m.avatar.as_deref() {
-            Some(value) => {
+        //
+        // It is also the one field decided in two steps, and the record follows both: a
+        // pack that names a portrait it did not ship has no effective avatar, and calling
+        // that `pack` would send someone to a manifest line the runtime threw away.
+        let avatar = match (m.avatar.as_deref(), entry.avatar.as_deref()) {
+            (Some(value), _) => {
                 let base = if path.is_dir() {
                     path.clone()
                 } else {
                     path.parent().map(Path::to_path_buf).unwrap_or_else(|| path.clone())
                 };
-                Some(absolute(&base, value))
+                Some((absolute(&base, value), Source::Pack))
             }
-            None => entry.avatar.as_deref().map(|value| absolute(&self.data_dir, value)),
-        };
+            (None, Some(value)) => Some((absolute(&self.data_dir, value), Source::Config)),
+            (None, None) => None,
+        }
+        .filter(|(shown, _)| Path::new(shown).exists());
+        sources.insert(
+            "avatar".to_string(),
+            avatar.as_ref().map_or(Source::Derived, |(_, source)| *source),
+        );
 
         VoicePack {
             id: entry.id,
@@ -469,19 +528,21 @@ impl Registry {
             languages,
             kind,
             path: native(&path),
-            engine: m.engine.or(entry.engine).unwrap_or_default(),
-            character: m.character.or(entry.character),
-            avatar: avatar.filter(|p| Path::new(p).exists()),
-            dialog: m.dialog.or(entry.dialog),
-            synthesis: m.synthesis.or(entry.synthesis),
+            engine,
+            character,
+            avatar: avatar.map(|(shown, _)| shown),
+            dialog,
+            synthesis,
             manifest: manifest_path,
+            sources,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{PackKind, Registry};
+    use super::{PackKind, Registry, Source};
+    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
     /// A private data dir under the OS temp dir. Named after the case so a leftover from a
@@ -496,6 +557,13 @@ mod tests {
 
     fn write(path: &Path, body: &str) {
         std::fs::write(path, body).unwrap();
+    }
+
+    /// The expected provenance map, spelled one line per field. The array length is fixed
+    /// on purpose: a field that quietly stopped being recorded would render as a blank row
+    /// in the settings screen, and here it is a compile error instead.
+    fn expect_sources(pairs: [(&str, Source); 9]) -> BTreeMap<String, Source> {
+        pairs.into_iter().map(|(key, source)| (key.to_string(), source)).collect()
     }
 
     #[test]
@@ -534,6 +602,21 @@ mod tests {
         );
         // Nobody stated a kind; the payload on disk decides.
         assert_eq!(pack.kind, PackKind::LoraAdapter);
+        // Four fields the pack decided, two the entry did, three no file mentioned.
+        assert_eq!(
+            pack.sources,
+            expect_sources([
+                ("avatar", Source::Pack),
+                ("character", Source::Pack),
+                ("dialog", Source::Derived),
+                ("engine", Source::Config),
+                ("kind", Source::Derived),
+                ("languages", Source::Pack),
+                ("name", Source::Pack),
+                ("path", Source::Config),
+                ("synthesis", Source::Derived),
+            ])
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -594,6 +677,13 @@ mod tests {
         assert_eq!(pack.avatar, None);
         // No file says a language, so none is invented.
         assert!(pack.languages.is_empty());
+        // Asserted as JSON rather than as the enum because the wire words are what the
+        // panel puts in a chip: only `path` and the one field the entry states come from
+        // `config`, and nothing at all comes from a pack that wrote no manifest.
+        assert_eq!(
+            serde_json::to_string(&pack.sources).unwrap(),
+            r#"{"avatar":"derived","character":"derived","dialog":"derived","engine":"derived","kind":"derived","languages":"derived","name":"config","path":"config","synthesis":"derived"}"#
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -619,6 +709,23 @@ mod tests {
         assert_eq!(pack.character.as_deref(), Some("幼年瞬"));
         // Neither file names it, so the id is the name.
         assert_eq!(pack.name, "p");
+        // `avatar` is the case worth pinning: the manifest named a portrait, the file is
+        // not there, so the effective value is the built-in fallback and the record says
+        // `derived` instead of pointing at a manifest line the runtime discarded.
+        assert_eq!(
+            pack.sources,
+            expect_sources([
+                ("avatar", Source::Derived),
+                ("character", Source::Pack),
+                ("dialog", Source::Derived),
+                ("engine", Source::Derived),
+                ("kind", Source::Derived),
+                ("languages", Source::Derived),
+                ("name", Source::Derived),
+                ("path", Source::Config),
+                ("synthesis", Source::Derived),
+            ])
+        );
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

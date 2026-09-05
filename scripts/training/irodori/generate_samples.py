@@ -46,6 +46,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import _engine  # noqa: E402
 
+# This step's name in the progress protocol (`scripts/training/_layout.py`).
+STAGE = "samples"
+
 # Neutral Japanese, because this backend's text encoder is Japanese. Three shapes -
 # greeting, short declarative, longer polite - so a checkpoint that only sounds right on
 # one sentence length is visible. Override with --texts-file.
@@ -144,9 +147,15 @@ def main() -> None:
     parser.add_argument(
         "--precision", default="bf16", choices=["bf16", "fp32"], help="Model and codec precision."
     )
+    _engine.add_json_flag(parser)
     _engine.add_engine_args(parser)
     args = parser.parse_args()
+    if args.json:
+        _engine.json_mode()
+    _engine.guard(STAGE, lambda: generate(args))
 
+
+def generate(args: argparse.Namespace) -> None:
     engine = _engine.resolve_engine(args)
     engine.require_own_interpreter()
     checkpoint = engine.checkpoint()
@@ -166,6 +175,16 @@ def main() -> None:
     print(f"checkpoint {checkpoint}")
     print(f"conditions {', '.join(label for label, _ in conditions)}")
     print(f"texts      {len(texts)}   seed {args.seed}   steps {args.steps}")
+    total = len(conditions) * len(texts)
+    _engine.emit(
+        STAGE,
+        "start",
+        f"{total} clip(s): {len(conditions)} condition(s) x {len(texts)} text(s), "
+        f"seed {args.seed}, {args.steps} steps",
+    )
+    # Worth its own line: loading the model is 14-23 s of a step whose first clip then
+    # takes two, and silence for twenty seconds reads as a hang.
+    _engine.emit(STAGE, "log", f"loading {checkpoint.name} onto {args.device}")
 
     started = time.perf_counter()
     runtime = InferenceRuntime.from_key(
@@ -177,7 +196,9 @@ def main() -> None:
             codec_precision=args.precision,
         )
     )
-    print(f"runtime    loaded in {time.perf_counter() - started:.1f}s")
+    loaded = time.perf_counter() - started
+    print(f"runtime    loaded in {loaded:.1f}s")
+    _engine.emit(STAGE, "log", f"model loaded in {loaded:.1f}s")
 
     manifest = {
         "checkpoint": str(checkpoint),
@@ -186,6 +207,7 @@ def main() -> None:
         "texts": texts,
         "items": [],
     }
+    done = 0
     for label, kwargs in conditions:
         for text_id, text in texts.items():
             request = SamplingRequest(
@@ -207,11 +229,27 @@ def main() -> None:
                 }
             )
             print(f"  {label}/{text_id}: {elapsed:.1f}s -> {path.name}", flush=True)
+            done += 1
+            _engine.emit(
+                STAGE,
+                "progress",
+                f"{label}/{text_id} in {elapsed:.1f}s",
+                done=done,
+                total=total,
+            )
 
     out = out_dir / "manifest.json"
     out.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"manifest   {out}")
     print(f"elapsed    {time.perf_counter() - started:.1f}s")
+    _engine.emit(
+        STAGE,
+        "ok",
+        f"{done} clip(s) from {len(conditions)} condition(s) in "
+        f"{time.perf_counter() - started:.1f}s -> {out_dir}",
+        done=done,
+        total=total,
+    )
 
 
 if __name__ == "__main__":

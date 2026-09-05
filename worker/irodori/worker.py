@@ -38,20 +38,24 @@ tees to data/logs/tts-worker.out.log:
 Booleans print as true/false, values containing a space are double-quoted, and every
 duration is milliseconds. The stage names are parsed by whoever measures the cold
 path, so they are API: boot.interpreter, boot.config, boot.imports, boot.device,
-boot.listening, model.load.start, model.load.done, model.load.failed,
-synthesize.done, model.unload.done. The last one goes to stderr, so the VRAM
-before/after pair lands next to whatever CUDA warning explains it.
+boot.listening, model.load.start, model.load.step, model.load.done,
+model.load.failed, synthesize.done, model.unload.done. model.load.step itemises the
+model load — the single biggest cost in the product, and until now one opaque number:
+`step=` names the sub-stage and the line carries the allocator's allocated/reserved
+pair at that instant.
 """
 from __future__ import annotations
 
 import argparse  # noqa: E402
+import functools  # noqa: E402
 import gc  # noqa: E402
+import inspect  # noqa: E402
 import os  # noqa: E402
 import sys  # noqa: E402
 import threading  # noqa: E402
 import time  # noqa: E402
 import traceback  # noqa: E402
-from contextlib import asynccontextmanager  # noqa: E402
+from contextlib import asynccontextmanager, contextmanager, nullcontext  # noqa: E402
 from pathlib import Path  # noqa: E402
 
 _T0 = time.perf_counter()
@@ -290,6 +294,151 @@ def _vram_mb() -> tuple[float, float] | None:
     return torch.cuda.memory_allocated() / 1048576.0, torch.cuda.memory_reserved() / 1048576.0
 
 
+def _vram_peak_mb() -> tuple[float, float] | None:
+    """(max allocated, max reserved) MiB since the last reset, or None without CUDA. The
+    transient peak is what decides whether a second GPU tenant fits, and it is invisible
+    in the steady-state numbers `_vram_mb` reports."""
+    if torch is None or not torch.cuda.is_available():
+        return None
+    return (
+        torch.cuda.max_memory_allocated() / 1048576.0,
+        torch.cuda.max_memory_reserved() / 1048576.0,
+    )
+
+
+_RANDOM_INIT = (
+    "uniform_",
+    "normal_",
+    "trunc_normal_",
+    "kaiming_uniform_",
+    "kaiming_normal_",
+    "xavier_uniform_",
+    "xavier_normal_",
+    "orthogonal_",
+    "sparse_",
+)
+"""The `torch.nn.init` entry points that fill a tensor with random numbers. Everything
+else there (`zeros_`, `ones_`, `constant_`, `eye_`) is cheap and deliberate, so it stays."""
+
+
+def _leave_uninitialised(tensor, *_args, **_kwargs):
+    return tensor
+
+
+@contextmanager
+def _no_wasted_init():
+    """Build the DiT without initialising weights the checkpoint replaces a moment later.
+
+    MEASURED on this box, one construction per process: `TextToLatentRFDiT.__init__` costs
+    13.29 s as shipped and 9.37 s with these no-ops — 3.9 s of RNG for 766M parameters, all
+    of them overwritten by `load_state_dict`. (The remaining 9 s is not initialisation at
+    all: it is transformers' lazy-import machinery resolving the ModernBERT backbone class,
+    which cannot be moved off a cold utterance's critical path from here — the first
+    request waits for the model either way.)
+
+    Safe as well as faster: the engine loads with torch's default `strict=True`, which
+    raises unless every parameter and every persistent buffer appears in the checkpoint, so
+    a checkpoint that would leave a tensor holding uninitialised memory fails the load
+    instead of producing sound. Verified against this checkpoint: "<All keys matched
+    successfully>", 714 tensors, no non-finite parameter afterwards, and the audio is
+    bitwise identical to the audio from before this change.
+
+    Non-persistent buffers are untouched by this: the two `_freqs_cis_cache` entries and
+    ModernBERT's `inv_freq` tables are computed, not sampled.
+
+    Scoped to that one constructor and no wider. The codec goes through
+    `audiotools.ml.BaseModel.load`, which loads with `strict=False`, so a key it failed to
+    match would silently keep whatever the constructor left behind — there, initialisation
+    is load-bearing.
+    """
+    init = torch.nn.init
+    saved = {name: getattr(init, name) for name in _RANDOM_INIT if hasattr(init, name)}
+    for name in saved:
+        setattr(init, name, _leave_uninitialised)
+    try:
+        yield
+    finally:
+        for name, original in saved.items():
+            setattr(init, name, original)
+
+
+_LOAD_PROBES = (
+    # (attribute of inference_runtime owning the call, call, stage name, context to run in)
+    (None, "_load_checkpoint_for_inference", "ckpt_read", None),
+    ("TextToLatentRFDiT", "__init__", "model_build", _no_wasted_init),
+    ("TextToLatentRFDiT", "load_state_dict", "state_dict_load", None),
+    ("TextToLatentRFDiT", "to", "model_to_device", None),
+    (None, "_move_inference_module", "model_cast", None),
+    ("PretrainedTextTokenizer", "from_pretrained", "tokenizer_load", None),
+    ("DACVAECodec", "load", "codec_load", None),
+)
+"""What the model load is made of, and the one place it is worth changing.
+
+`InferenceRuntime.from_key` is a single call from here and the engine tree is the product,
+not ours to edit, so wrapping the attributes it reaches for is how we both see inside it
+and skip the one step in it that is pure waste. Every wrapper is installed for the duration
+of one load and removed afterwards.
+
+Listed in the order `from_key` calls them. A nested call reports first, which is why
+`model_to_device` reports twice: once for `model.to(cuda)`, once for the redundant no-op
+move inside `_move_inference_module`, whose own line follows and encloses it."""
+
+
+def _install_load_probes(report) -> list[tuple[object, str, object, bool]]:
+    """Wrap every `_LOAD_PROBES` entry so it reports its own ms through `report`. Returns
+    what `_remove_load_probes` needs; the caller MUST restore, or a probe outlives the load
+    it was measuring and taxes every later call.
+
+    A renamed internal costs a measurement, not a load: an attribute that is not there is
+    skipped, because the engine source is swappable by design.
+    """
+    from irodori_tts import inference_runtime as engine
+
+    undo: list[tuple[object, str, object, bool]] = []
+    for owner_name, attr, stage, inside in _LOAD_PROBES:
+        owner = engine if owner_name is None else getattr(engine, owner_name, None)
+        if owner is None:
+            continue
+        raw = inspect.getattr_static(owner, attr, None)
+        target = raw.__func__ if isinstance(raw, (classmethod, staticmethod)) else raw
+        if not callable(target):
+            continue
+        # Before the swap, or the answer is always yes: `to` lives on nn.Module, not on
+        # the engine's subclass, and restoring must not leave a copy behind.
+        owned = attr in vars(owner)
+
+        @functools.wraps(target)
+        def wrapper(*args, _target=target, _stage=stage, _inside=inside, **kwargs):
+            started = time.perf_counter()
+            try:
+                with _inside() if _inside is not None else nullcontext():
+                    return _target(*args, **kwargs)
+            finally:
+                report(_stage, _elapsed_ms(started))
+
+        # Re-wrapping matters: a bare function in a classmethod's place would bind `cls`
+        # to the first real argument and the load would fail in a way that looks like the
+        # engine's fault.
+        if isinstance(raw, classmethod):
+            setattr(owner, attr, classmethod(wrapper))
+        elif isinstance(raw, staticmethod):
+            setattr(owner, attr, staticmethod(wrapper))
+        else:
+            setattr(owner, attr, wrapper)
+        undo.append((owner, attr, raw, owned))
+    return undo
+
+
+def _remove_load_probes(undo: list[tuple[object, str, object, bool]]) -> None:
+    for owner, attr, raw, owned in reversed(undo):
+        if owned:
+            setattr(owner, attr, raw)
+        else:
+            # `to` is inherited from nn.Module. Assigning it back would leave a permanent
+            # copy of the base implementation shadowing the MRO on the engine's class.
+            delattr(owner, attr)
+
+
 def _load_runtime() -> float:
     """Load the model exactly once. Returns the ms this call spent on it — 0.0 when the
     model was already there — and raises whatever the load raised.
@@ -318,6 +467,18 @@ def _load_runtime() -> float:
 
     started = time.perf_counter()
     _stage("model.load.start", **PLACEMENT)
+
+    def _load_step(step: str, ms: float) -> None:
+        vram = _vram_mb()
+        _stage(
+            "model.load.step",
+            step=step,
+            ms=ms,
+            vram_alloc_mb=None if vram is None else vram[0],
+            vram_reserved_mb=None if vram is None else vram[1],
+        )
+
+    probes = _install_load_probes(_load_step)
     try:
         checkpoint = str(_checkpoint())
         runtime = InferenceRuntime.from_key(RuntimeKey(checkpoint=checkpoint, **PLACEMENT))
@@ -330,10 +491,25 @@ def _load_runtime() -> float:
             _COND.notify_all()
         _stage("model.load.failed", ms=_elapsed_ms(started), reason=_reason(exc))
         raise
+    finally:
+        _remove_load_probes(probes)
     with _COND:
         STATE["runtime"] = runtime
         STATE["loading"] = False
         _COND.notify_all()
+
+    # The load leaves the caching allocator holding ~1.4 GiB that nothing owns: the
+    # checkpoint lands on the device as fp32 (2929 MiB measured), `_move_inference_module`
+    # casts it to bf16 (1495 MiB), and the freed fp32 blocks stay reserved for a process
+    # that will never ask for a block that shape again. Coalescing them is what
+    # expandable_segments is for, and PyTorch on Windows warns it is unsupported — so hand
+    # them back explicitly instead, once, at the single moment the transient is provably
+    # dead. Not per utterance: the blocks a synthesis leaves behind are the ones the next
+    # synthesis reuses.
+    if torch.cuda.is_available():
+        trim = time.perf_counter()
+        torch.cuda.empty_cache()
+        _load_step("empty_cache", _elapsed_ms(trim))
 
     vram = _vram_mb()
     _stage(
@@ -449,8 +625,16 @@ def synthesize(body: SynthesizeBody) -> dict:
         runtime = STATE["runtime"]
         if runtime is not None:
             STATE["busy"] += 1
+        alone = STATE["busy"] == 1
     if runtime is None:
         return {"error": "synthesis failed: the model was unloaded while this request started"}
+
+    # The allocator's high-water marks are per process, so they only attribute to one
+    # utterance when nothing else is in flight. The runtime serialises the GPU behind a
+    # Semaphore(1) (src/service.rs), so in the product that is every request; a caller
+    # that reaches this worker directly and overlaps two just gets no peak reported.
+    if alone and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     try:
         result = runtime.synthesize(_sampling_request(body))
@@ -460,6 +644,7 @@ def synthesize(body: SynthesizeBody) -> dict:
         frames = _write_wav(out_path, result.audio, result.sample_rate)
         duration_ms = int(round(frames * 1000 / result.sample_rate))
 
+        peak = _vram_peak_mb() if alone else None
         fields: dict = {
             "ms": _elapsed_ms(started),
             "engine_ms": result.total_to_decode * 1000.0,
@@ -468,6 +653,8 @@ def synthesize(body: SynthesizeBody) -> dict:
             "steps": body.numSteps,
             "chars": len(body.text),
             "seed": result.used_seed,
+            "vram_peak_alloc_mb": None if peak is None else peak[0],
+            "vram_peak_reserved_mb": None if peak is None else peak[1],
         }
         # The engine times its own stages (sample_rf is the sampler, decode_latent the
         # codec); setdefault so a stage it adds later cannot collide with a key above.

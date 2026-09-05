@@ -12,7 +12,7 @@ import { toast } from "./toast";
 export type Tone = "ok" | "reuse" | "run" | "fail" | "warn" | "idle" | "accent";
 export type ButtonKind = "primary" | "default" | "quiet" | "danger";
 
-export type ScreenName = "deploy" | "voices" | "status";
+export type ScreenName = "deploy" | "voices" | "train" | "status" | "config";
 
 /** Ask the shell to switch screens.
  *

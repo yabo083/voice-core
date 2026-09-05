@@ -1,4 +1,5 @@
 using Microsoft.UI.Dispatching;
+using System.Diagnostics;
 using System.Buffers.Binary;
 using System.Media;
 using VoiceCoreTray.Services;
@@ -58,8 +59,14 @@ internal sealed class AudioPresenter(DispatcherQueue dispatcher, RuntimeClient r
     ///
     /// Nothing here touches the audio device on the calling thread: both stopping the
     /// previous clip and playing the new one happen on one worker.
+    ///
+    /// <paramref name="audioId"/> is what the runtime is told about, not what is played:
+    /// this presenter is the only process that knows when the sound actually stopped, and
+    /// a caller doing consecutive narration (<c>voice-core speak --wait</c>) is waiting on
+    /// exactly that. Empty means nothing is reported - the style probe plays no runtime
+    /// audio at all.
     /// </summary>
-    public double? Play(byte[] wav, Action? onFinished)
+    public double? Play(byte[] wav, string audioId, Action? onFinished)
     {
         double? seconds = DurationSeconds(wav);
         SoundPlayer player;
@@ -73,21 +80,34 @@ internal sealed class AudioPresenter(DispatcherQueue dispatcher, RuntimeClient r
             _player = player;
         }
 
-        _ = Task.Run(() =>
+        _ = Task.Run(async () =>
         {
             try { previous?.Stop(); }
             catch { /* already gone; its own worker will dispose it */ }
 
+            // Not awaited before playing: the report is a loopback POST, but an
+            // unreachable runtime would hold its whole timeout in front of the voice.
+            var announced = runtime.ReportPlaybackAsync(audioId, "started", null);
+            var clock = Stopwatch.StartNew();
             try { player.PlaySync(); }
             catch { /* device busy, missing, or stopped from under us */ }
             finally
             {
+                clock.Stop();
                 lock (_gate)
                 {
                     if (ReferenceEquals(_player, player)) _player = null;
                 }
                 player.Dispose();
             }
+
+            // Ordered on the event stream by awaiting the start report first: it has had
+            // the whole clip to land, so this costs nothing on a healthy runtime. The
+            // elapsed time is what was really played - a clip the next utterance cut
+            // short played for less than it lasts.
+            try { await announced; }
+            catch { /* ReportPlaybackAsync swallows its own failures */ }
+            await runtime.ReportPlaybackAsync(audioId, "finished", clock.ElapsedMilliseconds);
 
             if (onFinished is not null)
             {
@@ -133,7 +153,7 @@ internal sealed class AudioPresenter(DispatcherQueue dispatcher, RuntimeClient r
                 metrics.ReplayCacheHits++;
             }
 
-            Play(wav, null);
+            Play(wav, audioId, null);
             return Replay.Started;
         }
         finally

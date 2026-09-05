@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, watch};
 
 /// Short, non-sequential id. Used for requests and spool entries alike.
@@ -73,6 +73,24 @@ pub enum Event {
         sample_rate: u32,
         display_seconds: Option<f64>,
     },
+    /// Playback closure, reported *in* by whoever played the audio. The runtime never
+    /// calls a frontend back, so this is the only way a caller learns that an
+    /// utterance is over rather than sleeping for a guessed duration — see
+    /// `POST /api/played` and `voice-core speak --wait`.
+    PlaybackStarted {
+        request_id: String,
+        audio_id: String,
+        by: Reporter,
+    },
+    PlaybackFinished {
+        request_id: String,
+        audio_id: String,
+        by: Reporter,
+        /// What the reporter measured, which is not `durationMs`: a clip stopped by
+        /// the next utterance played for less than it lasts. `None` when the reporter
+        /// did not time itself.
+        played_ms: Option<u64>,
+    },
     SpeakFailed {
         request_id: String,
         code: String,
@@ -84,6 +102,16 @@ pub enum Event {
         phase: String,
         message: String,
     },
+}
+
+/// Who played an utterance. Both are frontends — the runtime owns no audio device —
+/// and a caller waiting for closure does not care which one answered, but a human
+/// reading the stream does.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Reporter {
+    Presenter,
+    Cli,
 }
 
 #[derive(Clone, Debug, Serialize)]

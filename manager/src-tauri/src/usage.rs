@@ -7,12 +7,16 @@
 //! agent inside a synthesis service; the panel is already the process supervisor, so
 //! it is the honest place to measure.
 //!
-//! Two sources, both cheap:
+//! Three sources, all cheap:
 //! - Working set per PID via `GetProcessMemoryInfo`, over the tree this app owns
 //!   (runtime, its Python child, the presenter, and this window itself).
-//! - `nvidia-smi --query-compute-apps`, which reports VRAM *per process*, so the
-//!   engine's share is a measurement and not the whole card's usage attributed to us.
-//!   No NVIDIA driver, no numbers: the fields go null and the UI says so.
+//! - `nvidia-smi --query-gpu`, for the card itself: its name, and how much of it
+//!   everything on the machine is using. No NVIDIA driver, no numbers: the fields go null
+//!   and the UI says so.
+//! - The `GPU Process Memory` performance counters, for this stack's own share of the
+//!   VRAM. `nvidia-smi --query-compute-apps` cannot answer that on a GeForce (see
+//!   `pdh_dedicated_mib`), and these counters are what Task Manager reads, so the panel's
+//!   number is one a user can check.
 
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
@@ -64,12 +68,15 @@ pub async fn resource_usage(app: AppHandle) -> Usage {
         ours.extend(pids.runtime);
         ours.extend(pids.presenter);
         ours.push(mine);
-        if let Some(gpu) = query_gpu(&ours) {
+        if let Some(gpu) = query_gpu() {
             usage.gpu_name = gpu.name;
             usage.gpu_used_mib = gpu.used;
             usage.gpu_total_mib = gpu.total;
-            usage.engine_gpu_mib = gpu.mine;
         }
+        // Deliberately not folded into the query above: the card's totals come from the
+        // NVIDIA driver and our share comes from the Windows kernel, so a machine can
+        // have either without the other, and neither absence may hide the other's number.
+        usage.engine_gpu_mib = pdh_dedicated_mib(&ours);
     }
 
     usage
@@ -174,17 +181,16 @@ struct Gpu {
     name: Option<String>,
     used: Option<u64>,
     total: Option<u64>,
-    mine: Option<u64>,
 }
 
-/// Two nvidia-smi queries: the card, and the per-process compute footprint.
+/// The card: what it is, and how much of it is in use by everything.
 ///
 /// A subprocess per poll is acceptable at the panel's 2 s cadence and buys exactness -
 /// the alternative, linking NVML, would add a hard dependency on a driver DLL that a
 /// machine without an NVIDIA card does not have, for a number that is decoration when
 /// the engine is idle.
 #[cfg(windows)]
-fn query_gpu(ours: &[u32]) -> Option<Gpu> {
+fn query_gpu() -> Option<Gpu> {
     let card = nvidia_smi(&[
         "--query-gpu=name,memory.used,memory.total",
         "--format=csv,noheader,nounits",
@@ -196,36 +202,116 @@ fn query_gpu(ours: &[u32]) -> Option<Gpu> {
         gpu.used = fields.next().and_then(|v| v.parse().ok());
         gpu.total = fields.next().and_then(|v| v.parse().ok());
     }
+    Some(gpu)
+}
 
-    // Per-process VRAM is a driver privilege, not a given. A GeForce in WDDM mode - the
-    // normal case on a desktop - answers `[N/A]` for every row, so a sum of the rows it
-    // did parse would report 0 GiB for a model that is plainly resident. `mine` stays
-    // None unless at least one row carried a real number, and None means "the driver
-    // will not break it down", which the panel says instead of showing a false zero.
-    if let Some(apps) = nvidia_smi(&[
-        "--query-compute-apps=pid,used_gpu_memory",
-        "--format=csv,noheader,nounits",
-    ]) {
-        let mut mine = 0u64;
-        let mut reported = false;
-        for line in apps.lines() {
-            let mut fields = line.split(',').map(str::trim);
-            let Some(pid) = fields.next().and_then(|v| v.parse::<u32>().ok()) else {
-                continue;
-            };
-            let Some(mib) = fields.next().and_then(|v| v.parse::<u64>().ok()) else {
-                continue;
-            };
-            reported = true;
-            if ours.contains(&pid) {
-                mine += mib;
+/// VRAM held by `ours`, in MiB, from the counters Task Manager itself reads.
+///
+/// Per-process VRAM is a driver privilege that a GeForce in WDDM mode - the normal case on
+/// a desktop - does not grant: `nvidia-smi --query-compute-apps` answers `[N/A]` for every
+/// row on this machine, so summing what it does parse reports 0 GiB for a model that is
+/// plainly resident. The Windows kernel knows the answer anyway, because in WDDM it is the
+/// kernel that owns the video memory manager, and it publishes one
+/// `\GPU Process Memory(pid_<PID>_luid_<hi>_<lo>_phys_<N>)\Dedicated Usage` instance per
+/// process per adapter segment. That counter is the "Dedicated GPU memory" column in Task
+/// Manager's Details view.
+///
+/// One wildcard instance and one collection: `Dedicated Usage` is an instantaneous gauge,
+/// not a rate, so it needs no second sample to become meaningful. `None` means the
+/// counters were not there to read, which the panel says instead of showing a false zero.
+#[cfg(windows)]
+fn pdh_dedicated_mib(ours: &[u32]) -> Option<u64> {
+    use windows_sys::Win32::System::Performance::{
+        PdhAddEnglishCounterW, PdhCloseQuery, PdhCollectQueryData, PdhGetFormattedCounterArrayW,
+        PdhOpenQueryW, PDH_CSTATUS_VALID_DATA, PDH_FMT_COUNTERVALUE_ITEM_W, PDH_FMT_LARGE,
+        PDH_MORE_DATA,
+    };
+
+    // English names, so a localised Windows resolves the same path: the counter set is
+    // "GPU 进程内存" on this machine and `PdhAddEnglishCounterW` is the API that does not
+    // care. The instance is a wildcard because the real names carry the adapter LUID and
+    // segment index, which we neither know nor need.
+    let path: Vec<u16> = "\\GPU Process Memory(*)\\Dedicated Usage"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: the query handle is closed on every path out; both array calls are the
+    // documented size-then-fill pair, and the second is only reached after the first
+    // asked for a buffer, so `count` never exceeds what was allocated.
+    unsafe {
+        let mut query: isize = 0;
+        if PdhOpenQueryW(std::ptr::null(), 0, &mut query) != 0 {
+            return None;
+        }
+        let mut total = None;
+        let mut counter: isize = 0;
+        if PdhAddEnglishCounterW(query, path.as_ptr(), 0, &mut counter) == 0
+            && PdhCollectQueryData(query) == 0
+        {
+            let mut bytes: u32 = 0;
+            let mut count: u32 = 0;
+            let sized = PdhGetFormattedCounterArrayW(
+                counter,
+                PDH_FMT_LARGE,
+                &mut bytes,
+                &mut count,
+                std::ptr::null_mut(),
+            );
+            // The buffer holds the item array and the instance-name strings it points at,
+            // so PDH sizes it in bytes; round up to whole items to keep it aligned.
+            let item = std::mem::size_of::<PDH_FMT_COUNTERVALUE_ITEM_W>();
+            let items = (bytes as usize + item - 1) / item;
+            if sized == PDH_MORE_DATA && items > 0 {
+                let mut buffer: Vec<PDH_FMT_COUNTERVALUE_ITEM_W> = vec![std::mem::zeroed(); items];
+                if PdhGetFormattedCounterArrayW(
+                    counter,
+                    PDH_FMT_LARGE,
+                    &mut bytes,
+                    &mut count,
+                    buffer.as_mut_ptr(),
+                ) == 0
+                {
+                    let mut sum: u64 = 0;
+                    for entry in &buffer[..(count as usize).min(items)] {
+                        if entry.FmtValue.CStatus != PDH_CSTATUS_VALID_DATA {
+                            continue;
+                        }
+                        match instance_pid(entry.szName) {
+                            Some(pid) if ours.contains(&pid) => {
+                                sum += entry.FmtValue.Anonymous.largeValue.max(0) as u64;
+                            }
+                            _ => {}
+                        }
+                    }
+                    total = Some(sum / (1024 * 1024));
+                }
             }
         }
-        if reported {
-            gpu.mine = Some(mine);
-        }
+        PdhCloseQuery(query);
+        total
     }
-    Some(gpu)
+}
+
+/// `pid_23188_luid_0x00000000_0x0000C3A2_phys_0` -> 23188.
+///
+/// SAFETY: `name` is a NUL-terminated string PDH wrote into the caller's buffer, which
+/// outlives this call.
+#[cfg(windows)]
+unsafe fn instance_pid(name: *const u16) -> Option<u32> {
+    if name.is_null() {
+        return None;
+    }
+    let mut length = 0usize;
+    while *name.add(length) != 0 {
+        length += 1;
+    }
+    let text = String::from_utf16_lossy(std::slice::from_raw_parts(name, length));
+    text.strip_prefix("pid_")?
+        .split('_')
+        .next()?
+        .parse()
+        .ok()
 }
 
 #[cfg(windows)]

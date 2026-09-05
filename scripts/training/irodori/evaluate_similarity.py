@@ -48,6 +48,9 @@ AUDIO_SUFFIXES = {".wav", ".ogg", ".mp3", ".flac", ".opus", ".aiff", ".aif"}
 ENCODER_SR = 16000
 GROUP_SUFFIX = re.compile(r"_t\d+$")
 
+# This step's name in the progress protocol (`scripts/training/_layout.py`).
+STAGE = "score"
+
 
 def collect_refs(ref_dir: Path) -> list[str]:
     if not ref_dir.is_dir():
@@ -120,14 +123,28 @@ def main() -> None:
         action="store_true",
         help="Skip the leave-one-out pass. You lose the only reference point for the numbers.",
     )
+    _engine.add_json_flag(parser)
     args = parser.parse_args()
+    if args.json:
+        _engine.json_mode()
+    _engine.guard(STAGE, lambda: score(args))
 
+
+def score(args: argparse.Namespace) -> None:
     # Resolve inputs before paying for the imports: a mistyped glob should fail now, not
     # after ten seconds of loading torch and a speaker encoder.
     ref_paths = collect_refs(args.ref_dir.expanduser())
     test_paths = collect_tests(args.tests)
     print(f"refs       {len(ref_paths)} from {args.ref_dir}")
     print(f"tests      {len(test_paths)}")
+    # Every clip is embedded once, refs included, so the bar counts both.
+    total = len(ref_paths) + len(test_paths)
+    _engine.emit(
+        STAGE,
+        "start",
+        f"{len(test_paths)} generated clip(s) against {len(ref_paths)} reference clip(s) "
+        f"on {args.device}",
+    )
 
     try:
         import librosa
@@ -142,10 +159,15 @@ def main() -> None:
         ) from exc
 
     encoder = VoiceEncoder(args.device)
+    embedded = 0
 
     def embed(path: str) -> "np.ndarray":
+        nonlocal embedded
         wav, _ = librosa.load(path, sr=ENCODER_SR, mono=True)
-        return encoder.embed_utterance(wav.astype(np.float32))
+        vector = encoder.embed_utterance(wav.astype(np.float32))
+        embedded += 1
+        _engine.emit(STAGE, "progress", Path(path).name, done=embedded, total=total)
+        return vector
 
     ref_embs = np.stack([embed(path) for path in ref_paths])
     test_embs = np.stack([embed(path) for path in test_paths])
@@ -217,6 +239,12 @@ def main() -> None:
             f"ceiling    LOO mean {ceiling['mean']}   p10 {ceiling['p10']}   "
             f"p90 {ceiling['p90']}   (same speaker, natural variance)"
         )
+        _engine.emit(
+            STAGE,
+            "log",
+            f"natural ceiling: LOO mean {ceiling['mean']}, p10 {ceiling['p10']} - a "
+            "generated clip is not supposed to beat this",
+        )
     print(f"{'group':<52} {'clips':>5} {'mean':>7} {'lower':>7}")
     for entry in report["groups"]:
         flag = ""
@@ -226,10 +254,31 @@ def main() -> None:
             f"{entry['group'][:52]:<52} {entry['clips']:>5} {entry['mean']:>7.4f} "
             f"{entry['lower_bound']:>7.4f}{flag}"
         )
+        _engine.emit(
+            STAGE,
+            "log",
+            f"{entry['group']}: mean {entry['mean']}, lower bound {entry['lower_bound']}"
+            + (" (under the natural p10)" if entry.get("below_natural_p10") else ""),
+        )
     print(f"saved      {out}")
     print(
         "select     the checkpoint with the highest lower bound, not the highest mean; "
         "the mean hides the utterances that drift."
+    )
+
+    best = report["groups"][0] if report["groups"] else None
+    _engine.emit(
+        STAGE,
+        "ok",
+        f"best by lower bound: {best['group']} at {best['lower_bound']} "
+        f"(mean {best['mean']}) -> {out}"
+        if best is not None
+        else f"nothing to rank -> {out}",
+        done=embedded,
+        total=total,
+        # The group name is `lora_<checkpoint directory>`, which is what makes this the
+        # selection the results table pre-selects.
+        checkpoint=best["group"] if best is not None else None,
     )
 
 

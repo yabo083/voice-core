@@ -13,15 +13,18 @@
 
 mod caption;
 mod config_edit;
+mod config_view;
 mod contract;
 mod detect;
 mod host;
 mod jobobj;
+mod jsonstream;
 mod layout;
 mod provision;
 mod runtime_api;
 mod shell;
 mod supervise;
+mod training;
 mod usage;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -74,10 +77,18 @@ fn main() {
             config_edit::remove_pack,
             config_edit::import_avatar,
             config_edit::pack_manifest,
+            config_view::config_files,
+            config_view::pack_manifest_file,
+            config_view::pack_effective,
             supervise::start_stack,
             supervise::stop_stack,
             usage::resource_usage,
             shell::open_path,
+            training::training_preflight,
+            training::start_training,
+            training::cancel_training,
+            training::install_trained_pack,
+            training::training_result,
         ])
         .build(tauri::generate_context!());
 

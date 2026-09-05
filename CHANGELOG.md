@@ -8,6 +8,100 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.3.0] - 2026-09-05
+
+Three things a caller and an owner both asked for: train a voice inside the app, see which file
+decided each setting, and stop guessing when a line has finished playing. `apiVersion` stays `1`
+for every existing route; one route and two event kinds are added.
+
+### Added
+
+- **Training, in the app (训练).** The six-step pipeline that used to be a PowerShell session —
+  dataset → latents → LoRA → samples → similarity → install — runs as one supervised job with
+  real progress: a stage rail, live step/loss/s-per-step/ETA, a capped log console, and a
+  checkpoint table that ranks candidates by validation loss and speaker-similarity lower bound
+  so the pick is the measured one rather than the last one. Installing is a separate, explicit
+  action, because training produces several candidates and choosing is a decision.
+  Four knobs are exposed (batch size, step budget, learning rate, checkpoint interval); the
+  rest of the YAML stays frozen, and the screen says why (`num_workers: 2` and persistent
+  workers are what keep a Windows dataloader from starving the GPU, and the `model` block has
+  to match the base checkpoint). Before the first GPU step the job asks the runtime to release
+  the card, so training and speaking never fight over VRAM. Starting a run that would delete
+  checkpoints no pack was installed from is **refused** and names what is at risk.
+- **The progress protocol is now one protocol.** `scripts/training/**` grew a `--json` mode that
+  emits the same seven keys `scripts/bootstrap.ps1 -Json` emits, and the line-streaming child
+  runner behind provisioning was factored out (`manager/src-tauri/src/jsonstream.rs`) so both
+  features share one implementation of spawning, reading, job-object ownership and what a
+  non-zero exit means. tqdm is parsed in Python, next to the process that writes it — never in
+  Rust — and stderr is merged into stdout, which is what keeps a full pipe from hanging a
+  50-minute trainer.
+- **Configuration, visible (配置).** `data/config.json` and `data/runtime.json` shown verbatim
+  with JSONC comments intact, plus a pack's own `voicepack.json`, plus an effective-value table
+  that says for every field whether the answer came from the pack, from `config.json`, or from
+  a derivation. The provenance is the runtime's own verdict: `src/packs.rs::hydrate` records
+  who won each field *as it merges*, and `GET /api/voices` carries that map. The screen renders
+  it and computes nothing — comparing the two files in the UI would be a second implementation
+  of the one rule this screen exists to make visible. Read-only by design; `config_edit`'s
+  span splice stays the only writer.
+- **`speak --wait`: the caller learns when the audio actually finished.** `POST /api/played`
+  lets whoever played the audio report in, `playbackStarted`/`playbackFinished` join the event
+  stream, and both players report — the subtitle presenter and the CLI's own local playback —
+  so a caller never has to know which one spoke. `--wait-timeout-ms` bounds it and a timeout
+  exits non-zero naming what was not observed. This replaces `time.sleep(7.5)`, which is what
+  narrating three paragraphs in order used to require.
+- **`[pause:N]` in the text.** A documented pause primitive, 1–10000 ms: the utterance is split
+  at the marker, each segment is synthesised, and the PCM is joined with exactly N ms of
+  silence — one `audioId`, one `speech` event, `durationMs` counting the silence. Markers at
+  the very start or end are dropped rather than producing dead air; adjacent markers sum; a
+  malformed marker is an `invalid_request` naming the offending text instead of being read out
+  loud.
+- **`--ruby-pairs -`** reads the alignment array from stdin, which removes Windows command-line
+  quoting from the problem. `@file.json` still works.
+- **Optional `language` on speak, validated.** When it does not match the resolved pack's
+  declared languages the call fails with `voice_language_unsupported`, naming the pack, what it
+  declares and what was asked — instead of feeding Chinese text to a Japanese-only model and
+  producing noise. Engine routing on `language` is deliberately not implemented; this is the
+  field, the check and the error code, so callers can be written against them now.
+- **Per-process VRAM that is actually per-process.** `nvidia-smi --query-compute-apps` returns
+  `[N/A]` for every row on a GeForce in WDDM mode, so the panel could not attribute video
+  memory. It now reads the same PDH counter Task Manager uses
+  (`\GPU Process Memory(pid_*)\Dedicated Usage`) summed over the engine process tree: 2463 MiB
+  from the panel against 2464 MiB from the OS's own reader for the same PID.
+
+### Changed
+
+- **1.1 GiB of video memory came back.** With the model loaded, reserved VRAM was 3178 MiB
+  against 1755 MiB allocated; per-synthesis peak reserved was 3468 MiB. A single
+  `empty_cache()` once the load finishes — releasing the fp32→bf16 transient, not per-utterance
+  churn — brings those to **2078 MiB** and **2408 MiB**. `expandable_segments:True` was doing
+  nothing here: PyTorch on Windows warns it is unsupported, and the two other allocator knobs
+  measured identical to three digits, because the overhang was never fragmentation.
+- **Cold model load 23.0 s → 19.2 s.** The load is now instrumented sub-stage by sub-stage
+  (checkpoint read, module build, state dict, device move, cast, tokenisers, codec) instead of
+  being one opaque number, and building the DiT no longer initialises weights that a
+  `strict=True` load overwrites a moment later. Audio is bitwise identical across both changes,
+  and what remains is transformers' own lazy-import machinery, not initialisation.
+- **`scripts/package.ps1`** ships the training kit as before; `scripts/bench/**` is a
+  development harness and is deliberately not packaged.
+
+### Fixed
+
+- **A panel screen no longer shows a stale answer after the service starts.** Both new screens
+  refetch on the transition — the effective-value table and 后端占用 were computed once at mount,
+  so starting the runtime afterwards left the panel confidently claiming the runtime was down
+  and the card was empty.
+- **The latents step encoded nothing, on any corpus.** It shelled out to upstream's
+  `prepare_manifest.py`, which loads audio through HuggingFace `datasets`; `datasets` 4.x
+  decodes audio only through `torchcodec`, and `torchcodec` cannot load its natives without
+  FFmpeg shared libraries this install does not carry — so every row died with
+  `dataset_iter_error` and training could never start. The step now loads the engine's own
+  `DACVAECodec` in-process and encodes the dataset itself, with upstream's preprocessing in
+  upstream's order (`encode_waveform` is what resamples to 48 kHz, downmixes and normalises).
+  The latents it writes are **bitwise identical** to the ones upstream produced for the same
+  clips — shape, dtype and every element, verified across six clips against latents encoded
+  before this change. `--dataset`/`--split`/`--config`/`--data-files` retired with the
+  subprocess and are now rejected by name.
+
 ## [1.2.0] - 2026-09-04
 
 A restructuring rather than a patch: voice-core stops being three executables a user has to

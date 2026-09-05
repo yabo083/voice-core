@@ -140,13 +140,29 @@ fn infer_kind(path: &Path) -> String {
 
 /// Windows-native separators, because these strings are shown and pasted.
 #[cfg(windows)]
-fn native(path: &Path) -> String {
+pub(crate) fn native(path: &Path) -> String {
     path.to_string_lossy().replace('/', "\\")
 }
 
 #[cfg(not(windows))]
-fn native(path: &Path) -> String {
+pub(crate) fn native(path: &Path) -> String {
     path.to_string_lossy().to_string()
+}
+
+/// The file that would hold the manifest for the payload at `path`, there or not.
+///
+/// A directory pack keeps it inside: `<dir>/voicepack.json`. A single-file pack has no
+/// inside, so it gets a sibling named after the file with its last extension replaced:
+/// `miyu.speaker.safetensors` -> `miyu.speaker.voicepack.json`.
+///
+/// Separate from reading it because the 配置 screen shows *which* file it read and how
+/// big that file is, and this naming rule gets exactly one owner in this crate.
+pub(crate) fn manifest_file(path: &Path) -> Option<PathBuf> {
+    if path.is_dir() {
+        return Some(path.join("voicepack.json"));
+    }
+    let stem = path.file_stem()?.to_string_lossy().to_string();
+    Some(path.parent()?.join(format!("{stem}.voicepack.json")))
 }
 
 /// The pack's own manifest as raw JSON, or None when it has none.
@@ -155,13 +171,7 @@ fn native(path: &Path) -> String {
 /// file to the user verbatim, and a field this build has never heard of has to survive
 /// the round trip to the screen.
 pub fn manifest_beside(path: &Path) -> Option<Value> {
-    let file = if path.is_dir() {
-        path.join("voicepack.json")
-    } else {
-        let stem = path.file_stem()?.to_string_lossy().to_string();
-        path.parent()?.join(format!("{stem}.voicepack.json"))
-    };
-    let raw = std::fs::read_to_string(file).ok()?;
+    let raw = std::fs::read_to_string(manifest_file(path)?).ok()?;
     serde_json::from_str::<Value>(&normalize(&raw)).ok()
 }
 

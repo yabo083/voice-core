@@ -23,7 +23,7 @@ use crate::error::{ApiError, ErrorCode, RecoveryKind};
 use crate::obs::{Envelope, Event};
 use crate::packs::VoicePack;
 use crate::service::Service;
-use crate::service::{SpeakInput, SpeakOutput, Status, API_VERSION, RUNTIME_VERSION};
+use crate::service::{PlayedInput, SpeakInput, SpeakOutput, Status, API_VERSION, RUNTIME_VERSION};
 
 pub fn router(service: Arc<Service>) -> Router {
     let guarded = Router::new()
@@ -31,6 +31,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/api/metrics", get(metrics))
         .route("/api/voices", get(voices))
         .route("/api/speak", post(speak))
+        .route("/api/played", post(played))
         .route("/api/audio/:id", get(audio))
         .route("/api/events", get(events))
         .route("/api/warm", post(warm))
@@ -105,6 +106,24 @@ async fn speak(
     Json(input): Json<SpeakInput>,
 ) -> Result<Json<SpeakOutput>, ApiError> {
     service.speak(input).await.map(Json)
+}
+
+/// A frontend reporting its own playback back in.
+///
+/// This does not invert the contract in the module header: the runtime still never
+/// calls a frontend back. What it does is close the loop a caller could otherwise only
+/// guess at — `speak` returns when the audio exists, and until this route existed
+/// nothing said when it had been heard, so an agent reading three paragraphs in order
+/// had to sleep for a duration it had to hope was right.
+///
+/// It publishes and validates, and does nothing else: no state, no bookkeeping, no
+/// effect on idle reclaim. Playback happens outside this process.
+async fn played(
+    State(service): State<Arc<Service>>,
+    Json(input): Json<PlayedInput>,
+) -> Result<StatusCode, ApiError> {
+    service.report_playback(input)?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Streams the WAV straight off the spool. No base64, no buffering the whole

@@ -14,6 +14,10 @@ use serde::{Deserialize, Serialize};
 pub const EVENT_BOOTSTRAP: &str = "bootstrap://event";
 /// `{runtime, presenter, model_loaded}`, emitted on every transition.
 pub const EVENT_STACK: &str = "stack://state";
+/// One training step's JSON line, forwarded verbatim. The same shape as
+/// `bootstrap://event` plus an optional `checkpoint`, which the train and score
+/// stages use to name the artefact a line is about.
+pub const EVENT_TRAIN: &str = "train://event";
 
 /// A voice pack, as both `config.json`'s `voicePacks` array and
 /// `GET /api/voices` spell it.
@@ -115,4 +119,111 @@ pub struct StackState {
     /// is not claimed here, because this app cannot stop what it did not start.
     pub presenter: bool,
     pub model_loaded: bool,
+}
+
+/// What a training run would find if it started right now.
+///
+/// Every field is a measurement, and `blockers` is the only judgement: it is what
+/// the screen shows verbatim next to a start button it refuses to enable.
+/// Everything else is a fact the screen decides how to present — a card that is a
+/// bit small for batch 16 is a warning the user can answer by lowering a knob, not
+/// a reason to bar the door.
+#[derive(Serialize)]
+pub struct TrainingPreflight {
+    /// The interpreter every step will run under.
+    pub python: Option<String>,
+    /// Which of `torch, datasets, peft, soundfile, resemblyzer, yaml` that
+    /// interpreter cannot import. Empty is the good case.
+    pub missing: Vec<String>,
+    pub cuda: Option<String>,
+    pub gpu_name: Option<String>,
+    pub vram_free_mib: Option<u64>,
+    pub vram_total_mib: Option<u64>,
+    pub runtime_reachable: bool,
+    /// The runtime is holding the model, so it is holding VRAM the trainer wants.
+    /// Not a blocker: the first GPU step asks it to let go.
+    pub model_loaded: bool,
+    /// A job is in flight, and which voice it is for. A panel restarted
+    /// mid-training asks this instead of assuming there is nothing to re-attach to.
+    pub running: bool,
+    pub pack_id: Option<String>,
+    pub blockers: Vec<String>,
+}
+
+/// What the user asked for. Serialized into the scratch directory as well as read
+/// from the frontend, so a panel that restarted can put its install fields back.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrainRequest {
+    pub audio_dir: String,
+    /// A directory of `<clip>.txt` sidecars, or a `.jsonl`/`.json`/`.csv`/`.tsv`
+    /// mapping. Absent means "look for sidecars beside the audio", which is what
+    /// step 1 does.
+    pub transcripts: Option<String>,
+    /// What makes the trainer draw a DIFFERENT clip of this voice as the reference.
+    /// Empty is legal and step 1 says why it is wrong for a LoRA.
+    pub speaker_id: String,
+    pub pack_id: String,
+    pub display_name: String,
+    pub character: Option<String>,
+    pub avatar: Option<String>,
+    pub batch_size: u32,
+    pub max_steps: u32,
+    pub learning_rate: f64,
+    pub save_every: u32,
+    /// Permission to delete the previous run of this voice. Defaulted rather than
+    /// required, and false by default, because the panel has to be able to ask for
+    /// a run without having decided to destroy an hour of GPU time yet: the command
+    /// refuses and names what is at risk, and the user ticks this to mean it.
+    #[serde(default)]
+    pub overwrite: bool,
+}
+
+/// One chosen checkpoint, becoming a voice pack.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallRequest {
+    /// The adapter directory the user picked out of the results table.
+    pub checkpoint: String,
+    pub pack_id: String,
+    pub display_name: String,
+    pub character: Option<String>,
+    pub avatar: Option<String>,
+}
+
+/// Everything a finished or half-finished run left on disk, for the screen to
+/// render.
+#[derive(Serialize)]
+pub struct TrainingResult {
+    pub dir: String,
+    pub exists: bool,
+    /// `prepare_dataset.py`'s QA report, verbatim. The panel shows the numbers the
+    /// step measured; nothing here recomputes them.
+    pub qa: Option<serde_json::Value>,
+    /// The request this run started from, when there was one.
+    pub request: Option<serde_json::Value>,
+    pub checkpoints: Vec<Checkpoint>,
+    /// How many of those checkpoints no pack has been installed from. Non-zero is
+    /// what makes starting again refuse until it is allowed explicitly, and it is
+    /// the number the confirmation puts in front of the user.
+    pub at_risk: usize,
+}
+
+#[derive(Serialize)]
+pub struct Checkpoint {
+    pub name: String,
+    pub path: String,
+    /// Out of the directory name the trainer chose:
+    /// `checkpoint_best_val_loss_0001000_0.885155` is where the step and the loss
+    /// are recorded, and there is no other copy of them.
+    pub step: Option<u64>,
+    pub val_loss: Option<f64>,
+    /// From the score stage, when it ran: the worst clip in this checkpoint's
+    /// group, which is the number selection should use. The mean hides the
+    /// utterances that drift.
+    pub lower_bound: Option<f64>,
+    pub mean: Option<f64>,
+    /// Pre-selected. The lowest validation loss, which is what the trainer's own
+    /// best-checkpoint selection means.
+    pub best: bool,
 }

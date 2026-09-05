@@ -74,6 +74,13 @@ DEFAULT_MIN_SECONDS = 1.0
 # lines worth looking at.
 LONG_TEXT_CHARS = 160
 
+# This step's name in the progress protocol (`scripts/training/_layout.py`).
+STAGE = "dataset"
+
+# How many QA findings reach the event stream and the console. The report on disk carries
+# all of them; past ten they stop being a list a human reads and start being a wall.
+SHOWN = 10
+
 
 def collapse(text: str) -> str:
     """One line of JSONL cannot contain a newline, and a transcript pasted out of a
@@ -227,10 +234,14 @@ def build(args: argparse.Namespace) -> tuple[list[dict], dict]:
         }
         table = {key: value for key, value in table.items() if value}
 
+    _engine.emit(STAGE, "start", f"{len(clips)} clip(s) under {audio_dir}")
     rows: list[dict] = []
     skipped: list[dict] = []
     problems: list[dict] = []
-    for clip in clips:
+    for index, clip in enumerate(clips, start=1):
+        # Measuring a clip means decoding it, so this is the one part of the step whose
+        # duration a user notices. One event per clip is what makes it a bar.
+        _engine.emit(STAGE, "progress", clip.name, done=index, total=len(clips))
         if args.placeholder_text is not None:
             text = collapse(args.placeholder_text)
         else:
@@ -393,15 +404,25 @@ def main() -> None:
             "trainer starts truncating the audio but not the text). 0 disables the check."
         ),
     )
+    _engine.add_json_flag(parser)
     args = parser.parse_args()
+    if args.json:
+        _engine.json_mode()
+    _engine.guard(STAGE, lambda: produce(args))
 
+
+def produce(args: argparse.Namespace) -> None:
     if args.placeholder_text is not None and args.transcripts is not None:
         raise SystemExit("--placeholder-text and --transcripts are mutually exclusive")
 
     rows, report = build(args)
     if not rows:
         print(json.dumps(report, ensure_ascii=False, indent=2))
-        raise SystemExit("no usable clips; nothing written")
+        raise SystemExit(
+            "no usable clips; nothing written\n"
+            f"  {len(report['skipped'])} clip(s) were skipped - the QA report lists each "
+            "reason, and 'no transcript' is the usual one"
+        )
 
     out = args.out_dataset.expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -431,10 +452,35 @@ def main() -> None:
             "clip as its own reference. Fine for speaker-embedding, wrong for a LoRA."
         )
     print(f"skipped   {len(report['skipped'])}   problems {len(report['problems'])}   -> {qa_path}")
-    for item in report["problems"][:10]:
+    for item in report["problems"][:SHOWN]:
         print(f"  ! {item['clip']}: {item['issue']}")
-    for item in report["skipped"][:10]:
+    for item in report["skipped"][:SHOWN]:
         print(f"  - {item['clip']}: {item['reason']}")
+
+    # The same findings the console shows, in the same order and the same cut: a reader of
+    # the panel and a reader of the terminal should not see different datasets.
+    for item in report["problems"][:SHOWN]:
+        _engine.emit(STAGE, "log", f"{item['clip']}: {item['issue']}")
+    for item in report["skipped"][:SHOWN]:
+        _engine.emit(STAGE, "log", f"skipped {item['clip']}: {item['reason']}")
+    if not args.speaker_id:
+        _engine.emit(
+            STAGE,
+            "log",
+            "no --speaker-id: every clip becomes its own reference",
+            remedy="a LoRA needs a speaker id, or the trainer never draws a DIFFERENT clip "
+            "of this voice as the reference",
+        )
+    _engine.emit(
+        STAGE,
+        "ok",
+        f"{report['count']} clips, {report['total_minutes']} min, "
+        f"p05 {report['duration_p05_s']}s / p95 {report['duration_p95_s']}s, "
+        f"{'/'.join(str(rate) for rate in report['sample_rates'])} Hz "
+        f"({len(report['problems'])} flagged, {len(report['skipped'])} skipped)",
+        done=report["count"],
+        total=report["count"] + len(report["skipped"]),
+    )
 
 
 if __name__ == "__main__":

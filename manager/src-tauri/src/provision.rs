@@ -1,41 +1,32 @@
-//! `scripts/bootstrap.ps1 -Json`, streamed to the frontend one line at a time.
+//! `scripts/bootstrap.ps1 -Json`, streamed to the frontend one line at a time by
+//! [`crate::jsonstream`].
 //!
-//! With `-Json` the script writes exactly one JSON object per line to stdout and
-//! nothing else, so this reads lines rather than accumulating output: a 4.4 GiB
-//! download reports progress while it happens or it does not report at all.
-//! Anything on stdout that is not JSON is forwarded as a `log` event instead of
-//! being dropped or treated as fatal — a stray `Write-Host` should look like
-//! noise in the panel, not like a crash.
+//! What is left in this file is what belongs to bootstrap alone: the argv, the claim on the
+//! slot, and the one piece of cached state a run invalidates. Reading the stream, owning the
+//! process tree and deciding what a non-zero exit means are in `jsonstream`, which the
+//! training pipeline reuses unchanged rather than re-deriving.
 
-use std::io::{BufRead, BufReader};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-use serde_json::{json, Value};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Manager};
 
 use crate::contract::{ProvisionOpts, EVENT_BOOTSTRAP};
-use crate::host::{hidden, now_ms, Host};
-use crate::jobobj::{kill_tree, Job};
+use crate::host::Host;
+use crate::jsonstream::{self, Outcome, Spec};
 use crate::layout;
 
-/// Where bootstrap's own stderr goes. Truncated per run: the point of this file
-/// is to name the cause of *this* failure, and a stale tail would name the wrong
-/// one.
+/// Where bootstrap's own stderr goes.
 const STDERR_LOG: &str = "bootstrap.err.log";
 
-#[derive(Default)]
-pub struct ProvisionRun {
-    /// Dropping this kills PowerShell *and* the git clone, uv, pip and
-    /// huggingface downloads it started. Killing the PowerShell PID alone leaves
-    /// all of those running with nobody reading their output.
-    job: Option<Job>,
-    pid: Option<u32>,
-    /// Claimed for the whole run, so a second click cannot start a second
-    /// bootstrap into the same directories.
-    busy: bool,
-    /// A cancelled run exits non-zero. That is not a failure to report as one.
-    cancelled: bool,
-}
+/// `preflight` is the first stage the script runs, so a non-JSON line arriving before the
+/// first `start` still carries a stage the frontend can key on. The label is the script
+/// rather than the shell: `powershell.exe exited with code 1` names the wrong thing.
+const SPEC: Spec<'static> = Spec {
+    event: EVENT_BOOTSTRAP,
+    label: "bootstrap.ps1",
+    stderr_log: STDERR_LOG,
+    first_stage: "preflight",
+};
 
 #[tauri::command]
 pub async fn provision(app: AppHandle, opts: ProvisionOpts) -> Result<(), String> {
@@ -47,12 +38,9 @@ pub async fn provision(app: AppHandle, opts: ProvisionOpts) -> Result<(), String
                 host.root.display()
             )
         })?;
-        let mut run = lock(&host);
-        if run.busy {
+        if !jsonstream::lock(&host.provision).claim(None) {
             return Err("a provision run is already in progress".to_string());
         }
-        run.busy = true;
-        run.cancelled = false;
         script
     };
 
@@ -72,43 +60,31 @@ pub async fn provision(app: AppHandle, opts: ProvisionOpts) -> Result<(), String
 
     {
         let host = app.state::<Host>();
-        let mut run = lock(&host);
-        run.busy = false;
-        run.pid = None;
-        run.job = None;
+        jsonstream::lock(&host.provision).release();
         // A run can put a different interpreter on disk, which is the one thing
         // that invalidates the cached torch probe.
         *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = None;
     }
 
-    outcome?
+    // A failed stage is not a failed call: the panel read it off the stream, with its
+    // remedy, while it was happening.
+    outcome?.map(|_: Outcome| ())
 }
 
 /// Kill the whole process tree.
-///
-/// Two mechanisms, deliberately: `taskkill /T /F` first, because it walks parent
-/// links and catches anything spawned in the window between `spawn` and the job
-/// assignment, and then the job handle, because KILL_ON_JOB_CLOSE is the only
-/// guarantee that does not depend on a PID still meaning what it meant.
 #[tauri::command]
 pub async fn cancel_provision(app: AppHandle) {
     let host = app.state::<Host>();
-    let pid = {
-        let mut run = lock(&host);
-        if run.pid.is_none() {
-            return;
-        }
-        run.cancelled = true;
-        run.pid
-    };
-    if let Some(pid) = pid {
-        kill_tree(pid);
+    if jsonstream::cancel(&host.provision) {
+        host.log("provision cancelled");
     }
-    lock(&host).job = None;
-    host.log("provision cancelled");
 }
 
-fn run_bootstrap(app: &AppHandle, script: std::path::PathBuf, args: Vec<String>) -> Result<(), String> {
+fn run_bootstrap(
+    app: &AppHandle,
+    script: std::path::PathBuf,
+    args: Vec<String>,
+) -> Result<Outcome, String> {
     let host = app.state::<Host>();
 
     let mut command = Command::new("powershell.exe");
@@ -119,89 +95,10 @@ fn run_bootstrap(app: &AppHandle, script: std::path::PathBuf, args: Vec<String>)
         .arg("-File")
         .arg(&script)
         .args(&args)
-        .current_dir(&host.root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped());
-    match host.fresh_child_log(STDERR_LOG) {
-        Ok(file) => {
-            command.stderr(Stdio::from(file));
-        }
-        Err(err) => {
-            host.log(&format!("{STDERR_LOG} unavailable: {err}"));
-            command.stderr(Stdio::null());
-        }
-    }
-    hidden(&mut command);
-
-    let mut child = command
-        .spawn()
-        .map_err(|err| format!("powershell.exe: {err}"))?;
-
-    {
-        let mut run = lock(&host);
-        match Job::new() {
-            Ok(job) => {
-                if let Err(err) = job.assign(&child) {
-                    host.log(&format!("could not assign bootstrap to job object: {err}"));
-                }
-                run.job = Some(job);
-            }
-            Err(err) => host.log(&format!("job object unavailable: {err}")),
-        }
-        run.pid = Some(child.id());
-    }
+        .current_dir(&host.root);
     host.log(&format!("bootstrap started: {}", args.join(" ")));
 
-    // Present even when the script emits nothing, so a non-JSON line that
-    // arrives before the first `start` still carries a stage the frontend can
-    // key on. `preflight` is the first stage the script runs.
-    let mut stage = "preflight".to_string();
-    if let Some(stdout) = child.stdout.take() {
-        for line in BufReader::new(stdout).lines() {
-            // A read error here is the pipe dying with the process, which is what
-            // cancellation looks like from this side.
-            let Ok(line) = line else { break };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<Value>(line) {
-                Ok(value) if value.is_object() => {
-                    if let Some(current) = value.get("stage").and_then(Value::as_str) {
-                        stage = current.to_string();
-                    }
-                    let _ = app.emit(EVENT_BOOTSTRAP, value);
-                }
-                _ => {
-                    let _ = app.emit(EVENT_BOOTSTRAP, log_event(&stage, line));
-                }
-            }
-        }
-    }
-
-    let status = child
-        .wait()
-        .map_err(|err| format!("waiting for bootstrap.ps1: {err}"))?;
-
-    if lock(&host).cancelled {
-        return Ok(());
-    }
-    if status.success() {
-        return Ok(());
-    }
-
-    // A failed *stage* still exits 0 and reports itself through the event stream.
-    // A non-zero exit means the script rejected its own arguments, which is a bug
-    // in the argv built above, not something the user can act on — so it is
-    // reported as a rejected call rather than as a fabricated `fail` event on a
-    // stage that never ran.
-    let code = status.code().unwrap_or(-1);
-    let tail = stderr_tail(&host);
-    Err(if tail.is_empty() {
-        format!("bootstrap.ps1 exited with code {code}")
-    } else {
-        format!("bootstrap.ps1 exited with code {code}: {tail}")
-    })
+    jsonstream::run(app, &SPEC, command, &host.provision)
 }
 
 fn build_args(host: &Host, opts: &ProvisionOpts) -> Vec<String> {
@@ -230,34 +127,4 @@ fn build_args(host: &Host, opts: &ProvisionOpts) -> Vec<String> {
         args.push("-CheckOnly".to_string());
     }
     args
-}
-
-/// All seven keys, always, so the frontend never has to test for their presence.
-fn log_event(stage: &str, message: &str) -> Value {
-    json!({
-        "ts": now_ms(),
-        "stage": stage,
-        "event": "log",
-        "message": message,
-        "done": Value::Null,
-        "total": Value::Null,
-        "remedy": Value::Null,
-    })
-}
-
-fn stderr_tail(host: &Host) -> String {
-    const MAX: usize = 2048;
-    let path = layout::logs_dir(&host.data_dir).join(STDERR_LOG);
-    let Ok(bytes) = std::fs::read(path) else {
-        return String::new();
-    };
-    let start = bytes.len().saturating_sub(MAX);
-    String::from_utf8_lossy(&bytes[start..])
-        .replace(['\r', '\n'], " ")
-        .trim()
-        .to_string()
-}
-
-fn lock(host: &Host) -> std::sync::MutexGuard<'_, ProvisionRun> {
-    host.provision.lock().unwrap_or_else(|err| err.into_inner())
 }

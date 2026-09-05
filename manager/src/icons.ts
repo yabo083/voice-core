@@ -15,21 +15,25 @@ import caretRight from "@phosphor-icons/core/assets/regular/caret-right.svg?raw"
 import check from "@phosphor-icons/core/assets/regular/check.svg?raw";
 import checkCircle from "@phosphor-icons/core/assets/regular/check-circle.svg?raw";
 import circleDashed from "@phosphor-icons/core/assets/regular/circle-dashed.svg?raw";
+import code from "@phosphor-icons/core/assets/regular/code.svg?raw";
 import copy from "@phosphor-icons/core/assets/regular/copy.svg?raw";
 import cpu from "@phosphor-icons/core/assets/regular/cpu.svg?raw";
 import database from "@phosphor-icons/core/assets/regular/database.svg?raw";
 import downloadSimple from "@phosphor-icons/core/assets/regular/download-simple.svg?raw";
+import fileCode from "@phosphor-icons/core/assets/regular/file-code.svg?raw";
 import filePlus from "@phosphor-icons/core/assets/regular/file-plus.svg?raw";
 import folderOpen from "@phosphor-icons/core/assets/regular/folder-open.svg?raw";
 import graphicsCard from "@phosphor-icons/core/assets/regular/graphics-card.svg?raw";
 import hardDrives from "@phosphor-icons/core/assets/regular/hard-drives.svg?raw";
 import info from "@phosphor-icons/core/assets/regular/info.svg?raw";
 import key from "@phosphor-icons/core/assets/regular/key.svg?raw";
+import magicWand from "@phosphor-icons/core/assets/regular/magic-wand.svg?raw";
 import microphoneStage from "@phosphor-icons/core/assets/regular/microphone-stage.svg?raw";
 import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import play from "@phosphor-icons/core/assets/regular/play.svg?raw";
 import pulse from "@phosphor-icons/core/assets/regular/pulse.svg?raw";
 import recycle from "@phosphor-icons/core/assets/regular/recycle.svg?raw";
+import sparkle from "@phosphor-icons/core/assets/regular/sparkle.svg?raw";
 import spinnerGap from "@phosphor-icons/core/assets/regular/spinner-gap.svg?raw";
 import stop from "@phosphor-icons/core/assets/regular/stop.svg?raw";
 import terminalWindow from "@phosphor-icons/core/assets/regular/terminal-window.svg?raw";
@@ -50,21 +54,25 @@ const SOURCES = {
   check,
   "check-circle": checkCircle,
   "circle-dashed": circleDashed,
+  code,
   copy,
   cpu,
   database,
   "download-simple": downloadSimple,
+  "file-code": fileCode,
   "file-plus": filePlus,
   "folder-open": folderOpen,
   "graphics-card": graphicsCard,
   "hard-drives": hardDrives,
   info,
   key,
+  "magic-wand": magicWand,
   "microphone-stage": microphoneStage,
   play,
   plus,
   pulse,
   recycle,
+  sparkle,
   "spinner-gap": spinnerGap,
   stop,
   "terminal-window": terminalWindow,

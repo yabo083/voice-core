@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
 
 namespace VoiceCoreTray.Services;
@@ -558,8 +559,16 @@ public sealed class RuntimeClient : IAsyncDisposable
                     // Deliberately silent: it precedes every `speech` by a synthesis, and a
                     // note here would overwrite the line the user is about to be shown.
                     break;
-                // src/obs.rs emits nine kinds and will add more; without this arm the next
-                // one is read off the wire and dropped with nothing anywhere saying so.
+                case "playbackStarted":
+                case "playbackFinished":
+                    // Playback reports coming back around the bus - usually this very
+                    // presenter's own (AudioPresenter.Play), sometimes another frontend's.
+                    // Deliberately silent for both reasons: echoing our own playback would
+                    // overwrite the line the user is reading, and whoever needs closure is
+                    // waiting on the event stream, not on this status area.
+                    break;
+                // src/obs.rs emits eleven kinds and will add more; without this arm the
+                // next one is read off the wire and dropped with nothing anywhere saying so.
                 default:
                     StatusNote?.Invoke($"收到未知事件：{kind ?? "unknown"}");
                     break;
@@ -606,6 +615,43 @@ public sealed class RuntimeClient : IAsyncDisposable
             return response.IsSuccessStatusCode ? await response.Content.ReadAsByteArrayAsync(ct) : null;
         }
         catch { return null; }
+    }
+
+    /// <summary>
+    /// Tell the runtime that this presenter started or finished playing a clip.
+    ///
+    /// The runtime owns no audio device, so nothing but the process that played can
+    /// report this - and without it a caller that wants to read three paragraphs in
+    /// order has to sleep for a duration it can only guess
+    /// (<c>voice-core speak --wait</c> waits for the finished report instead).
+    /// <paramref name="playedMs"/> is what was really played, which is not the clip's
+    /// length when the next utterance cut it short.
+    ///
+    /// Failures are swallowed on purpose: this is a courtesy to whoever is waiting, and
+    /// it must not interrupt playback or push a line into the user's status area. A
+    /// report that never arrives is already visible where it matters - the waiting
+    /// caller says exactly what it did not observe.
+    /// </summary>
+    public async Task ReportPlaybackAsync(string audioId, string phase, long? playedMs,
+        CancellationToken ct = default)
+    {
+        if (audioId.Length == 0) return;
+        var body = new Dictionary<string, object?>
+        {
+            ["audioId"] = audioId,
+            ["event"] = phase,
+            ["by"] = "presenter",
+        };
+        if (playedMs is long ms) body["playedMs"] = ms;
+
+        try
+        {
+            using var request = Request(HttpMethod.Post, "/api/played");
+            request.Content = new StringContent(JsonSerializer.Serialize(body), Encoding.UTF8,
+                "application/json");
+            using var _ = await _http.SendAsync(request, ct);
+        }
+        catch { /* see above: the waiter reports this better than the tray can */ }
     }
 
     public async ValueTask DisposeAsync()

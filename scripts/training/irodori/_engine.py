@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -26,9 +28,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import _layout  # noqa: E402
 
-# Layout questions that are not the backend's business are answered one level up.
+# Layout questions that are not the backend's business are answered one level up. The
+# progress protocol is one of them: the panel reads one shape from every step of the
+# pipeline, so it is defined once, beside the layout rules, and re-exported here so a
+# backend script never imports two modules to report one event.
 install_root = _layout.install_root
 utf8_stdout = _layout.utf8_stdout
+add_json_flag = _layout.add_json_flag
+json_mode = _layout.json_mode
+json_enabled = _layout.json_enabled
+emit = _layout.emit
+guard = _layout.guard
 
 # The two model repositories the Irodori backend cannot train without, in HuggingFace
 # cache layout. The checkpoint glob is character-for-character the worker's
@@ -48,6 +58,55 @@ CODEC_SAMPLE_RATE = 48000
 LATENT_FRAMES_PER_SECOND = 25.0
 
 
+# `n/total [elapsed<eta, rate]` out of a tqdm bar, wherever it came from: upstream's
+# trainer and its encoder both draw one and neither has a JSON mode. Anchored on the
+# closing `|` of the bar so a `loss=0.81` in the postfix cannot be read as a count.
+BAR = re.compile(
+    r"\|\s*(?P<done>\d+)/(?P<total>\d+)\s*\[(?P<elapsed>[^<\]]*)<(?P<eta>[^,\]]*),\s*(?P<rate>[^,\]]*)"
+)
+
+
+def parse_bar(line: str) -> dict | None:
+    """The numbers behind a tqdm bar, or None when the line is not one."""
+    found = BAR.search(line)
+    if found is None:
+        return None
+    return {
+        "done": int(found["done"]),
+        "total": int(found["total"]),
+        "elapsed": found["elapsed"].strip(),
+        "eta": found["eta"].strip(),
+        "rate": found["rate"].strip(),
+    }
+
+
+def runtime_layout() -> dict:
+    """`<data dir>/runtime.json`, the file bootstrap writes and the runtime reads.
+
+    Consulted because it is the only place that knows where a *packaged* install put the
+    engine when it is not under this tree - which is the normal case for a checkout being
+    used to drive an install elsewhere, where `<install root>/runtime/engine` does not
+    exist at all. Absent or unreadable is not an error: the callers below fall through to
+    their own defaults.
+    """
+    path = _layout.resolve_data_dir() / "runtime.json"
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _configured(layout: dict, key: str) -> Path | None:
+    """One `runtime.json` path, absolute. Relative entries resolve against the install
+    root, exactly as the runtime resolves them (`manager/src-tauri/src/layout.rs`)."""
+    value = layout.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value.strip()).expanduser()
+    return path if path.is_absolute() else (install_root() / path)
+
+
 @dataclass(frozen=True)
 class Engine:
     """One resolved Irodori install. Paths only - nothing here has imported torch."""
@@ -56,6 +115,9 @@ class Engine:
     hf_home: Path
     offline: bool
     python_override: Path | None = None
+    # `runtime.json`'s `ttsPython`, when it named one. Last in the candidate list, so it
+    # only ever answers where nothing else did.
+    runtime_python: Path | None = None
 
     @property
     def upstream(self) -> Path:
@@ -77,7 +139,10 @@ class Engine:
         Two provisioning styles both exist in the wild and both are legitimate: upstream's
         own `uv sync --extra cu128`, which creates `.venv` inside the cloned repo, and the
         separate venv a packaged install ships as `runtime/python` for the worker. Try the
-        in-repo one first because it is the one upstream's instructions produce.
+        in-repo one first because it is the one upstream's instructions produce. The
+        interpreter `runtime.json` names comes last: it is the one a checkout driving an
+        install elsewhere has, and the only one that exists when neither of the two above
+        is in this tree.
         """
         candidates: list[Path] = []
         if self.python_override is not None:
@@ -87,6 +152,8 @@ class Engine:
         for base in (self.upstream / ".venv", install_root() / "runtime" / "python"):
             candidates.append(base / "Scripts" / "python.exe")  # Windows venv
             candidates.append(base / "bin" / "python")  # POSIX venv
+        if self.runtime_python is not None:
+            candidates.append(self.runtime_python)
         return candidates
 
     def python(self) -> Path:
@@ -198,14 +265,19 @@ class Engine:
         env["PYTHONUNBUFFERED"] = "1"
         return env
 
-    def run_upstream(self, script: str, argv: list[str], *, log: Path | None = None) -> int:
-        """Run one of upstream's entry points with that environment, from its own
-        directory. Returns the exit status."""
+    def _upstream_command(self, script: str, argv: list[str]) -> list[str]:
+        """The argv for one of upstream's entry points, once the tree and the entry point
+        have been checked."""
         self.require_tree()
         target = self.upstream / script
         if not target.is_file():
             raise SystemExit(f"upstream script not found: {target}")
-        command = [str(self.python()), str(target), *argv]
+        return [str(self.python()), str(target), *argv]
+
+    def run_upstream(self, script: str, argv: list[str], *, log: Path | None = None) -> int:
+        """Run one of upstream's entry points with that environment, from its own
+        directory. Returns the exit status."""
+        command = self._upstream_command(script, argv)
         if log is None:
             return subprocess.run(command, env=self.env(), cwd=str(self.upstream)).returncode
         log.parent.mkdir(parents=True, exist_ok=True)
@@ -217,6 +289,62 @@ class Engine:
                 stdout=handle,
                 stderr=subprocess.STDOUT,
             ).returncode
+
+    def stream_upstream(self, script: str, argv: list[str], *, on_line) -> int:
+        """The same run, with every output line handed to `on_line` as it appears.
+
+        Three details are what make this show a two-hour run's progress instead of
+        deadlocking on it:
+
+        * stderr is merged into stdout. tqdm draws on stderr while upstream prints on
+          stdout, so two pipes would mean one of them filling while nobody reads it - and
+          a full pipe stops the trainer dead, an hour in, with no error anywhere.
+        * the pipe is read raw, one available chunk at a time. tqdm ends a refresh with
+          `\\r` and no newline, so `readline` would block until the next real line - one
+          every hundred steps here, which is minutes of nothing followed by a burst.
+        * a line ends at `\\r` OR `\\n`, so each bar refresh is a line of its own.
+        """
+        process = subprocess.Popen(  # noqa: S603 - argv is built above, never a shell string
+            self._upstream_command(script, argv),
+            env=self.env(),
+            cwd=str(self.upstream),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            bufsize=0,
+        )
+        pending = b""
+        with process:
+            fd = process.stdout.fileno()
+            while True:
+                try:
+                    chunk = os.read(fd, 1 << 16)
+                except OSError:
+                    # The pipe died with the process, which is what a kill looks like from
+                    # this side.
+                    break
+                if not chunk:
+                    break
+                pending = (pending + chunk).replace(b"\r\n", b"\n")
+                while True:
+                    # len(pending) stands in for "no separator": find() returns -1, and a
+                    # separator in the last position still reports len - 1.
+                    cut = min(
+                        index
+                        for index in (pending.find(b"\n"), pending.find(b"\r"), len(pending))
+                        if index >= 0
+                    )
+                    if cut == len(pending):
+                        break
+                    line, pending = pending[:cut], pending[cut + 1 :]
+                    on_line(line.decode("utf-8", "replace"))
+                if len(pending) > 1 << 16:
+                    # A producer that emits neither separator must not grow this forever.
+                    on_line(pending.decode("utf-8", "replace"))
+                    pending = b""
+            if pending:
+                on_line(pending.decode("utf-8", "replace"))
+        return process.returncode
 
     def command_line(self, script: str, argv: list[str]) -> str:
         interpreter = next(
@@ -282,18 +410,30 @@ def add_engine_args(parser: argparse.ArgumentParser) -> None:
 
 
 def resolve_engine(args: argparse.Namespace) -> Engine:
+    """Flags first, then the shell, then `runtime.json`, then the built-in layout.
+
+    `runtime.json` sits above the built-in defaults and below the environment because it
+    is a measurement rather than a guess: bootstrap wrote those paths and the runtime is
+    using them. Where it is silent - or absent, as in a checkout that has never
+    provisioned - the defaults answer exactly as before.
+    """
     root_path = install_root()
+    layout = runtime_layout()
     if getattr(args, "engine_root", None) is not None:
         engine_root = Path(args.engine_root).expanduser().resolve()
     elif os.environ.get(ENGINE_ROOT_ENV):
         engine_root = Path(os.environ[ENGINE_ROOT_ENV]).expanduser().resolve()
     else:
-        engine_root = root_path / "runtime" / "engine"
+        configured = _configured(layout, "ttsRoot")
+        engine_root = configured or root_path / "runtime" / "engine"
 
+    configured_cache = _configured(layout, "hfHome")
     if getattr(args, "hf_home", None) is not None:
         hf_home = Path(args.hf_home).expanduser().resolve()
     elif os.environ.get("HF_HOME"):
         hf_home = Path(os.environ["HF_HOME"]).expanduser().resolve()
+    elif configured_cache is not None:
+        hf_home = configured_cache
     else:
         packaged = root_path / "models" / "huggingface"
         # The packaged location wins when it exists; the in-tree one is the fallback,
@@ -306,4 +446,5 @@ def resolve_engine(args: argparse.Namespace) -> Engine:
         hf_home=hf_home,
         offline=not getattr(args, "allow_hf_download", False),
         python_override=Path(override).expanduser() if override is not None else None,
+        runtime_python=_configured(layout, "ttsPython"),
     )

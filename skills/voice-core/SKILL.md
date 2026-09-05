@@ -1,6 +1,6 @@
 ---
 name: voice-core
-description: 用本机 voice-core runtime 让 agent 真的出声：合成一句语音、自动播放、弹出字幕对话框，可指定角色音色包。当任务涉及本机语音合成 / TTS / 让 agent 说话或念一段话 / 用某个角色的声音回复 / 音色（音色包、LoRA、音色克隆）/ 字幕弹窗 / voice-core 这个产品本身时使用。内容是最短调用路径、HTTP 契约、音色包怎么选、失败怎么自诊断、新音色怎么注册。
+description: 用本机 voice-core runtime 让 agent 真的出声：合成一句语音、自动播放、弹出字幕对话框，可指定角色音色包。当任务涉及本机语音合成 / TTS / 让 agent 说话或念一段话 / 连续念多段旁白 / 用某个角色的声音回复 / 音色（音色包、LoRA、音色克隆）/ 字幕弹窗 / voice-core 这个产品本身时使用。内容是最短调用路径、怎么等一段真的放完（`--wait`）、停顿怎么写（`[pause:N]`）、HTTP 契约、音色包怎么选、失败怎么自诊断、新音色怎么注册。
 ---
 
 # voice-core：让 agent 在这台机器上真的出声
@@ -43,13 +43,43 @@ CLI 自己等 `--timeout-ms / 1000 + 30` 秒（默认 630 s），服务端合成
 要把这几十秒挪到用户不在等的时候：先 `voice-core.exe warm`（或 `POST /api/warm`），
 它加载完模型才返回，之后的第一句就是热的。
 
+**要按顺序念好几段（旁白、多轮对话）就加 `--wait`。** 不加时 speak 在音频**生成好**的那一刻就返回，
+不是**放完**的那一刻：三段连着发会同时开口，而 `time.sleep(7.5)` 是猜的、两个方向都会猜错。
+加上 `--wait` 它先订阅事件流再发请求，等到「这段真的放完了」那一帧才返回——字幕进程放的也算，
+它自己放的也算，你不需要知道是谁放的：
+
+```powershell
+$vc = 'E:\NewToolBox\voice-core\bin\voice-core.exe'
+& $vc speak --voice ba-miyu-lora --text "おかえりなさい、先生。"     --display "欢迎回来，老师。"   --wait
+& $vc speak --voice ba-miyu-lora --text "今日はいい天気ですね、先生。" --display "今天天气很好呢，老师。" --wait
+```
+
+实测第二句（字幕进程在跑，由它放音）：
+
+```
+今天天气很好呢，老师。
+request 1ae88bc9c7a646b4 | 7823 ms total (3403 ms synth) | 1 presenter(s)
+```
+
+`--wait` 时 `total` 是**含播放的墙钟**（7823 ms），合成只占其中 3403 ms；不加 `--wait` 时它还是
+runtime 报的合成端到端时间，和以前一样。没有任何前端放音时，`--wait` 等到 `durationMs + 5 s`
+就**退 1** 并说清楚没等到什么（`--wait-timeout-ms <ms>` 改这个预算）：
+
+```
+Error: --wait: nothing reported audio 46e78777... finished playing within 9320 ms;
+no frontend reported playing it at all: start the presenter, or pass --play always to play it here
+```
+
+所以 `--play never --wait` 是自相矛盾的写法。没有字幕进程时用默认的 `--play auto` 就好：
+CLI 自己放、自己上报，`--wait` 一样收得到闭环（实测 `request ec5b1b6b... | 6781 ms total (3250 ms synth)`）。
+
 退出码只有三个：`0` 成功，`1` 调用失败（stderr 形如 `[voice_pack_not_found] ... try: ...`），
 `2` 参数写错。唯一例外是 `doctor`：它永远退 0，判断要读输出。
 
 不在这台机器上：CLI 一律是安装根下的 `bin\voice-core.exe`（开发树是 `target\release\voice-core.exe`），
 数据目录是安装根下的 `data\`；安装在不可写目录（Program Files）时 runtime 会退到 `%APPDATA%\voice-core`。
 
-## 1. 两段文本和它们的对齐
+## 1. 两段文本、对齐、停顿、语言
 
 - `text` 是**念出来的文本**，`displayText` 是**给人看的文本**，两者都由你产出——翻译是你的责任，
   runtime 从不翻译。`text` 是 API 层唯一必填的字段，但音色包在引擎层面也是必需的（§2）。
@@ -60,11 +90,48 @@ CLI 自己等 `--timeout-ms / 1000 + 30` 秒（默认 630 s），服务端合成
   翻译还会合并/拆分/重排子句），下游推不出来，只有产出两串的你知道。不给也能工作，
   字幕会退化成整行旁注。标点照样成对给（`{"base":"，","ruby":"、"}`）：拼接规则要求它们在，
   渲染端自己会丢掉纯标点的旁注。
+- **拼接对不上不再默默降级。** `rubyPairs` 还原不出 `text` 或 `displayText` 时是 `invalid_request`，
+  并指出**第一个对不上的下标**、已经拼到第几个字、以及两边分别是什么——一眼就能改：
 
-CLI 传法（`@pairs.json` 可以从文件读同一个数组，长句省事）：
+  ```
+  [invalid_request] rubyPairs[2].ruby does not line up with text: the first 2 pair(s)
+  reconstructed 8 character(s), then this one offers `せんせい。` where text has `先生。`
+  ```
+
+  这是调用方的 bug，只有你能修（下游没有任何东西推得出正确的对齐），所以它现在会响。
+  空数组等于没给，不算对不上。
+- **停顿只有一种写法：`[pause:N]`，N = 毫秒，1–10000，直接写在 `text` 里。**
+  runtime 在标记处把这句切开、分段合成、再把 N 毫秒静音拼回去：**一个 `audioId`、一帧 `speech`、
+  `durationMs` 把静音算进去**，所以 `--wait` 和字幕停留时间都自动是对的。标记不会被念出来，
+  事件里的 `text` 是去掉标记后的那句（`rubyPairs` 也是按去掉标记的文本对齐，切分不会重排你的数组）。
+  相邻两个标记相加；写在整句最前或最后的标记会被丢掉，并在事件流里说一声（句首句尾的停顿是你自己的等待）；
+  写坏了（`[pause:abc]`、`[pause:99999]`）是 `invalid_request` 并把那段原文贴回给你，**绝不当字面文本念出来**。
+
+  ```powershell
+  --text "おかえりなさい、先生。[pause:600]今日はいい天気ですね。"
+  ```
+
+  实测：整句不带标记 5760 ms，带 `[pause:600]` 是 6880 ms，其中**正好 600 ms** 是拼进去的静音
+  （两半各自单独合成是 3120 + 3160 ms），多出来的 520 ms 是分段各自的起音和收尾。
+  所以标记是给你真正想要的那个气口用的，不要拿它当省时间的手段，也不要一句里撒十个。
+- `language`（CLI `--language`）可选，短 BCP-47 标签（`ja`、`zh-CN`、`en-US`）。写了就会校验：
+  包声明的 `languages` 不包含它，直接 `voice_language_unsupported`，消息里带包 id、它声明的、你要的；
+  不写就和以前完全一样（runtime 不检测、不猜、不翻译）。标签不分大小写、按子标签比：`ja-JP` 满足声明 `ja` 的包，
+  `zh-TW` 不满足声明 `zh-CN` 的包；一个语言都没声明的包谁都不冲突，放行。
+  **它只做校验，不做引擎路由**——第二个引擎是以后的事，现在先有字段、校验和错误码，你可以照着写。
+  现有包都是 `["ja"]`，所以 `--language zh-CN` 会被拒，而这正是过去把中文塞进日语模型、
+  拿到一段听不懂的音频却没有任何报错的那个坑。
+
+CLI 传法（`@pairs.json` 从文件读同一个数组；`-` 从 stdin 读——长数组和 PowerShell 引号打架时用它最稳，
+Windows 引号问题就此消失）：
 
 ```powershell
 --ruby-pairs '[{"base":"欢迎回来","ruby":"おかえりなさい"},{"base":"，","ruby":"、"},{"base":"老师。","ruby":"先生。"}]'
+```
+
+```powershell
+$pairs = '[{"base":"欢迎回来","ruby":"おかえりなさい"},{"base":"老师。","ruby":"先生。"}]'
+$pairs | & $vc speak --voice ba-miyu-lora --text "おかえりなさい、先生。" --display "欢迎回来，老师。" --ruby-pairs -
 ```
 
 ## 2. 音色包：怎么列、怎么选
@@ -86,7 +153,8 @@ ba-shun-kid-lora     ba-shun-kid-lora         lora-adapter
   `[internal] engine could not synthesize this utterance: Specify ref_wav/ref_wavs/ref_latent/ref_latents, or set no_ref=True.`
   （实测）。永远显式选一个 id。
 - 想看 `languages` / `character` / `avatar` / `path` 得走 `GET /api/voices`，CLI 只印三列。
-  发之前对一下语言：现有包都是 `["ja"]`，把中文塞给它只会得到听不懂的音频而不是报错。
+  现有包都是 `["ja"]`。要让 runtime 帮你挡住语言错配，就在 speak 里带上 `language`（§1）：
+  它会直接报 `voice_language_unsupported`，而不是念出一段听不懂的音频。
 - 用户要一个列表里没有的音色：如实说没有，指向 §6，**不要编造 id**。
 
 ## 3. HTTP 接口
@@ -103,6 +171,7 @@ Base 默认 `http://127.0.0.1:8760`（runtime `--bind` 可以改，但它只有 
 | GET | `/api/metrics` | 计数器与合成延迟分位 |
 | GET | `/api/voices` | 已装音色包数组 |
 | POST | `/api/speak` | 合成一句 |
+| POST | `/api/played` | 放音的前端上报「开始/放完了」，`204` 无 body（见下） |
 | GET | `/api/audio/{audioId}` | 取 WAV 字节（`audio/wav`，也答 `HEAD`） |
 | GET | `/api/events` | SSE：字幕、引擎状态、进度、失败 |
 | POST | `/api/warm` | 现在就加载模型，`modelLoaded` 为真才返回 |
@@ -110,8 +179,9 @@ Base 默认 `http://127.0.0.1:8760`（runtime `--bind` 可以改，但它只有 
 | DELETE | `/api/requests/{requestId}` | 取消（放开调用方，但引擎跑完当前 step 才放 GPU） |
 | POST | `/api/shutdown` | 让 runtime 退出 |
 
-`POST /api/speak` 请求字段：`text`（必填）、`voicePackId`（引擎层面也必填，见 §2）、`displayText`、
-`rubyPairs`、`seed`、`numSteps`（默认 32）、`displaySeconds`（字幕停留秒数）、`timeoutMs`。
+`POST /api/speak` 请求字段：`text`（必填，可带 `[pause:N]`，见 §1）、`voicePackId`（引擎层面也必填，见 §2）、
+`displayText`、`rubyPairs`、`language`（可选，会校验，见 §1）、`seed`、`numSteps`（默认 32）、
+`displaySeconds`（字幕停留秒数）、`timeoutMs`。
 响应：`requestId`、`audioId`、`sampleRate`、`durationMs`、`bytes`、`displayText`、`voicePackId`、
 `presenters`、`coldStart`、`queueMs`、`synthMs`、`totalMs`。**音频不在 JSON 里**，字节走
 `GET /api/audio/{audioId}`；全系统没有 base64。`audioId` 只在 spool 里有效（默认 TTL 3600 s、
@@ -159,9 +229,25 @@ $r = Invoke-RestMethod -Method Post -Uri 'http://127.0.0.1:8760/api/speak' `
 
 事件流每帧一个 JSON 信封（`seq`、`tsMs`、`kind` + 该 kind 的字段），新订阅者先收到最近 64 条尾巴。
 `kind` ∈ `runtimeReady` / `runtimeStopping` / `workerStarting` / `workerReady` / `workerStopped` /
-`speakStarted` / `speech` / `speakFailed` / `progress`。字幕和播放需要的一切都在 `speech` 一帧里
+`speakStarted` / `speech` / `playbackStarted` / `playbackFinished` / `speakFailed` / `progress`。
+字幕和播放需要的一切都在 `speech` 一帧里
 （`audioId`、`text`、`displayText`、`rubyPairs`、`voicePackId`、`durationMs`、`sampleRate`、`displaySeconds`）。
 runtime 从不反向调用前端，这是唯一的推送通道。
+
+**播放闭环**：放音的那个前端自己 `POST /api/played`（body `{audioId, event:"started"|"finished", playedMs?, by?}`，
+`by` 省略即 `presenter`，本仓库的 CLI 报 `cli`），runtime 只把它原样发到事件流上——
+`requestId` 由 runtime 从 spool 条目里查出来，上报方只需要知道自己放的是哪个 `audioId`。
+这没有反转「runtime 从不回调前端」：方向是前端**往里报**。实测两帧：
+
+```json
+{"seq":53,"kind":"playbackStarted","requestId":"1ae88bc9c7a646b4","audioId":"584596dd702c44c2","by":"presenter"}
+{"seq":54,"kind":"playbackFinished","requestId":"1ae88bc9c7a646b4","audioId":"584596dd702c44c2","by":"presenter","playedMs":4391}
+```
+
+`playedMs` 是真正放了多久，不等于 `durationMs`（被下一句打断的那段就更短）。
+CLI 的 `--wait` 等的就是 `playbackFinished` 这一帧（§0）；你自己写集成时，播完了也请报一声，
+否则别人的 `--wait` 只能等超时。写自己的字幕/播放前端时记得把这两个 kind 也处理掉（哪怕是忽略）：
+你自己的上报会从总线上回到你手里。
 
 ## 4. 失败时的自诊断
 
@@ -214,9 +300,10 @@ HF_HOME        ok      ...\irodori-tts\model\huggingface
 | `code` | HTTP | 你的动作 |
 |---|---|---|
 | `unauthorized` | 401 | 重读 `token.txt`；health 通就是数据目录不一致 |
-| `invalid_request` | 400 | `text` 为空或请求体不合法，改请求 |
+| `invalid_request` | 400 | `text` 为空、`[pause:N]` 写坏了、或 `rubyPairs` 拼不回原串；消息里带出错的那一段，改请求 |
 | `voice_pack_not_found` | 404 | `recovery.detail` 列出已装 id，如实告知 |
-| `not_found` | 404 | `audioId` 过期或不存在，重新合成 |
+| `voice_language_unsupported` | 400 | 这个包不声明你要的语言（消息里带包 id、它声明的、你要的）：换包、换 `language`、或不带 `language` |
+| `not_found` | 404 | `audioId` 过期或不存在，重新合成（`/api/played` 报一个不存在的 id 也是这条） |
 | `worker_unavailable` | 503 | 外挂引擎没应答，或引擎在请求中途死了；重试一次 |
 | `worker_start_failed` | 500 | 引擎起不来；消息带实际等待毫秒和 stderr 尾巴，读 `tts-worker.err.log` |
 | `model_load_failed` | 500 | 引擎活着但模型没加载起来；消息里有引擎自己的原因 |
@@ -298,4 +385,8 @@ runtime 按 mtime 自动重载这一段，不用重启；写完 `voices` 立刻�
   要知道就跑 `--print-layout`，不要硬编码 `HF_HOME` 或权重目录，也不要自己去下模型。
 - **不要把 token 写进任何会外发的内容**，包括你的回复、日志和提交。
 - **不要并发 speak**，也不要把超时设成几秒——见 §0 的冷启动。
+- **不要用 `sleep` 猜播放时长。** 要按顺序念多段就 `--wait`（§0），或者自己订阅 `/api/events`
+  等 `playbackFinished`；猜出来的等待要么抢话，要么白等。
+- **不要写 `[pause:N]` 以外的任何标记。** 没有 SSML、没有 `<break>`、没有情感标签——
+  runtime 只认 `[pause:N]`，别的会原样交给引擎**当字面文本念出来**。
 - runtime 不做 LLM 推理、不做对话管理、不做翻译，也不做语音识别。要说什么、翻成什么，都是你的责任。

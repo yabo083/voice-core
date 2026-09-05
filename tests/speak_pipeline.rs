@@ -6,7 +6,11 @@
 //! * the event stream carries the subtitle and reports itself as a presenter;
 //! * one `requestId` links the response, the event and `metrics.jsonl`;
 //! * `/api/health` is reachable without a token while everything else is not;
-//! * `/api/shutdown` actually terminates the server.
+//! * `/api/shutdown` actually terminates the server;
+//! * `[pause:N]` becomes real silence inside one `audioId`;
+//! * every way a caller can get `text`, `rubyPairs` or `language` wrong is a named
+//!   error before the device is touched;
+//! * playback closure is whatever the frontend that played reported.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -390,4 +394,241 @@ async fn shutdown(http: &reqwest::Client, harness: Harness) {
         "the server must return after /api/shutdown"
     );
     let _ = std::fs::remove_dir_all(&harness.data_dir);
+}
+
+#[tokio::test]
+async fn a_pause_marker_becomes_silence_inside_one_audio_id() {
+    let harness = start_runtime("pause", true).await;
+    let http = reqwest::Client::new();
+
+    let mut stream = http
+        .get(format!("{}/api/events", harness.base))
+        .bearer_auth(&harness.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // The alignment is written against the text WITHOUT its markers, and it must
+    // survive the split untouched: the runtime resegments nothing.
+    let pairs = json!([
+        { "base": "你好", "ruby": "こんにちは" },
+        { "base": "老师", "ruby": "先生" }
+    ]);
+    let body: Value = http
+        .post(format!("{}/api/speak", harness.base))
+        .bearer_auth(&harness.token)
+        .json(&json!({
+            "text": "こんにちは[pause:600]先生",
+            "displayText": "你好老师",
+            "rubyPairs": pairs,
+            "voicePackId": "test-voice"
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+
+    // Two segments of the fake engine's 100 ms clip, 600 ms of silence between them,
+    // measured off the file rather than added up from what the engine claimed.
+    assert_eq!(body["durationMs"], 800);
+    assert_eq!(body["sampleRate"], 24000);
+    let expected_silence = 600 * 24_000 / 1000 * 2;
+    let clip = wav_bytes();
+    let pcm = clip.len() - 44;
+    assert_eq!(body["bytes"].as_u64().unwrap(), (44 + pcm * 2 + expected_silence) as u64);
+
+    let audio = http
+        .get(format!(
+            "{}/api/audio/{}",
+            harness.base,
+            body["audioId"].as_str().unwrap()
+        ))
+        .bearer_auth(&harness.token)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(&audio[..4], b"RIFF");
+    assert_eq!(
+        u32::from_le_bytes(audio[40..44].try_into().unwrap()) as usize,
+        pcm * 2 + expected_silence,
+        "the data chunk must declare the spliced length"
+    );
+    assert_eq!(&audio[44..44 + pcm], &clip[44..], "the first segment verbatim");
+    assert!(
+        audio[44 + pcm..44 + pcm + expected_silence].iter().all(|b| *b == 0),
+        "the gap must be silence, not a repeated segment"
+    );
+
+    // One event, the markers gone from what a presenter shows, the alignment whole.
+    let speech = read_event(&mut stream, "speech", body["requestId"].as_str().unwrap()).await;
+    assert_eq!(speech["text"], "こんにちは先生");
+    assert_eq!(speech["durationMs"], 800);
+    assert_eq!(speech["rubyPairs"], pairs);
+
+    shutdown(&http, harness).await;
+    drop(stream);
+}
+
+#[tokio::test]
+async fn caller_mistakes_are_named_before_the_device_is_touched() {
+    let harness = start_runtime("input", true).await;
+    let http = reqwest::Client::new();
+    let speak = |body: Value| {
+        let http = http.clone();
+        let base = harness.base.clone();
+        let token = harness.token.clone();
+        async move {
+            let response = http
+                .post(format!("{base}/api/speak"))
+                .bearer_auth(token)
+                .json(&body)
+                .send()
+                .await
+                .unwrap();
+            (response.status().as_u16(), response.json::<Value>().await.unwrap())
+        }
+    };
+
+    // A marker the runtime cannot read is refused, never spoken aloud as text.
+    let (status, error) = speak(json!({ "text": "あ[pause:abc]い" })).await;
+    assert_eq!(status, 400);
+    assert_eq!(error["code"], "invalid_request");
+    assert!(
+        error["message"].as_str().unwrap().contains("[pause:abc]"),
+        "{}",
+        error["message"]
+    );
+
+    // An alignment that does not reconcile says which pair broke it.
+    let (status, error) = speak(json!({
+        "text": "おかえりなさい、先生。",
+        "displayText": "欢迎回来，老师。",
+        "rubyPairs": [
+            { "base": "欢迎回来", "ruby": "おかえりなさい" },
+            { "base": "，", "ruby": "、" },
+            { "base": "老师。", "ruby": "せんせい。" }
+        ]
+    }))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(error["code"], "invalid_request");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.starts_with("rubyPairs[2].ruby"), "{message}");
+    assert!(message.contains("先生。"), "{message}");
+
+    // The pack declares ja, so zh-CN is refused with its own code rather than spoken
+    // by a model that cannot read it.
+    let (status, error) = speak(json!({
+        "text": "你好，老师。",
+        "voicePackId": "test-voice",
+        "language": "zh-CN"
+    }))
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(error["code"], "voice_language_unsupported");
+    assert_eq!(error["recovery"]["kind"], "fix_request");
+    assert!(
+        error["message"].as_str().unwrap().contains("test-voice"),
+        "{}",
+        error["message"]
+    );
+
+    // The language it does declare goes through, and so does no language at all.
+    for language in [Some("ja-JP"), None] {
+        let mut body = json!({ "text": "こんにちは", "voicePackId": "test-voice" });
+        if let Some(language) = language {
+            body["language"] = json!(language);
+        }
+        let (status, _) = speak(body).await;
+        assert_eq!(status, 200, "language={language:?}");
+    }
+
+    shutdown(&http, harness).await;
+}
+
+#[tokio::test]
+async fn playback_closure_comes_from_whoever_played_it() {
+    let harness = start_runtime("played", true).await;
+    let http = reqwest::Client::new();
+
+    let mut stream = http
+        .get(format!("{}/api/events", harness.base))
+        .bearer_auth(&harness.token)
+        .send()
+        .await
+        .unwrap();
+    assert!(stream.status().is_success());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let body: Value = http
+        .post(format!("{}/api/speak", harness.base))
+        .bearer_auth(&harness.token)
+        .json(&json!({ "text": "こんにちは", "voicePackId": "test-voice" }))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let audio_id = body["audioId"].as_str().unwrap().to_string();
+    let request_id = body["requestId"].as_str().unwrap().to_string();
+
+    let report = |payload: Value| {
+        let http = http.clone();
+        let base = harness.base.clone();
+        let token = harness.token.clone();
+        async move {
+            http.post(format!("{base}/api/played"))
+                .bearer_auth(token)
+                .json(&payload)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    // No `by`: a frontend that played audio is a presenter.
+    let started = report(json!({ "audioId": audio_id, "event": "started" })).await;
+    assert_eq!(started.status(), 204);
+    let finished = report(json!({
+        "audioId": audio_id,
+        "event": "finished",
+        "playedMs": 1487,
+        "by": "cli"
+    }))
+    .await;
+    assert_eq!(finished.status(), 204);
+
+    // The runtime supplied the request id from the spool entry; the reporter only knew
+    // which clip it played.
+    let start = read_event(&mut stream, "playbackStarted", &request_id).await;
+    assert_eq!(start["audioId"].as_str().unwrap(), audio_id);
+    assert_eq!(start["by"], "presenter");
+    let end = read_event(&mut stream, "playbackFinished", &request_id).await;
+    assert_eq!(end["audioId"].as_str().unwrap(), audio_id);
+    assert_eq!(end["by"], "cli");
+    assert_eq!(end["playedMs"], 1487);
+
+    // A report about audio the spool does not have is the same 404 as fetching it.
+    let unknown = report(json!({ "audioId": "0000000000000000", "event": "finished" })).await;
+    assert_eq!(unknown.status(), 404);
+    assert_eq!(unknown.json::<Value>().await.unwrap()["code"], "not_found");
+
+    // An event nobody defined is a caller bug, not a silent no-op.
+    let nonsense = report(json!({ "audioId": audio_id, "event": "paused" })).await;
+    assert_eq!(nonsense.status(), 400);
+    assert_eq!(
+        nonsense.json::<Value>().await.unwrap()["code"],
+        "invalid_request"
+    );
+
+    shutdown(&http, harness).await;
+    drop(stream);
 }

@@ -15,6 +15,8 @@ pub enum ErrorCode {
     InvalidRequest,
     NotFound,
     VoicePackNotFound,
+    /// The pack exists but does not declare the language the caller asked for.
+    VoiceLanguageUnsupported,
     WorkerUnavailable,
     WorkerStartFailed,
     ModelLoadFailed,
@@ -72,7 +74,11 @@ impl ApiError {
     pub fn status(&self) -> StatusCode {
         match self.code {
             ErrorCode::Unauthorized => StatusCode::UNAUTHORIZED,
-            ErrorCode::InvalidRequest => StatusCode::BAD_REQUEST,
+            // The pack exists and the request is well-formed; what cannot be honoured
+            // is the pair. That is a caller error, not a missing resource.
+            ErrorCode::InvalidRequest | ErrorCode::VoiceLanguageUnsupported => {
+                StatusCode::BAD_REQUEST
+            }
             ErrorCode::NotFound | ErrorCode::VoicePackNotFound => StatusCode::NOT_FOUND,
             ErrorCode::WorkerUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             ErrorCode::ResourceBusy => StatusCode::TOO_MANY_REQUESTS,
@@ -92,6 +98,7 @@ impl ApiError {
             ErrorCode::InvalidRequest => "invalid_request",
             ErrorCode::NotFound => "not_found",
             ErrorCode::VoicePackNotFound => "voice_pack_not_found",
+            ErrorCode::VoiceLanguageUnsupported => "voice_language_unsupported",
             ErrorCode::WorkerUnavailable => "worker_unavailable",
             ErrorCode::WorkerStartFailed => "worker_start_failed",
             ErrorCode::ModelLoadFailed => "model_load_failed",

@@ -24,11 +24,13 @@ import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, type Inventory } from "./ipc";
 import { inventory, refreshInventory, stack, startStatusPolling, status } from "./state";
 import { toast } from "./toast";
+import { createConfigScreen } from "./screens/config";
 import { createDeployScreen, type DeployScreen } from "./screens/deploy";
 import { createStatusScreen } from "./screens/status";
+import { createTrainingScreen, type TrainingScreen } from "./screens/train";
 import { createVoicesScreen } from "./screens/voices";
 
-type ScreenId = "deploy" | "voices" | "status";
+type ScreenId = "deploy" | "voices" | "train" | "status" | "config";
 
 /** Screens may own a command bar; the shell, not the screen, decides where it sits. */
 type ScreenElement = HTMLElement & { commandBar?: HTMLElement };
@@ -42,15 +44,21 @@ interface NavSpec {
 const NAV: NavSpec[] = [
   { id: "deploy", label: "部署", glyph: "download-simple" },
   { id: "voices", label: "音色", glyph: "microphone-stage" },
+  { id: "train", label: "训练", glyph: "magic-wand" },
   { id: "status", label: "状态", glyph: "pulse" },
+  // Last on purpose: a reference surface, not somewhere work starts.
+  { id: "config", label: "配置", glyph: "file-code" },
 ];
 
 function mount(app: HTMLElement): void {
   const deploy: DeployScreen = createDeployScreen();
+  const train: TrainingScreen = createTrainingScreen();
   const screens: Record<ScreenId, ScreenElement> = {
     deploy,
     voices: createVoicesScreen(),
+    train,
     status: createStatusScreen(),
+    config: createConfigScreen(),
   };
 
   const buttons = {} as Record<ScreenId, HTMLButtonElement>;
@@ -199,7 +207,7 @@ function mount(app: HTMLElement): void {
 
   document.addEventListener("app:navigate", (ev: Event) => {
     const { to, focus } = (ev as CustomEvent<{ to: ScreenId; focus: boolean }>).detail;
-    if (to === "deploy" || to === "voices" || to === "status") show(to, focus);
+    if (NAV.some((item) => item.id === to)) show(to, focus);
   });
 
   // Where the window opens is a statement about what is left to do: an unprovisioned

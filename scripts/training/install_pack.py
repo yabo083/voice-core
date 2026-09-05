@@ -44,6 +44,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import _layout  # noqa: E402
 
 SPEAKER_SUFFIX = ".speaker.safetensors"
+# This step's name in the progress protocol (`_layout.py`). Last of the six, and the only
+# one that changes anything outside the scratch directory.
+STAGE = "install"
 AUDIO_SUFFIXES = {".wav", ".flac", ".ogg", ".opus", ".mp3"}
 # Optimizer and dataloader state for `--resume`. 200+ MB per checkpoint and of no use to
 # inference, which needs only adapter_config.json plus adapter_model.safetensors
@@ -373,7 +376,15 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="Print the plan and the JSON entry, change nothing."
     )
+    _layout.add_json_flag(parser)
     args = parser.parse_args()
+    if args.json:
+        _layout.json_mode()
+    _layout.guard(STAGE, lambda: install(args))
+
+
+def install(args: argparse.Namespace) -> None:
+    _layout.emit(STAGE, "start", f"installing {args.pack} as {args.id!r}")
 
     if not ID_PATTERN.match(args.id):
         raise SystemExit(
@@ -474,6 +485,7 @@ def main() -> None:
 
     if args.dry_run:
         print(f"dry run    would have {what}; voicePacks would be {ids}")
+        _layout.emit(STAGE, "ok", f"dry run: would have {what}; voicePacks would be {ids}")
         return
 
     if target.exists():
@@ -505,6 +517,12 @@ def main() -> None:
     print(
         "ready      the runtime re-reads voicePacks on mtime change, so no restart. "
         "Check with: voice-core.exe voices"
+    )
+    _layout.emit(
+        STAGE,
+        "ok",
+        f"{args.id} installed: {size / 1048576:.1f} MiB in {target}, {what}. The runtime "
+        "re-reads voicePacks on mtime change, so nothing needs restarting.",
     )
 
 

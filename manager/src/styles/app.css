@@ -780,6 +780,41 @@ select.input {
   color: var(--accent);
 }
 
+
+/* Source provenance chips: identify which layer/file determined a configuration value. */
+.src,
+.chip.src--pack,
+.src--pack {
+  background: var(--accent-wash);
+  color: var(--accent-text);
+  border: 1px solid rgba(139, 108, 239, 0.28);
+}
+
+.chip.src--config,
+.src--config {
+  background: var(--st-reuse-wash);
+  color: var(--st-reuse);
+  border: 1px solid var(--st-reuse-line);
+}
+
+.chip.src--derived,
+.src--derived {
+  background: var(--st-idle-wash);
+  color: var(--ink-faint);
+  border: 1px solid var(--line);
+}
+
+.src {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 1px var(--sp-3);
+  border-radius: var(--r-chip);
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-caps);
+  font-weight: 500;
+  white-space: nowrap;
+}
 .note {
   display: grid;
   grid-template-columns: auto 1fr;
@@ -1568,6 +1603,28 @@ select.input {
   font-size: var(--fs-sm);
 }
 
+/* Compact tile strip for dense operational numbers (step, loss, speed, ETA) */
+.tiles--compact {
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: var(--sp-3);
+}
+
+.tiles--compact .tile {
+  padding: var(--sp-3) var(--sp-4);
+  gap: var(--sp-1);
+}
+
+.tiles--compact .tile__value {
+  font-size: var(--fs-md);
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.tiles--compact .tile__label {
+  font-size: var(--fs-micro);
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
 .tile__value {
   font-family: var(--font-display);
   font-size: var(--fs-lg);
@@ -1655,10 +1712,489 @@ select.input {
   box-shadow: var(--shadow-pop);
   animation: toast-in var(--dur-3) var(--ease-out);
 }
+/* File path and action row on config screens */
+.cfg__path {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  min-width: 0;
+}
+
+
+/* --- json viewer & effective-value table ---------------------------------- */
+/* Monospace read-only viewer for raw configuration files with syntax highlighting */
+.jsonview {
+  display: block;
+  max-height: 60vh;
+  margin: 0;
+  padding: var(--sp-4) 0;
+  border-radius: var(--r-inset);
+  background: var(--bg-sunken);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-mono);
+  white-space: pre;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* Individual line within the JSON viewer */
+.jsonview__line {
+  display: block;
+  min-height: 1.55em;
+  padding: 0 var(--sp-5) 0 0;
+  white-space: pre;
+}
+
+/* Search or target hit highlight on a line */
+.jsonview__line--hit {
+  background: var(--accent-wash);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Line number gutter with non-selectable ink */
+.jsonview__gutter {
+  display: inline-block;
+  width: 4ch;
+  margin-right: var(--sp-4);
+  color: var(--ink-faint);
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* JSON object key token */
+.jsonview__key {
+  color: var(--accent-text);
+}
+
+/* JSON string literal token */
+.jsonview__str {
+  color: var(--st-reuse);
+}
+
+/* JSON number literal token */
+.jsonview__num {
+  color: var(--st-warn);
+}
+
+/* JSON boolean literal token */
+.jsonview__bool {
+  color: #c084fc;
+}
+
+/* JSON null literal token */
+.jsonview__null {
+  color: var(--ink-faint);
+}
+
+/* JSON punctuation token (braces, brackets, colons, commas) */
+.jsonview__punct {
+  color: var(--ink-muted);
+}
+
+/* JSONC comment token */
+.jsonview__comment {
+  color: var(--ink-faint);
+  font-style: italic;
+}
+
+/* Dense effective-value table displaying resolved config properties and provenance */
+.eff {
+  display: grid;
+  gap: 1px;
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  overflow: hidden;
+}
+
+/* Single property row in effective-value table */
+.eff__row {
+  display: grid;
+  grid-template-columns: minmax(140px, 200px) 1fr auto;
+  align-items: baseline;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  background: var(--bg-panel);
+  font-size: var(--fs-sm);
+  transition: background var(--dur-1) var(--ease);
+}
+
+.eff__row:hover {
+  background: var(--bg-raised);
+}
+
+/* Highlight row where voicepack.json overrides default config.json value */
+.eff__row--overridden {
+  background: rgba(139, 108, 239, 0.05);
+}
+
+.eff__row--overridden:hover {
+  background: rgba(139, 108, 239, 0.09);
+}
+
+/* Key/field column in effective table */
+.eff__k {
+  font-family: var(--font-mono);
+  color: var(--ink);
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+/* Value column in effective table */
+.eff__v {
+  font-family: var(--font-mono);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Source/provenance column in effective table */
+.eff__src {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex: 0 0 auto;
+}
+
+/* --- wizard / stepper ----------------------------------------------------- */
+
+/* Wizard container orchestrating multi-stage long running flows (e.g. LoRA training) */
+.wizard {
+  display: grid;
+  gap: var(--sp-6);
+}
+
+/* Vertical progress rail for wizard stages */
+.wizard__rail {
+  position: relative;
+  display: grid;
+  gap: var(--sp-2);
+  padding: var(--sp-2) 0;
+}
+
+/* Single step row inside the wizard */
+.wizard__step {
+  position: relative;
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-inset);
+  transition: background var(--dur-2) var(--ease);
+}
+
+/* Connecting vertical guide line between wizard step dots */
+.wizard__step:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: calc(var(--sp-3) + 18px);
+  left: calc(var(--sp-4) + 11px);
+  bottom: calc(-1 * var(--sp-2));
+  width: 2px;
+  background: var(--line);
+}
+
+/* Completed stage updates connection line to accent or ok line */
+.wizard__step--done:not(:last-child)::after {
+  background: var(--st-ok-line);
+}
+
+/* Step states */
+.wizard__step--todo {
+  opacity: 0.65;
+}
+
+.wizard__step--active {
+  background: var(--st-run-wash);
+  opacity: 1;
+}
+
+.wizard__step--done {
+  opacity: 1;
+}
+
+.wizard__step--fail {
+  background: var(--st-fail-wash);
+  opacity: 1;
+}
+
+.wizard__step--skip {
+  opacity: 0.75;
+}
+
+/* Step status indicator dot */
+.wizard__dot {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-chip);
+  background: var(--bg-raised);
+  border: 2px solid var(--line-strong);
+  color: var(--ink-faint);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+}
+
+.wizard__dot .icon {
+  width: 14px;
+  height: 14px;
+}
+
+.wizard__step--active .wizard__dot {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent-text);
+  box-shadow: 0 0 0 3px var(--accent-wash);
+}
+
+.wizard__step--done .wizard__dot {
+  border-color: var(--st-ok);
+  background: var(--st-ok-wash);
+  color: var(--st-ok);
+}
+
+.wizard__step--fail .wizard__dot {
+  border-color: var(--st-fail);
+  background: var(--st-fail-wash);
+  color: var(--st-fail);
+}
+
+.wizard__step--skip .wizard__dot {
+  border-color: var(--st-reuse);
+  background: var(--st-reuse-wash);
+  color: var(--st-reuse);
+}
+
+/* Content container for step title, subtext, and body */
+.wizard__main {
+  display: grid;
+  gap: var(--sp-2);
+  min-width: 0;
+}
+
+/* Step primary title */
+.wizard__label {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-3);
+  font-size: var(--fs-body);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.wizard__step--todo .wizard__label {
+  color: var(--ink-muted);
+}
+
+/* Step secondary description or progress summary */
+.wizard__sub {
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Step detailed content or active progress container */
+.wizard__body {
+  display: grid;
+  gap: var(--sp-3);
+  margin-top: var(--sp-2);
+}
+
+/* --- long-run console ----------------------------------------------------- */
+
+/* Dedicated terminal console for hour-long training runs */
+.console {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 360px;
+  border-radius: var(--r-inset);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+/* Scrollable log stream inside console */
+.console__stream {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--sp-4) 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* Single monospace log line in console */
+.console__line {
+  display: grid;
+  grid-template-columns: 78px 1fr;
+  gap: var(--sp-4);
+  padding: 1px var(--sp-5);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-mono);
+  color: var(--ink-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Fallback if a line is just a single text string */
+.console__line:not(:has(.console__tag)):not(:has(.console__stage)) {
+  display: block;
+}
+
+/* Stage tag prefix in console line */
+.console__tag,
+.console__stage {
+  color: var(--ink-faint);
+  font-size: var(--fs-micro);
+  text-align: right;
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Message text in console line */
+.console__text {
+  color: inherit;
+  min-width: 0;
+}
+
+/* Line tone variations */
+.console__line--start .console__text {
+  color: var(--ink);
+}
+
+.console__line--ok .console__text,
+.console__line--ok {
+  color: var(--st-ok);
+}
+
+.console__line--warn .console__text,
+.console__line--warn {
+  color: var(--st-warn);
+}
+
+.console__line--fail .console__text,
+.console__line--fail {
+  color: var(--st-fail);
+}
+
+.console__line--skip .console__text,
+.console__line--skip {
+  color: var(--st-reuse);
+}
+
+.console__line--dim .console__text,
+.console__line--dim {
+  color: var(--ink-faint);
+}
+
+/* Sticky follow-tail badge/affordance at bottom of console */
+.console__tail {
+  position: absolute;
+  right: var(--sp-4);
+  bottom: var(--sp-4);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: 3px var(--sp-4);
+  border-radius: var(--r-chip);
+  background: var(--bg-raised);
+  border: 1px solid var(--line-strong);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  box-shadow: var(--shadow-pop);
+  cursor: pointer;
+  transition: background var(--dur-1) var(--ease);
+  user-select: none;
+}
+
+.console__tail:hover {
+  background: var(--bg-active);
+  border-color: var(--ink-faint);
+}
+
+.console__tail.is-active {
+  border-color: var(--accent);
+  color: var(--accent-text);
+}
+/* --- data table (checkpoints, metrics) ------------------------------------ */
+
+/* Clean tabular data surface with optional row selection */
+.table {
+  display: grid;
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  background: var(--bg-panel);
+  overflow: hidden;
+}
+
+/* Table header row */
+.table__head {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-raised);
+  color: var(--ink-faint);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: var(--tracking-caps);
+  text-transform: uppercase;
+}
+
+/* Table data row */
+.table__row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  align-items: center;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--line);
+  background: var(--bg-panel);
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  transition: background var(--dur-1) var(--ease);
+  cursor: pointer;
+}
+
+.table__row:first-of-type {
+  border-top: 0;
+}
+
+.table__row:hover {
+  background: var(--bg-hover);
+}
+
+/* Selected checkpoint row */
+.table__row.is-selected,
+.table__row[aria-selected="true"] {
+  background: var(--accent-wash);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Table cell */
+.table__cell {
+  font-variant-numeric: tabular-nums;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.table__cell--mono {
+  font-family: var(--font-mono);
+}
 
 .toast__icon {
-  width: 18px;
-  height: 18px;
   margin-top: 1px;
   color: var(--ink-muted);
 }

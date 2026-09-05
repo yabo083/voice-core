@@ -191,6 +191,173 @@ export const onBootstrapEvent = (fn: (e: BootstrapEvent) => void): Promise<Unlis
 export const onStackState = (fn: (s: StackState) => void): Promise<UnlistenFn> =>
   listen<StackState>("stack://state", (e) => fn(e.payload));
 
+// --- 配置 screen: the two config files, read-only ---------------------------------------
+
+/** One configuration file as the host read it.
+ *
+ *  `exists: false` is an answer rather than a failure: runtime.json is not there until a
+ *  deployment writes it, and a pack's manifest is optional by design. A file that exists
+ *  with `bytes > 0` and empty `text` is one something else has open this instant. */
+export interface ConfigFile {
+  label: string;
+  path: string;
+  text: string;
+  exists: boolean;
+  bytes: number;
+}
+
+/** The runtime's merged view of one pack, forwarded verbatim from `GET /api/voices`.
+ *
+ *  Only `sources` is named, because that is the only field this screen reads by name: the
+ *  table is built from its keys, so a field added to the runtime's `VoicePack` appears
+ *  here without a change. `sources` is optional on the wire — a runtime older than this
+ *  panel answers without it, and the panel talks to whatever is listening on the port. */
+export interface EffectivePack {
+  sources?: Record<string, string>;
+  [field: string]: unknown;
+}
+
+/** `data/config.json` and `data/runtime.json`, in that order. */
+export const configFiles = (): Promise<ConfigFile[]> => invoke("config_files");
+
+/** The pack's own `voicepack.json` as the file on disk. null when no pack is registered
+ *  under `id`; `exists: false` when the pack simply never wrote one. */
+export const packManifestFile = (id: string): Promise<ConfigFile | null> =>
+  invoke("pack_manifest_file", { id });
+
+/** The runtime's merged view of one pack. null when the runtime is not answering, because
+ *  the merge lives there: with it stopped, nothing on this machine can say which file won
+ *  a field. */
+export const packEffective = (id: string): Promise<EffectivePack | null> =>
+  invoke("pack_effective", { id });
+
+// --- 训练 screen: the training pipeline as one job ------------------------------------
+//
+// The event shape is bootstrap's, key for key, with one addition (`checkpoint`): the panel
+// renders one stream renderer, not two.
+
+export const TRAIN_STAGES = [
+  "dataset",
+  "latents",
+  "train",
+  "samples",
+  "score",
+  "install",
+] as const;
+export type TrainStage = (typeof TRAIN_STAGES)[number];
+
+export type TrainEventKind = "start" | "progress" | "log" | "ok" | "skip" | "fail";
+
+/** One line of a step's stdout, forwarded verbatim. The seven keys are bootstrap's, key for
+ *  key; `checkpoint` is this pipeline's addition, and it is optional only because the
+ *  runner's synthetic `log` line for a non-JSON stdout line carries the seven and no more. */
+export interface TrainEvent {
+  ts: number;
+  stage: TrainStage;
+  event: TrainEventKind;
+  message: string;
+  done: number | null;
+  total: number | null;
+  remedy: string | null;
+  checkpoint?: string | null;
+}
+
+export interface TrainingPreflight {
+  python: string | null;
+  missing: string[];
+  cuda: string | null;
+  gpu_name: string | null;
+  vram_free_mib: number | null;
+  vram_total_mib: number | null;
+  runtime_reachable: boolean;
+  model_loaded: boolean;
+  running: boolean;
+  pack_id: string | null;
+  blockers: string[];
+}
+
+export interface TrainRequest {
+  audio_dir: string;
+  transcripts: string | null;
+  speaker_id: string;
+  pack_id: string;
+  display_name: string;
+  character: string | null;
+  avatar: string | null;
+  batch_size: number;
+  max_steps: number;
+  learning_rate: number;
+  save_every: number;
+  /** Permission to delete the previous run of this voice. False unless the user ticked the
+   *  confirm: `start_training` refuses and names what is at risk. */
+  overwrite: boolean;
+}
+
+export interface InstallRequest {
+  checkpoint: string;
+  pack_id: string;
+  display_name: string;
+  character: string | null;
+  avatar: string | null;
+}
+
+/** `prepare_dataset.py`'s QA report, verbatim — which is why these are its snake_case field
+ *  names and not this app's. */
+export interface QaReport {
+  count: number;
+  total_minutes: number;
+  duration_mean_s: number;
+  duration_p05_s: number;
+  duration_p95_s: number;
+  duration_max_s: number;
+  sample_rates: number[];
+  channels: number[];
+  subtypes: string[];
+  problems: { clip: string; issue: string }[];
+  skipped: { clip: string; reason: string }[];
+}
+
+export interface TrainingCheckpoint {
+  name: string;
+  path: string;
+  step: number | null;
+  val_loss: number | null;
+  lower_bound: number | null;
+  mean: number | null;
+  best: boolean;
+}
+
+export interface TrainingResult {
+  dir: string;
+  exists: boolean;
+  qa: QaReport | null;
+  request: TrainRequest | null;
+  checkpoints: TrainingCheckpoint[];
+  /** How many of those checkpoints no pack has been installed from. Non-zero is what makes
+   *  starting again refuse until it is allowed explicitly. */
+  at_risk: number;
+}
+
+/** Answers without starting anything, and without touching the GPU while a run is live. */
+export const trainingPreflight = (): Promise<TrainingPreflight> => invoke("training_preflight");
+
+/** Resolves when the last step's process EXITS. A failed step resolves too: it reported
+ *  itself on the stream, with its remedy, while it was happening. */
+export const startTraining = (req: TrainRequest): Promise<void> => invoke("start_training", { req });
+
+/** No-op when nothing is running. Kills the trainer and its DataLoader workers with it. */
+export const cancelTraining = (): Promise<void> => invoke("cancel_training");
+
+export const installTrainedPack = (req: InstallRequest): Promise<void> =>
+  invoke("install_trained_pack", { req });
+
+/** What a run left on disk, for a pack that may never have been trained. */
+export const trainingResult = (packId: string): Promise<TrainingResult> =>
+  invoke("training_result", { packId });
+
+export const onTrainEvent = (fn: (e: TrainEvent) => void): Promise<UnlistenFn> =>
+  listen<TrainEvent>("train://event", (e) => fn(e.payload));
+
 /** Tauri rejects with a plain string; a dev-server tab outside Tauri rejects with
  *  a TypeError. Both must read as one sentence in a toast. */
 export function ipcMessage(err: unknown): string {

@@ -23,6 +23,10 @@ pub struct Entry {
     pub bytes: u64,
     pub sample_rate: u32,
     pub duration_ms: u64,
+    /// The request that produced this audio. It travels with the entry because the
+    /// entry outlives the request: a playback report names the audio it played
+    /// (`POST /api/played`), and the event stream keys everything else by request.
+    pub request_id: String,
     created: Instant,
 }
 
@@ -79,7 +83,13 @@ impl Spool {
     }
 
     /// Registers a written file. Returns its size in bytes.
-    pub fn commit(&self, id: &str, sample_rate: u32, duration_ms: u64) -> io::Result<u64> {
+    pub fn commit(
+        &self,
+        id: &str,
+        request_id: &str,
+        sample_rate: u32,
+        duration_ms: u64,
+    ) -> io::Result<u64> {
         let path = self.dir.join(format!("{id}.wav"));
         let bytes = std::fs::metadata(&path)?.len();
         let entry = Entry {
@@ -87,6 +97,7 @@ impl Spool {
             bytes,
             sample_rate,
             duration_ms,
+            request_id: request_id.to_string(),
             created: Instant::now(),
         };
         if let Ok(mut index) = self.index.lock() {

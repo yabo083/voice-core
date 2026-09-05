@@ -7,6 +7,8 @@
 //! up with a 120 s timeout in one route and 300 s in another.
 
 use std::collections::HashMap;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as SyncMutex};
 use std::time::{Duration, Instant};
@@ -15,9 +17,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{oneshot, Notify, Semaphore};
 
 use crate::config::Config;
-use crate::engine::{EngineError, PackTarget, SynthRequest, TtsEngine};
+use crate::engine::{EngineError, PackTarget, SynthOutput, SynthRequest, TtsEngine};
 use crate::error::{ApiError, ErrorCode, RecoveryKind};
-use crate::obs::{short_id, Bus, Event, Metrics, MetricsSnapshot};
+use crate::obs::{short_id, Bus, Event, Metrics, MetricsSnapshot, Reporter};
 use crate::packs::{Registry, VoicePack};
 use crate::spool::{Spool, SpoolStats};
 use crate::supervise::{Worker, WorkerError, WorkerStatus};
@@ -27,6 +29,13 @@ pub const RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const API_VERSION: u32 = 1;
 
 const DEFAULT_NUM_STEPS: u32 = 32;
+
+/// The one pause primitive: `[pause:N]`, N in milliseconds.
+const PAUSE_OPEN: &str = "[pause:";
+/// Below a millisecond there is nothing to hear, and above ten seconds the caller
+/// meant two utterances — a mistyped `[pause:600000]` must not become ten minutes of
+/// silence somebody has to wait out.
+const PAUSE_RANGE: std::ops::RangeInclusive<u32> = 1..=10_000;
 
 /// How long `/api/status` may reuse the last `/health`-backed worker status.
 ///
@@ -76,6 +85,10 @@ pub struct RubyPair {
 #[serde(rename_all = "camelCase")]
 pub struct SpeakInput {
     /// Spoken text. For this project that is Japanese; the caller translates.
+    ///
+    /// May carry `[pause:N]` markers, which the runtime honours by splitting the
+    /// utterance there and splicing N ms of silence in (see [`Script`]). They are not
+    /// spoken and do not reach the engine.
     pub text: String,
     /// Text shown to the human. Never synthesized.
     #[serde(default)]
@@ -86,6 +99,12 @@ pub struct SpeakInput {
     pub ruby_pairs: Option<Vec<RubyPair>>,
     #[serde(default)]
     pub voice_pack_id: Option<String>,
+    /// What language `text` is in, as a short BCP-47 tag (`ja`, `zh-CN`). Optional and
+    /// validated, not routed: when the resolved pack declares languages and none of
+    /// them matches, the utterance is refused instead of feeding the wrong text to a
+    /// model that will confidently mispronounce it.
+    #[serde(default)]
+    pub language: Option<String>,
     #[serde(default)]
     pub seed: Option<u64>,
     #[serde(default)]
@@ -130,6 +149,36 @@ pub struct Status {
     pub in_flight: usize,
     pub spool: SpoolStats,
     pub idle_stop_ms: Option<u64>,
+}
+
+/// A frontend reporting *in* that it played something (`POST /api/played`).
+///
+/// The direction matters: the runtime still never calls a frontend back, and this is
+/// what lets a caller wait for the audio to be over instead of sleeping for a guessed
+/// duration. Nothing here identifies a request — the reporter knows the `audioId` it
+/// fetched, and the runtime knows which request produced it.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlayedInput {
+    pub audio_id: String,
+    /// `started` or `finished`.
+    pub event: String,
+    /// How long the reporter really played, which is not `durationMs`: a clip the next
+    /// utterance cut short played for less than it lasts.
+    #[serde(default)]
+    pub played_ms: Option<u64>,
+    /// `presenter` or `cli`. Omitted means `presenter`: a frontend that played audio
+    /// is one, and only this project's own CLI has a reason to say otherwise.
+    #[serde(default)]
+    pub by: Option<String>,
+}
+
+/// A pack id resolved against the registry: what the engine is handed, and what the
+/// pack claims it can speak.
+struct ResolvedPack {
+    id: String,
+    languages: Vec<String>,
+    target: PackTarget,
 }
 
 struct Cancel {
@@ -214,7 +263,7 @@ impl Service {
 
     /// Resolve a pack id into the engine-facing target, or an error naming the
     /// installed alternatives.
-    fn resolve_pack(&self, id: Option<&str>) -> Result<Option<(String, PackTarget)>, ApiError> {
+    fn resolve_pack(&self, id: Option<&str>) -> Result<Option<ResolvedPack>, ApiError> {
         let Some(id) = id else { return Ok(None) };
         let mut packs = self
             .packs
@@ -236,19 +285,33 @@ impl Service {
                 },
             ));
         };
-        let target = PackTarget {
-            kind: pack.kind.as_wire(),
-            path: packs.resolve_path(pack),
-        };
-        Ok(Some((pack.id.clone(), target)))
+        Ok(Some(ResolvedPack {
+            id: pack.id.clone(),
+            languages: pack.languages.clone(),
+            target: PackTarget {
+                kind: pack.kind.as_wire(),
+                path: packs.resolve_path(pack),
+            },
+        }))
     }
 
     /// The whole point of this module: one path, one set of semantics.
     pub async fn speak(&self, input: SpeakInput) -> Result<SpeakOutput, ApiError> {
         let request_id = short_id();
         let started = Instant::now();
+        let SpeakInput {
+            text,
+            display_text,
+            ruby_pairs,
+            voice_pack_id: requested_pack,
+            language,
+            seed,
+            num_steps,
+            display_seconds,
+            timeout_ms,
+        } = input;
 
-        if input.text.trim().is_empty() {
+        if text.trim().is_empty() {
             return Err(
                 ApiError::new(ErrorCode::InvalidRequest, "text is empty").with_recovery(
                     RecoveryKind::FixRequest,
@@ -257,15 +320,40 @@ impl Service {
             );
         }
 
-        let pack = self.resolve_pack(input.voice_pack_id.as_deref())?;
-        let voice_pack_id = pack.as_ref().map(|(id, _)| id.clone());
-        let pack_target = pack.map(|(_, target)| target);
+        // Everything a caller can get wrong is rejected here, before a request id is
+        // worth anything and before it can queue for the device: a malformed marker, an
+        // alignment that does not reconstruct its own strings, a pack that does not speak
+        // the language. All three are caller bugs, and all three used to be silent.
+        let mut script = Script::parse(&text)?;
+        let spoken = script.spoken();
+        // An explicitly empty array is not an alignment. Reconciling it against text that
+        // is genuinely there would only invent a failure.
+        let ruby_pairs = ruby_pairs.filter(|pairs| !pairs.is_empty());
+        if let Some(pairs) = ruby_pairs.as_deref() {
+            check_alignment(pairs, &spoken, display_text.as_deref())?;
+        }
+
+        let pack = self.resolve_pack(requested_pack.as_deref())?;
+        if let (Some(language), Some(pack)) = (language.as_deref(), pack.as_ref()) {
+            check_language(language, pack)?;
+        }
+        let voice_pack_id = pack.as_ref().map(|pack| pack.id.clone());
+        let pack_target = pack.map(|pack| pack.target);
 
         self.bus.publish(Event::SpeakStarted {
             request_id: request_id.clone(),
             voice_pack_id: voice_pack_id.clone(),
-            chars: input.text.chars().count(),
+            chars: spoken.chars().count(),
         });
+        // A dropped marker changed what the caller asked for, so it is said out loud on
+        // the one channel a frontend already watches rather than only into a log.
+        for message in script.notes.drain(..) {
+            self.bus.publish(Event::Progress {
+                request_id: Some(request_id.clone()),
+                phase: "pause_marker".into(),
+                message,
+            });
+        }
 
         let cancel = Arc::new(Cancel {
             flag: AtomicBool::new(false),
@@ -275,8 +363,7 @@ impl Service {
             map.insert(request_id.clone(), Arc::clone(&cancel));
         }
 
-        let deadline = input
-            .timeout_ms
+        let deadline = timeout_ms
             .map(Duration::from_millis)
             .unwrap_or(self.cfg.synth_timeout);
         let (audio_id, out_path) = self.spool.reserve();
@@ -295,14 +382,15 @@ impl Service {
             request_id: request_id.clone(),
             audio_id: audio_id.clone(),
             out_path,
-            text: input.text.clone(),
-            display_text: input.display_text.clone(),
-            ruby_pairs: input.ruby_pairs.clone(),
-            display_seconds: input.display_seconds,
+            segments: script.segments,
+            gaps: script.gaps,
+            display_text,
+            ruby_pairs,
+            display_seconds,
             voice_pack_id: voice_pack_id.clone(),
             pack: pack_target,
-            seed: input.seed,
-            num_steps: input.num_steps.unwrap_or(DEFAULT_NUM_STEPS),
+            seed,
+            num_steps: num_steps.unwrap_or(DEFAULT_NUM_STEPS),
             deadline,
             started,
         };
@@ -365,6 +453,72 @@ impl Service {
             }
             None => false,
         }
+    }
+
+    /// Publish what a frontend reported about its own playback, and nothing else.
+    ///
+    /// Shape first, then the one thing that can be genuinely out of date: the audio id.
+    /// It is checked against the spool both because a report about audio the runtime
+    /// never produced is worth refusing, and because the entry is where the request that
+    /// produced it is remembered — a reporter names the clip it played, and the event
+    /// stream names the request, so the runtime supplies the join.
+    pub fn report_playback(&self, input: PlayedInput) -> Result<(), ApiError> {
+        let started = match input.event.as_str() {
+            "started" => true,
+            "finished" => false,
+            other => {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidRequest,
+                    format!("unknown playback event '{other}'"),
+                )
+                .with_recovery(
+                    RecoveryKind::FixRequest,
+                    "`event` is `started` or `finished`",
+                ))
+            }
+        };
+        let by = match input.by.as_deref() {
+            None | Some("presenter") => Reporter::Presenter,
+            Some("cli") => Reporter::Cli,
+            Some(other) => {
+                return Err(ApiError::new(
+                    ErrorCode::InvalidRequest,
+                    format!("unknown playback reporter '{other}'"),
+                )
+                .with_recovery(
+                    RecoveryKind::FixRequest,
+                    "`by` is `presenter` (the default) or `cli`",
+                ))
+            }
+        };
+        let entry = self.spool.get(&input.audio_id).ok_or_else(|| {
+            ApiError::new(
+                ErrorCode::NotFound,
+                format!("no audio with id '{}'", input.audio_id),
+            )
+            .with_recovery(
+                RecoveryKind::FixRequest,
+                "report the `audioId` /api/speak answered with; spool entries expire",
+            )
+        })?;
+
+        let request_id = entry.request_id;
+        let audio_id = input.audio_id;
+        self.bus.publish(if started {
+            Event::PlaybackStarted {
+                request_id,
+                audio_id,
+                by,
+            }
+        } else {
+            Event::PlaybackFinished {
+                request_id,
+                audio_id,
+                by,
+                played_ms: input.played_ms,
+            }
+        });
+        Ok(())
     }
 
     /// Pay the cold start before a human is waiting on it.
@@ -584,8 +738,11 @@ struct SynthJob {
     cancel: Arc<Cancel>,
     request_id: String,
     audio_id: String,
-    out_path: std::path::PathBuf,
-    text: String,
+    out_path: PathBuf,
+    /// What to say, in order; `[pause:N]` split it. One entry is the common case.
+    segments: Vec<String>,
+    /// Silence in ms to splice between the segments; empty for a single segment.
+    gaps: Vec<u32>,
     display_text: Option<String>,
     ruby_pairs: Option<Vec<RubyPair>>,
     display_seconds: Option<f64>,
@@ -656,28 +813,14 @@ impl SynthJob {
         }
 
         let synth_started = Instant::now();
-        let result = self
-            .worker
-            .engine()
-            .synthesize(
-                &base_url,
-                SynthRequest {
-                    text: &self.text,
-                    pack: self.pack.clone(),
-                    seed: self.seed,
-                    num_steps: self.num_steps,
-                    out_path: &self.out_path,
-                },
-                self.deadline,
-            )
-            .await;
+        let result = self.synthesize_all(&base_url).await;
         let synth_ms = synth_started.elapsed().as_millis() as u64;
         self.worker.touch();
 
         let output = match result {
             Ok(output) => output,
             Err(err) => {
-                // A `Deadline` here means the worker is still synthesizing and
+                // A `deadline_exceeded` here means the worker is still synthesizing and
                 // will write this path later, so handing it to the spool is the
                 // only safe cleanup: the spool deletes it once it appears and
                 // never indexes it. See `Spool::abandon`.
@@ -688,11 +831,11 @@ impl SynthJob {
                     "op": "speak",
                     "requestId": self.request_id,
                     "ok": false,
-                    "error": err.to_string(),
+                    "error": err.message,
                     "queueMs": queue_ms,
                     "synthMs": synth_ms,
                 }));
-                return Err(engine_error(err));
+                return Err(err);
             }
         };
 
@@ -716,7 +859,12 @@ impl SynthJob {
 
         let bytes = self
             .spool
-            .commit(&self.audio_id, output.sample_rate, output.duration_ms)
+            .commit(
+                &self.audio_id,
+                &self.request_id,
+                output.sample_rate,
+                output.duration_ms,
+            )
             .map_err(|err| {
                 ApiError::new(
                     ErrorCode::Internal,
@@ -726,15 +874,16 @@ impl SynthJob {
             })?;
 
         let total_ms = self.started.elapsed().as_millis() as u64;
+        let spoken = self.segments.concat();
         self.metrics.speak_ok(total_ms, bytes, cold_start);
-        self.metrics.record(serde_json::json!({
+        let mut record = serde_json::json!({
             "ts": crate::obs::now_ms(),
             "op": "speak",
             "requestId": self.request_id,
             "ok": true,
             "audioId": self.audio_id,
             "voicePackId": self.voice_pack_id,
-            "chars": self.text.chars().count(),
+            "chars": spoken.chars().count(),
             "coldStart": cold_start,
             "queueMs": queue_ms,
             "synthMs": synth_ms,
@@ -742,12 +891,21 @@ impl SynthJob {
             "audioBytes": bytes,
             "durationMs": output.duration_ms,
             "sampleRate": output.sample_rate,
-        }));
+        });
+        // Only when a pause split the utterance: the record for an ordinary speak keeps
+        // exactly the shape everything reading `metrics.jsonl` already knows.
+        if !self.gaps.is_empty() {
+            record["segments"] = self.segments.len().into();
+            record["pauseMs"] = self.gaps.iter().sum::<u32>().into();
+        }
+        self.metrics.record(record);
 
         self.bus.publish(Event::Speech {
             request_id: self.request_id.clone(),
             audio_id: self.audio_id.clone(),
-            text: self.text.clone(),
+            // The markers are gone: what a presenter shows as the spoken line, and what
+            // `rubyPairs` was reconciled against, is what the engine was actually asked.
+            text: spoken,
             display_text: self.display_text.clone(),
             ruby_pairs: self.ruby_pairs.clone(),
             voice_pack_id: self.voice_pack_id.clone(),
@@ -770,6 +928,100 @@ impl SynthJob {
             synth_ms,
             total_ms,
         })
+    }
+
+    /// One engine call per segment, and one WAV out of them.
+    ///
+    /// A single segment — every utterance without a `[pause:N]` — is exactly what it
+    /// always was: the engine writes the spool file the caller was promised and nothing
+    /// copies a sample. A pause splits the line, so the parts land in reservations of
+    /// their own and are spliced into that file, which is why the caller still gets one
+    /// `audioId`, one `Speech` and one `durationMs` that counts the silence.
+    async fn synthesize_all(&self, base_url: &str) -> Result<SynthOutput, ApiError> {
+        if self.gaps.is_empty() {
+            return self
+                .say(base_url, &self.segments[0], &self.out_path, self.deadline)
+                .await;
+        }
+
+        let began = Instant::now();
+        let mut parts: Vec<(String, PathBuf)> = Vec::with_capacity(self.segments.len());
+        let spliced = self.synthesize_parts(base_url, began, &mut parts).await;
+        // The parts were never committed, so nothing could have served them; from here
+        // the spool owns their paths and deletes them even if a timed-out worker is
+        // still writing one.
+        for (id, _) in &parts {
+            self.spool.abandon(id);
+        }
+        spliced
+    }
+
+    /// The segment loop, split out so its reservations are cleaned up on every exit.
+    async fn synthesize_parts(
+        &self,
+        base_url: &str,
+        began: Instant,
+        parts: &mut Vec<(String, PathBuf)>,
+    ) -> Result<SynthOutput, ApiError> {
+        for segment in &self.segments {
+            // One budget for the whole utterance, not one per segment: `timeoutMs` is
+            // what the caller said it would wait for a synthesis, and a five-part line
+            // must not be able to spend five times it.
+            let left = self
+                .deadline
+                .checked_sub(began.elapsed())
+                .filter(|left| !left.is_zero())
+                .ok_or_else(|| {
+                    engine_error(EngineError::Deadline(self.deadline.as_millis() as u64))
+                })?;
+            // Reserved, then remembered before the call is awaited: the caller of this
+            // function deletes every path in `parts`, and a segment that fails halfway
+            // must not be the one left behind.
+            let (id, path) = self.spool.reserve();
+            let said = self.say(base_url, segment, &path, left).await;
+            parts.push((id, path));
+            said?;
+        }
+
+        let paths: Vec<&Path> = parts.iter().map(|(_, path)| path.as_path()).collect();
+        splice(&paths, &self.gaps, &self.out_path).map_err(|err| {
+            ApiError::new(
+                ErrorCode::Internal,
+                format!(
+                    "cannot splice {} pause-separated segment(s) into one WAV: {err}",
+                    self.segments.len()
+                ),
+            )
+            .with_recovery(
+                RecoveryKind::FixRequest,
+                "send the same text without `[pause:N]` to get one unsplit segment",
+            )
+        })
+    }
+
+    /// One engine call. The engine writes the WAV; the runtime only says where.
+    async fn say(
+        &self,
+        base_url: &str,
+        text: &str,
+        out_path: &Path,
+        deadline: Duration,
+    ) -> Result<SynthOutput, ApiError> {
+        self.worker
+            .engine()
+            .synthesize(
+                base_url,
+                SynthRequest {
+                    text,
+                    pack: self.pack.clone(),
+                    seed: self.seed,
+                    num_steps: self.num_steps,
+                    out_path,
+                },
+                deadline,
+            )
+            .await
+            .map_err(engine_error)
     }
 }
 
@@ -821,5 +1073,594 @@ fn engine_error(err: EngineError) -> ApiError {
             ApiError::new(ErrorCode::Internal, err.to_string())
                 .with_recovery(RecoveryKind::CheckWorkerLogs, "see logs/tts-worker.err.log")
         }
+    }
+}
+
+// -- what the caller wrote ---------------------------------------------------
+
+/// An utterance split at its `[pause:N]` markers: what to synthesize, and how much
+/// silence to splice between the pieces.
+///
+/// One primitive, honestly implemented: the marker is removed from the text and paid
+/// for in samples, so `durationMs` counts it, one `audioId` covers it, and no engine
+/// has to learn a markup language. Prosody markup that the engine cannot honour is a
+/// promise this project has already broken once (`docs/v1/adr/0003-prosody-markup.md`).
+#[derive(Debug)]
+struct Script {
+    /// In reading order, never empty. Concatenated, this is what was spoken.
+    segments: Vec<String>,
+    /// Silence in ms between segment `i` and `i + 1`; `segments.len() - 1` long.
+    gaps: Vec<u32>,
+    /// Markers that were dropped rather than honoured, for the event stream.
+    notes: Vec<String>,
+}
+
+impl Script {
+    /// Splits at every marker, and rejects a malformed one by name instead of reading
+    /// it out loud as text.
+    fn parse(text: &str) -> Result<Self, ApiError> {
+        let mut script = Self {
+            segments: Vec::new(),
+            gaps: Vec::new(),
+            notes: Vec::new(),
+        };
+        let mut owed = 0u32;
+        let mut rest = text;
+
+        while let Some(at) = next_marker(rest) {
+            let (before, from_marker) = rest.split_at(at);
+            let (ms, after) = parse_marker(from_marker)?;
+            // Markers with nothing speakable between them sum: two beats in a row are
+            // one longer beat, not an empty utterance in the middle.
+            owed = script.push(before, owed).saturating_add(ms);
+            rest = after;
+        }
+
+        let owed = script.push(rest, owed);
+        if owed > 0 && !script.segments.is_empty() {
+            script.notes.push(Self::dropped("trailing", owed));
+        }
+        if script.segments.is_empty() {
+            return Err(ApiError::new(
+                ErrorCode::InvalidRequest,
+                "text has nothing to speak but pause markers",
+            )
+            .with_recovery(
+                RecoveryKind::FixRequest,
+                "`[pause:N]` splices silence between spoken segments; it is not an utterance",
+            ));
+        }
+        Ok(script)
+    }
+
+    /// Adds `piece` as a segment when there is anything to say in it, taking `owed`
+    /// silence as the gap in front of it. Returns the silence still owed, which is how
+    /// a piece with nothing speakable in it keeps the surrounding pauses together.
+    fn push(&mut self, piece: &str, owed: u32) -> u32 {
+        if piece.trim().is_empty() {
+            return owed;
+        }
+        if self.segments.is_empty() {
+            if owed > 0 {
+                self.notes.push(Self::dropped("leading", owed));
+            }
+        } else {
+            self.gaps.push(owed);
+        }
+        self.segments.push(piece.to_string());
+        0
+    }
+
+    /// What the engine was asked to say: the text minus its markers.
+    fn spoken(&self) -> String {
+        self.segments.concat()
+    }
+
+    /// Silence at an edge is the caller's own wait, and honouring it would put dead air
+    /// at the front or back of every clip where nobody can see where it came from.
+    fn dropped(edge: &str, ms: u32) -> String {
+        format!(
+            "dropped a {edge} {ms} ms pause: `[pause:N]` splices silence BETWEEN spoken \
+             segments, and a pause at the edge of an utterance is the caller's own wait"
+        )
+    }
+}
+
+/// Byte offset of the next marker opener, matched case-insensitively — a `[Pause:600]`
+/// read out as literal text is exactly the silent failure this primitive removes. `[`
+/// never occurs inside a multi-byte UTF-8 sequence, so the offset is a char boundary.
+fn next_marker(text: &str) -> Option<usize> {
+    text.as_bytes()
+        .windows(PAUSE_OPEN.len())
+        .position(|window| window.eq_ignore_ascii_case(PAUSE_OPEN.as_bytes()))
+}
+
+/// Reads one marker off the front of `text`, returning its milliseconds and what
+/// follows it.
+fn parse_marker(text: &str) -> Result<(u32, &str), ApiError> {
+    let body = &text[PAUSE_OPEN.len()..];
+    let Some(end) = body.find(']') else {
+        return Err(bad_marker(&clip(text, 24), "it has no closing `]`"));
+    };
+    let marker = &text[..PAUSE_OPEN.len() + end + 1];
+    let Ok(ms) = body[..end].trim().parse::<u32>() else {
+        return Err(bad_marker(
+            marker,
+            "N must be a whole number of milliseconds",
+        ));
+    };
+    if !PAUSE_RANGE.contains(&ms) {
+        return Err(bad_marker(
+            marker,
+            &format!(
+                "{ms} ms is outside {}-{} ms",
+                PAUSE_RANGE.start(),
+                PAUSE_RANGE.end()
+            ),
+        ));
+    }
+    Ok((ms, &body[end + 1..]))
+}
+
+fn bad_marker(marker: &str, why: &str) -> ApiError {
+    ApiError::new(
+        ErrorCode::InvalidRequest,
+        format!("invalid pause marker `{marker}` in text: {why}"),
+    )
+    .with_recovery(
+        RecoveryKind::FixRequest,
+        format!(
+            "the only pause primitive is `[pause:N]`, N in {}-{} ms; it is never spoken \
+             aloud, so a marker the runtime cannot read is refused instead",
+            PAUSE_RANGE.start(),
+            PAUSE_RANGE.end()
+        ),
+    )
+}
+
+/// Rejects an alignment that does not reconstruct the strings it claims to align.
+///
+/// The array is the caller's own segmentation and nothing downstream can repair it: a
+/// presenter handed pairs that do not reconcile can only fall back to one coarse
+/// annotation, which reads as a rendering choice rather than the caller bug it is.
+fn check_alignment(
+    pairs: &[RubyPair],
+    spoken: &str,
+    display_text: Option<&str>,
+) -> Result<(), ApiError> {
+    // With no `displayText` a presenter shows the spoken line itself, so that is the
+    // string `base` has to segment (`DialogPresenter::Present`).
+    let (display, display_name) = match display_text {
+        Some(display) => (display, "displayText"),
+        None => (spoken, "text (no displayText was sent)"),
+    };
+    reconcile("base", display_name, display, pairs, |pair| &pair.base)?;
+    reconcile("ruby", "text", spoken, pairs, |pair| &pair.ruby)
+}
+
+/// Walks one side of the alignment against its source string and says exactly where
+/// the two stopped agreeing: which pair, how far it had got, and both fragments.
+fn reconcile(
+    field: &str,
+    source_name: &str,
+    source: &str,
+    pairs: &[RubyPair],
+    fragment: impl Fn(&RubyPair) -> &str,
+) -> Result<(), ApiError> {
+    let mut cursor = 0usize;
+    let mut chars = 0usize;
+    for (index, pair) in pairs.iter().enumerate() {
+        let piece = fragment(pair);
+        // An empty fragment is legal and matches nothing: punctuation exists on one
+        // side only often enough that the pair still has to be sent.
+        if source[cursor..].starts_with(piece) {
+            cursor += piece.len();
+            chars += piece.chars().count();
+            continue;
+        }
+        return Err(mismatch(
+            field,
+            source_name,
+            format!(
+                "rubyPairs[{index}].{field} does not line up with {source_name}: the first \
+                 {index} pair(s) reconstructed {chars} character(s), then this one offers \
+                 `{piece}` where {source_name} has `{}`",
+                clip(&source[cursor..], piece.chars().count().max(8)),
+            ),
+        ));
+    }
+    if cursor < source.len() {
+        return Err(mismatch(
+            field,
+            source_name,
+            format!(
+                "the rubyPairs `{field}` fragments do not reconstruct {source_name}: {} pair(s) \
+                 reached character {chars} of {}, leaving `{}` unaccounted for",
+                pairs.len(),
+                source.chars().count(),
+                clip(&source[cursor..], 24),
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn mismatch(field: &str, source_name: &str, message: String) -> ApiError {
+    ApiError::new(ErrorCode::InvalidRequest, message).with_recovery(
+        RecoveryKind::FixRequest,
+        format!(
+            "concatenating every `{field}` must reproduce `{source_name}` exactly, punctuation \
+             included and pause markers excluded; send no rubyPairs at all rather than an array \
+             that does not"
+        ),
+    )
+}
+
+/// First `chars` characters, marked when there is more. Error messages quote the
+/// caller's own text, and a whole paragraph inside one is unreadable.
+fn clip(text: &str, chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in text.chars().enumerate() {
+        if index == chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Refuses text in a language the resolved pack does not claim to speak.
+///
+/// Nothing routes on this yet — routing needs a second engine, which is a later
+/// slice. What exists now is the field, this check and the code, because the failure
+/// it replaces is silent: Chinese text through a Japanese-only adapter produces
+/// confident garbage that no error anywhere reports.
+fn check_language(asked: &str, pack: &ResolvedPack) -> Result<(), ApiError> {
+    // A pack that declares nothing cannot contradict the caller. Manifest-less packs
+    // are legal (`docs/voicepack-spec.md`), so this must not invent a claim for them.
+    if pack.languages.is_empty()
+        || pack
+            .languages
+            .iter()
+            .any(|declared| tags_match(declared, asked))
+    {
+        return Ok(());
+    }
+    Err(ApiError::new(
+        ErrorCode::VoiceLanguageUnsupported,
+        format!(
+            "voice pack '{}' declares [{}] and cannot speak '{asked}'",
+            pack.id,
+            pack.languages.join(", ")
+        ),
+    )
+    .with_recovery(
+        RecoveryKind::FixRequest,
+        format!(
+            "send `language` as one of [{}], pick a pack that declares '{asked}', or omit \
+             `language` to speak whatever the text is",
+            pack.languages.join(", ")
+        ),
+    ))
+}
+
+/// BCP-47 tags compare case-insensitively, and one side may be more specific than the
+/// other: `ja-JP` asked of a pack that says `ja` is the same voice. A difference below
+/// the primary subtag is not — `zh-TW` against `zh-CN` is a different reading.
+fn tags_match(declared: &str, asked: &str) -> bool {
+    let mut declared = declared.trim().split('-');
+    let mut asked = asked.trim().split('-');
+    loop {
+        match (declared.next(), asked.next()) {
+            (Some(left), Some(right)) if left.eq_ignore_ascii_case(right) => continue,
+            (Some(_), Some(_)) => return false,
+            // One ran out of subtags: the shorter is a prefix of the longer.
+            _ => return true,
+        }
+    }
+}
+
+// -- splicing the pauses in --------------------------------------------------
+
+/// What splicing needs from a part's header: enough to verify the parts agree, to size
+/// the silence in frames, and to re-emit a header for the whole.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct WavFormat {
+    audio_format: u16,
+    channels: u16,
+    sample_rate: u32,
+    block_align: u16,
+    bits: u16,
+}
+
+impl WavFormat {
+    fn byte_rate(&self) -> u32 {
+        self.sample_rate * self.block_align as u32
+    }
+}
+
+/// Concatenates `parts` into `out_path` with `gaps[i]` ms of silence between them, and
+/// reports what the result really is rather than what the engine claimed the pieces
+/// were.
+///
+/// This is the only place the runtime touches samples, and it still never holds an
+/// utterance: each part streams through a fixed buffer and the silence comes from a
+/// zero page. Zeros are silence in every format the engine can write, which is why the
+/// format only has to be *agreed* between the parts, not interpreted.
+fn splice(parts: &[&Path], gaps: &[u32], out_path: &Path) -> io::Result<SynthOutput> {
+    let mut out = io::BufWriter::new(std::fs::File::create(out_path)?);
+    // A WAV header states sizes it cannot know yet, so leave room and patch it.
+    out.write_all(&[0u8; WAV_HEADER_BYTES])?;
+
+    let mut format: Option<WavFormat> = None;
+    let mut data_bytes = 0u64;
+    for (index, part) in parts.iter().enumerate() {
+        let (part_format, file, size) = open_pcm(part)?;
+        match format {
+            None => format = Some(part_format),
+            Some(first) if first == part_format => {}
+            Some(first) => {
+                return Err(io::Error::other(format!(
+                    "segment {index} is {} Hz/{} channel(s) but the first is {} Hz/{}: the \
+                     engine changed format mid-utterance",
+                    part_format.sample_rate, part_format.channels, first.sample_rate, first.channels
+                )))
+            }
+        }
+        if let Some(gap) = index.checked_sub(1).map(|previous| gaps[previous]) {
+            data_bytes += write_silence(&mut out, gap, part_format)?;
+        }
+        data_bytes += io::copy(&mut file.take(size), &mut out)?;
+    }
+
+    let Some(format) = format else {
+        return Err(io::Error::other("nothing to splice"));
+    };
+    if data_bytes > u32::MAX as u64 - WAV_HEADER_BYTES as u64 {
+        return Err(io::Error::other("spliced audio exceeds the 4 GiB WAV limit"));
+    }
+
+    let mut file = out
+        .into_inner()
+        .map_err(|err| io::Error::other(err.to_string()))?;
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(&wav_header(format, data_bytes as u32))?;
+    file.flush()?;
+
+    Ok(SynthOutput {
+        sample_rate: format.sample_rate,
+        // From the bytes on disk, not the sum of what the engine reported plus the
+        // pauses: `durationMs` is what a caller waits out, so it has to be the file.
+        duration_ms: data_bytes * 1000 / format.byte_rate() as u64,
+    })
+}
+
+/// Canonical PCM header: `RIFF`, a 16-byte `fmt `, `data`.
+const WAV_HEADER_BYTES: usize = 44;
+
+/// Opens a part and leaves it at the first byte of PCM, with the format it declared
+/// and how many bytes of samples follow.
+fn open_pcm(path: &Path) -> io::Result<(WavFormat, std::fs::File, u64)> {
+    let mut file = std::fs::File::open(path)?;
+    let mut riff = [0u8; 12];
+    file.read_exact(&mut riff)?;
+    if &riff[..4] != b"RIFF" || &riff[8..] != b"WAVE" {
+        return Err(io::Error::other(format!(
+            "{} is not a RIFF/WAVE file",
+            path.display()
+        )));
+    }
+
+    let mut format: Option<WavFormat> = None;
+    let mut header = [0u8; 8];
+    loop {
+        // An `UnexpectedEof` here is a file with no `data` chunk, which is a broken
+        // part and reads as one.
+        file.read_exact(&mut header)?;
+        let size = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as u64;
+        // Chunks are word aligned, and the pad byte is not part of the size.
+        let advance = (size + (size & 1)) as i64;
+        match &header[..4] {
+            b"fmt " if size >= 16 => {
+                let mut body = [0u8; 16];
+                file.read_exact(&mut body)?;
+                let read_u16 = |at: usize| u16::from_le_bytes([body[at], body[at + 1]]);
+                let candidate = WavFormat {
+                    audio_format: read_u16(0),
+                    channels: read_u16(2),
+                    sample_rate: u32::from_le_bytes([body[4], body[5], body[6], body[7]]),
+                    block_align: read_u16(12),
+                    bits: read_u16(14),
+                };
+                // Extensible and compressed WAVs would need their `fmt ` chunk copied
+                // verbatim, and their silence is not zeros. The engine writes PCM_16
+                // (`worker/irodori/worker.py::_write_wav`), so refuse rather than guess.
+                if candidate.audio_format != 1 && candidate.audio_format != 3 {
+                    return Err(io::Error::other(format!(
+                        "{} is WAV format {} (only uncompressed PCM and float can be spliced)",
+                        path.display(),
+                        candidate.audio_format
+                    )));
+                }
+                if candidate.block_align == 0 || candidate.sample_rate == 0 {
+                    return Err(io::Error::other(format!(
+                        "{} declares no frame size",
+                        path.display()
+                    )));
+                }
+                format = Some(candidate);
+                file.seek(SeekFrom::Current(advance - 16))?;
+            }
+            b"data" => {
+                let Some(format) = format else {
+                    return Err(io::Error::other(format!(
+                        "{} has audio before it says what format it is in",
+                        path.display()
+                    )));
+                };
+                return Ok((format, file, size));
+            }
+            _ => {
+                file.seek(SeekFrom::Current(advance))?;
+            }
+        }
+    }
+}
+
+/// `ms` of silence, rounded down to whole frames. Returns the bytes written.
+fn write_silence(out: &mut impl Write, ms: u32, format: WavFormat) -> io::Result<u64> {
+    const ZEROS: [u8; 4096] = [0; 4096];
+    let frames = ms as u64 * format.sample_rate as u64 / 1000;
+    let total = frames * format.block_align as u64;
+    let mut left = total;
+    while left > 0 {
+        let take = left.min(ZEROS.len() as u64) as usize;
+        out.write_all(&ZEROS[..take])?;
+        left -= take as u64;
+    }
+    Ok(total)
+}
+
+fn wav_header(format: WavFormat, data_bytes: u32) -> [u8; WAV_HEADER_BYTES] {
+    let mut header = [0u8; WAV_HEADER_BYTES];
+    let mut put = |at: usize, bytes: &[u8]| header[at..at + bytes.len()].copy_from_slice(bytes);
+    put(0, b"RIFF");
+    put(4, &(data_bytes + WAV_HEADER_BYTES as u32 - 8).to_le_bytes());
+    put(8, b"WAVEfmt ");
+    put(16, &16u32.to_le_bytes());
+    put(20, &format.audio_format.to_le_bytes());
+    put(22, &format.channels.to_le_bytes());
+    put(24, &format.sample_rate.to_le_bytes());
+    put(28, &format.byte_rate().to_le_bytes());
+    put(32, &format.block_align.to_le_bytes());
+    put(34, &format.bits.to_le_bytes());
+    put(36, b"data");
+    put(40, &data_bytes.to_le_bytes());
+    header
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pairs(items: &[(&str, &str)]) -> Vec<RubyPair> {
+        items
+            .iter()
+            .map(|(base, ruby)| RubyPair {
+                base: (*base).to_string(),
+                ruby: (*ruby).to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_pause_splits_the_utterance_and_leaves_the_text_alone() {
+        let script = Script::parse("おはよう[pause:600]先生。").unwrap();
+        assert_eq!(script.segments, ["おはよう", "先生。"]);
+        assert_eq!(script.gaps, [600]);
+        assert_eq!(script.spoken(), "おはよう先生。");
+        assert!(script.notes.is_empty());
+
+        // No marker: one segment, no splicing, nothing said about it.
+        let plain = Script::parse("おはよう先生。").unwrap();
+        assert_eq!(plain.segments, ["おはよう先生。"]);
+        assert!(plain.gaps.is_empty());
+    }
+
+    #[test]
+    fn adjacent_markers_sum_and_edge_markers_are_dropped_with_a_note() {
+        let script = Script::parse("[pause:200]あ[pause:300][pause:300]い[pause:400]").unwrap();
+        assert_eq!(script.segments, ["あ", "い"]);
+        assert_eq!(script.gaps, [600], "two markers in a row are one pause");
+        assert_eq!(script.notes.len(), 2, "the leading and trailing ones");
+        assert!(script.notes[0].contains("leading 200 ms"));
+        assert!(script.notes[1].contains("trailing 400 ms"));
+
+        // Whitespace between two markers is not an utterance, so they still sum.
+        let spaced = Script::parse("あ[pause:100] [pause:100]い").unwrap();
+        assert_eq!(spaced.gaps, [200]);
+    }
+
+    #[test]
+    fn a_malformed_marker_is_named_and_never_spoken() {
+        for text in [
+            "あ[pause:abc]い",
+            "あ[pause:99999]い",
+            "あ[pause:0]い",
+            "あ[pause:600",
+            "あ[Pause:]い",
+        ] {
+            let err = Script::parse(text).expect_err(text);
+            assert_eq!(err.code, ErrorCode::InvalidRequest, "{text}");
+            assert!(
+                err.message.contains("pause"),
+                "the message must quote the marker: {}",
+                err.message
+            );
+        }
+        // Markers only: there is nothing left to synthesize.
+        assert_eq!(
+            Script::parse("[pause:500]").unwrap_err().code,
+            ErrorCode::InvalidRequest
+        );
+    }
+
+    #[test]
+    fn alignment_names_the_pair_that_broke_it() {
+        let good = pairs(&[("欢迎回来", "おかえりなさい"), ("，", "、"), ("老师。", "先生。")]);
+        check_alignment(&good, "おかえりなさい、先生。", Some("欢迎回来，老师。")).unwrap();
+
+        // Same text, one pair's ruby replaced: the error must point at index 2.
+        let broken = pairs(&[("欢迎回来", "おかえりなさい"), ("，", "、"), ("老师。", "せんせい。")]);
+        let err = check_alignment(&broken, "おかえりなさい、先生。", Some("欢迎回来，老师。"))
+            .unwrap_err();
+        assert_eq!(err.code, ErrorCode::InvalidRequest);
+        assert!(err.message.starts_with("rubyPairs[2].ruby"), "{}", err.message);
+        assert!(err.message.contains("せんせい。"), "{}", err.message);
+        assert!(err.message.contains("先生。"), "{}", err.message);
+
+        // A short array reconstructs a prefix and stops; that is a mismatch too.
+        let short = pairs(&[("欢迎回来", "おかえりなさい")]);
+        let err = check_alignment(&short, "おかえりなさい、先生。", Some("欢迎回来，老师。"))
+            .unwrap_err();
+        assert!(err.message.contains("unaccounted for"), "{}", err.message);
+    }
+
+    #[test]
+    fn alignment_is_checked_against_the_text_without_markers() {
+        let script = Script::parse("おかえりなさい[pause:600]先生。").unwrap();
+        let pairs = pairs(&[("欢迎回来", "おかえりなさい"), ("老师。", "先生。")]);
+        check_alignment(&pairs, &script.spoken(), Some("欢迎回来老师。")).unwrap();
+    }
+
+    #[test]
+    fn language_tags_compare_by_subtag() {
+        assert!(tags_match("ja", "JA"));
+        assert!(tags_match("ja", "ja-JP"), "a request may be more specific");
+        assert!(tags_match("zh-CN", "zh"));
+        assert!(!tags_match("zh-CN", "zh-TW"));
+        assert!(!tags_match("ja", "zh-CN"));
+
+        let pack = ResolvedPack {
+            id: "ba-miyu-lora".into(),
+            languages: vec!["ja".into()],
+            target: PackTarget {
+                kind: "lora-adapter",
+                path: String::new(),
+            },
+        };
+        check_language("ja-JP", &pack).unwrap();
+        let err = check_language("zh-CN", &pack).unwrap_err();
+        assert_eq!(err.code, ErrorCode::VoiceLanguageUnsupported);
+        assert!(err.message.contains("ba-miyu-lora"), "{}", err.message);
+        assert!(err.message.contains("ja"), "{}", err.message);
+
+        // A pack that declares nothing cannot contradict anybody.
+        let silent = ResolvedPack {
+            languages: Vec::new(),
+            ..pack
+        };
+        check_language("zh-CN", &silent).unwrap();
     }
 }

@@ -162,12 +162,17 @@ target\release\voice-core-runtime.exe `
   --tts-root   <path>\irodori-tts
 
 target\release\voice-core.exe speak --text "おかえりなさい、先生。" --display "Welcome back, sensei." --voice my-voice
+target\release\voice-core.exe speak --text "まず これ。[pause:600]つぎに これ。" --voice my-voice --wait
 target\release\voice-core.exe events    # subtitles, engine state, progress
 target\release\voice-core.exe doctor    # reachability, auth, engine, voice packs
 ```
 
 `voice-core-runtime.exe --print-layout` prints every resolved path with an `ok`/`MISSING`
 marker, and prints the diagnosis even when the engine cannot be resolved at all.
+
+`--wait` returns only once the audio has finished playing — whoever played it reports back, so
+consecutive narration needs no guessed `sleep`. `[pause:N]` inserts exactly N ms of silence
+inside one utterance, which is what makes reading a paragraph sound like reading a paragraph.
 
 ### Portable install
 

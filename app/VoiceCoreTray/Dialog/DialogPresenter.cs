@@ -170,7 +170,7 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         double? audioSeconds = null;
         if (utterance.Autoplay && utterance.Wav is { Length: > 0 } wav)
         {
-            audioSeconds = _audio.Play(wav, OnAudioFinished);
+            audioSeconds = _audio.Play(wav, utterance.AudioId, OnAudioFinished);
             _audioPlaying = true;
         }
         else

@@ -101,14 +101,28 @@ train:
   seed: 0
 
   # ---- checkpoint selection ------------------------------------------------------
-  # 5% held out. On 69 rows that is 3 clips - small, and the val loss is correspondingly
-  # noisy, but it is what found step 1000 in the reference run. Do not set this to 0: no
-  # val loss means no best-checkpoint selection, which is the whole selection mechanism.
+  # 5% held out. On 163 rows that is 8 clips; on 69 rows it is 3. Both are small, and the val
+  # loss is correspondingly noisy - see the warning under `valid_every`. Do not set this to 0:
+  # no val loss means no best-checkpoint selection, which is the whole selection mechanism.
   valid_ratio: 0.05
+  # 2000 / 500 = FOUR validations for the whole run. Published recipes validate every 200-500
+  # steps, so the cadence is within the normal range, but four points is a coarse grid to find a
+  # minimum on - and the numbers those four points produce are not as comparable as they look:
+  # the trainer re-draws the noise, the flow-matching timesteps AND the reference-audio
+  # concatenation at every validation, so each call measures a different problem on the same 8
+  # clips. On this project's own run the four came out 0.804 / 0.843 / 0.839 / 0.844, a spread of
+  # 0.0395, while the same loss at twice the sample count has a standard deviation of 0.041.
+  # Read that as: the ORDER of those four numbers is not established. Treat val loss as a coarse
+  # filter and let step 5's similarity scores and your own ears make the final call.
   valid_every: 500
-  # Keeps the 5 best-by-val-loss adapters as
-  # `checkpoint_best_val_loss_<step>_<loss>/` directories beside the periodic ones.
-  checkpoint_best_n: 5
+  # Keeps the N best-by-val-loss adapters as `checkpoint_best_val_loss_<step>_<loss>/`.
+  #
+  # MUST stay below the number of validations (max_steps / valid_every), or the pruning gate
+  # never fires and every validation is written as a "best" - which is exactly what happened at
+  # 5 with four validations: four directories all named `best_val_loss`, three of them worse
+  # than the first, and any tool that ordered that directory by name or mtime picked the worst
+  # one. At 3 the name means what it says.
+  checkpoint_best_n: 3
   save_every: 500
   log_every: 100
 
@@ -138,10 +152,22 @@ train:
   # 750 frames at 25 latent frames/s = 30 s. A longer clip is truncated here while its
   # full transcript is still fed in, which is why prepare_dataset.py drops clips over 30 s.
   max_latent_steps: 750
-  # References are drawn from other clips of the same speaker_id and concatenated to a
-  # length sampled in this range.
+  # References are drawn from other clips of the same SAME-SPLIT speaker_id and concatenated to
+  # a length drawn uniformly from this range. (Audited: the sampler is split-local, so a
+  # training sample cannot be conditioned on a held-out clip and the val loss is not
+  # contaminated by that path.)
+  #
+  # 30 s, not upstream's 120 s, and the authority is upstream's own docs/parameters.md:
+  # "Approximately 30 seconds of combined reference audio captured most of the measured
+  # speaker-similarity gain." Past that the draw buys nothing measured and costs something real:
+  # on a 15.9-minute corpus a uniform draw over 1-120 s almost always exceeds the speaker's
+  # remaining clips, so the greedy concatenation returns EVERY sibling it has, clamped at 3000
+  # frames - about 20 clips. "The reference" then stops being a reference and becomes a large
+  # random slice of the whole corpus, different on every sample and on every validation.
+  # Capping at 30 s keeps the measured gain, makes the draw actually vary, and cuts one of the
+  # noise sources that makes successive validation losses incomparable.
   ref_min_seconds: 1.0
-  ref_max_seconds: 120.0
+  ref_max_seconds: 30.0
   max_text_len: 256
   max_caption_len: 512
   # 10% of samples drop each condition, which is what keeps unconditional generation

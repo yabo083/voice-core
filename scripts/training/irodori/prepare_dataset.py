@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import _audio_qa  # noqa: E402
 import _engine  # noqa: E402
 
 # libsndfile's own repertoire. Anything else (m4a, aac, wma) has to be converted first:
@@ -168,11 +169,15 @@ def load_transcripts(source: Path) -> dict[str, str]:
     return table
 
 
-def probe(path: Path) -> dict:
-    """Duration, rate, channels, encoding and peak level for one clip.
+def probe(path: Path, *, quality: bool = True) -> dict:
+    """Duration, rate, channels, encoding, peak level - and, unless turned off, the corpus
+    quality measurements from `_audio_qa`.
 
-    Peak needs the samples, so this decodes - in blocks, so a 20-minute file does not
-    become 200 MB of RAM.
+    Peak needs the samples, so this decodes anyway. The quality pass needs the whole clip in
+    memory at once (integrated loudness is defined over 400 ms blocks and the rolloff wants
+    frames), which is why it is a second read rather than folded into the block loop above: a
+    30-second mono clip at 48 kHz is 5.5 MB, and the bound on clip length is what makes that
+    safe. `quality=False` restores the old behaviour for a caller that only wants the format.
     """
     import numpy as np
     import soundfile as sf
@@ -182,13 +187,24 @@ def probe(path: Path) -> dict:
     for block in sf.blocks(str(path), blocksize=1 << 18, dtype="float32", always_2d=True):
         if block.size:
             peak = max(peak, float(np.abs(block).max()))
-    return {
+    measured = {
         "duration_s": round(float(info.frames) / float(info.samplerate), 2),
         "sample_rate": int(info.samplerate),
         "channels": int(info.channels),
         "subtype": str(info.subtype),
         "peak": round(peak, 4),
     }
+    if not quality:
+        return measured
+    try:
+        wav, rate = sf.read(str(path), dtype="float32", always_2d=False)
+        report = _audio_qa.measure(np.asarray(wav), int(rate))
+    except Exception as exc:  # noqa: BLE001 - a corpus report is not worth a crash
+        measured["quality_error"] = str(exc)
+        return measured
+    measured["quality"] = report.as_dict()
+    measured["quality_issues"] = report.issues(int(rate))
+    return measured
 
 
 def percentile(values: list[float], q: float) -> float:
@@ -276,17 +292,61 @@ def build(args: argparse.Namespace) -> tuple[list[dict], dict]:
             )
             continue
 
-        if measured["peak"] >= 0.999:
-            problems.append({"clip": clip.name, "issue": f"clipping (peak {measured['peak']})"})
-        if measured["sample_rate"] < _engine.CODEC_SAMPLE_RATE:
-            problems.append(
+        # Quality drops, every one of them OFF by default.
+        #
+        # The default has to be "measure, do not act". On this project's own corpus these
+        # filters would remove 77 clips for clipping and, at a 4.5 kHz floor, roughly a quarter
+        # for bandwidth - and deciding to throw away half of somebody's voice corpus is theirs to
+        # make with the numbers in front of them, not a default that surprises them an hour into
+        # a run. The QA report tells them what each flag would cost before they pass it.
+        quality = measured.get("quality") or {}
+        if args.drop_clipped and quality.get("longest_clip_run", 0) >= _audio_qa.CLIP_RUN:
+            skipped.append(
                 {
                     "clip": clip.name,
-                    "issue": (
-                        f"{measured['sample_rate']} Hz is below the codec's "
-                        f"{_engine.CODEC_SAMPLE_RATE} Hz; it will be upsampled"
+                    "reason": (
+                        f"clipped: {quality['longest_clip_run']} consecutive samples at full "
+                        f"scale (peak {quality.get('peak', 0):.3f})"
                     ),
                 }
+            )
+            continue
+        snr = quality.get("noise_floor_snr_db")
+        if args.min_snr > 0 and snr is not None and snr < args.min_snr:
+            skipped.append(
+                {"clip": clip.name, "reason": f"noise-floor SNR {snr:.1f} dB < {args.min_snr} dB"}
+            )
+            continue
+        bandwidth = quality.get("bandwidth_hz")
+        if args.min_bandwidth > 0 and bandwidth is not None and bandwidth < args.min_bandwidth:
+            skipped.append(
+                {
+                    "clip": clip.name,
+                    "reason": (
+                        f"bandwidth {bandwidth / 1000:.1f} kHz < {args.min_bandwidth / 1000:.1f} kHz: "
+                        "the high band is absent, not noisy, and training cannot recover it"
+                    ),
+                }
+            )
+            continue
+
+        # The quality pass owns clipping, loudness, noise floor, silence and upsampling: every
+        # threshold in `_audio_qa` carries the source it came from, which is why those checks
+        # live there and not inline here. This loop only records what it reported.
+        #
+        # Note what the old inline checks got wrong and this replaces. `peak >= 0.999` called
+        # every grazed sample "clipping"; on this project's own corpus that flagged 96 of 163
+        # clips, and a flat-top count showed only 77 were actually saturated while 19 merely
+        # touched full scale - a real difference, because the harmonic splatter comes from the
+        # flat top. And `sample_rate < 48000` never fired on a corpus that was upsampled TO
+        # 48 kHz from far below: the container is what `sf.info` reports, so a 16 kHz recording
+        # resampled up reads as clean 48 kHz. The spectral rolloff is what catches those, and it
+        # caught clips whose energy stops at 2.0-10.6 kHz inside a 48 kHz container.
+        for issue in measured.get("quality_issues", ()):
+            problems.append({"clip": clip.name, "issue": issue})
+        if "quality_error" in measured:
+            problems.append(
+                {"clip": clip.name, "issue": f"quality unmeasured ({measured['quality_error']})"}
             )
         if len(text) > LONG_TEXT_CHARS:
             problems.append(
@@ -402,6 +462,48 @@ def main() -> None:
         help=(
             f"Skip clips longer than this (default {MAX_TARGET_SECONDS:.0f}, where the "
             "trainer starts truncating the audio but not the text). 0 disables the check."
+        ),
+    )
+    # Quality filters. All OFF by default: this stage measures a corpus and reports it, and
+    # removing clips is a decision the owner of the voice makes with those numbers in hand.
+    # Run once with no filters, read the QA report, then decide.
+    parser.add_argument(
+        "--drop-clipped",
+        action="store_true",
+        help=(
+            "Skip clips with a flat top - three or more consecutive samples at full scale. "
+            "Clipping produces harmonic distortion across the high band that a neural codec "
+            "encodes as high-energy latent perturbation, and the model then reproduces it in "
+            "every utterance of that voice (VoiceFixer, Interspeech 2022). Published practice "
+            "is to drop when clipping is rare and to repair when it is widespread; this flag is "
+            "the first of those two. A grazed peak with no flat top is NOT dropped."
+        ),
+    )
+    parser.add_argument(
+        "--min-snr",
+        type=float,
+        default=0.0,
+        metavar="DB",
+        help=(
+            "Skip clips below this noise-floor SNR in dB (0 disables, the default). For scale: "
+            "LibriTTS gated its clean subset at WADA-SNR 20 dB and discarded about a quarter of "
+            "its candidates. The number measured here is a percentile noise-floor ratio, NOT "
+            "WADA - see `_audio_qa.noise_floor_snr_db` - so treat 20 as the authority's shape "
+            "rather than a threshold calibrated against this measurement."
+        ),
+    )
+    parser.add_argument(
+        "--min-bandwidth",
+        type=float,
+        default=0.0,
+        metavar="HZ",
+        help=(
+            "Skip clips whose measured bandwidth is below this in Hz (0 disables, the default). "
+            "Bandwidth is the highest frequency still carrying signal, calibrated against known "
+            "cutoffs - NOT a 95%% energy rolloff, which measures where energy is concentrated and "
+            "ranks studio audio below a website re-encode. Unlike noise or clipping this is "
+            "missing information rather than damage and no training parameter recovers it. Real "
+            "44.1/48 kHz content measures 15-17 kHz; audio filled from a 16 kHz source, 8.7 kHz."
         ),
     )
     _engine.add_progress_flags(parser)

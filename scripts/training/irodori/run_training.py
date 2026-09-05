@@ -211,7 +211,14 @@ def main() -> None:
     _engine.add_engine_args(parser)
     args = parser.parse_args()
     _engine.progress_mode(args, STAGE)
-    _engine.decline_eco_qos(STAGE)
+    # No QoS declination here, deliberately. This step used to declare it, and it did nothing:
+    # the trainer runs in a separate process and the policy is not inherited, so the call only
+    # ever covered this launcher. Reaching the real trainer was implemented and then MEASURED,
+    # interleaved on/off/on/off at 14 steps a run: median 784 ms/step declined against 792 ms
+    # under Windows' heuristic, i.e. 1.01x. A training step carries backward and optimizer work,
+    # so core placement does not gate it the way it gates the synthesis dispatch loop (3.02x
+    # there, `worker/irodori/worker.py`). The mechanism is gone rather than kept dark: an
+    # unused knob in a training path is one more thing to rule out next time somebody measures.
     _engine.guard(STAGE, lambda: launch(args))
 
 
@@ -268,17 +275,35 @@ def relay(seen: dict):
 
         saved = SAVED.match(text)
         if saved is not None:
-            seen["checkpoint"] = saved["name"]
             step = CKPT_STEP.search(saved["name"])
             loss = saved["loss"] or seen["val"] or "?"
+            # `checkpoint` is "the last one upstream wrote", which is what proves a run produced
+            # something selectable at all. `best` below is the one worth installing. Dropping
+            # this line while adding `best` made every successful run fail its own completion
+            # guard - caught by a 12-step run, which is why that run exists.
+            seen["checkpoint"] = saved["name"]
             # The name carries the loss, so the summary at the end has a number even when the
             # `valid step=` line that produced it scrolled past before this run was watched.
             if loss != "?":
                 seen["val"] = loss
+            # Upstream writes one `checkpoint_best_val_loss_<step>_<loss>` per VALIDATION, not
+            # per improvement: a run whose val loss goes 0.804 -> 0.843 -> 0.839 -> 0.844 ends
+            # with four such directories, and `checkpoint_best_n` keeps them all. So the name
+            # means "a validation happened here", and the last one is not the best one - it is
+            # merely the last. Keeping only the minimum is the difference between this pipeline
+            # naming the checkpoint worth installing and naming whichever one happened last.
+            try:
+                value = float(loss)
+            except ValueError:
+                value = None
+            if value is not None and (seen["best"] is None or value < seen["best"][0]):
+                seen["best"] = (value, saved["name"])
+            best_now = seen["best"] is not None and seen["best"][1] == saved["name"]
+            headline = "lowest val loss so far" if best_now else "checkpoint saved"
             _engine.emit(
                 STAGE,
                 "progress",
-                f"best checkpoint so far: {saved['name']} (val loss {loss})",
+                f"{headline}: {saved['name']} (val loss {loss})",
                 done=int(step[1]) if step is not None else seen["done"],
                 total=seen["total"],
                 checkpoint=saved["name"],
@@ -288,6 +313,112 @@ def relay(seen: dict):
         _engine.emit(STAGE, "log", text)
 
     return on_line
+
+
+def flag_value(passthrough: list[str], flag: str) -> str | None:
+    """`--max-steps 500` or `--max-steps=500` -> `"500"`, else None."""
+    for index, item in enumerate(passthrough):
+        if item == flag:
+            return passthrough[index + 1] if index + 1 < len(passthrough) else None
+        if item.startswith(f"{flag}="):
+            return item.split("=", 1)[1]
+    return None
+
+
+def schedule_for(train_cfg: dict, passthrough: list[str]) -> list[str]:
+    """Extra argv that keeps the LR schedule proportional when `--max-steps` is overridden.
+
+    The trap this closes: `warmup_steps` and `stable_steps` are absolute step counts, and
+    `--max-steps` does not touch them. The template is 100 + 1500 inside 2000, so the
+    documented `-- --max-steps 1000` leaves 1600 steps of warmup+stable inside a 1000-step run
+    and the WSD scheduler returns 1.0 for every step after warmup: the cosine decay silently
+    disappears, and nothing in either program says so.
+
+    So a shorter run gets the template's SHAPE rather than its numbers - the same 5% warmup and
+    75% stable the template chose - and the derivation is printed, because a value the caller
+    did not type is one they have to be told about. Passing either flag yourself turns this off
+    entirely; that is the escape hatch for anyone who wants a different shape.
+    """
+    steps = flag_value(passthrough, "--max-steps")
+    if steps is None:
+        return []
+    if flag_value(passthrough, "--warmup-steps") or flag_value(passthrough, "--stable-steps"):
+        return []
+    try:
+        target = int(steps)
+    except ValueError:
+        # Let upstream's own argparse produce the error message for a bad value.
+        return []
+    base = int(train_cfg.get("max_steps") or 0)
+    warmup = int(train_cfg.get("warmup_steps") or 0)
+    stable = int(train_cfg.get("stable_steps") or 0)
+    if target <= 0 or base <= 0 or warmup + stable <= 0:
+        return []
+    scaled_warmup = max(1, round(target * warmup / base))
+    scaled_stable = max(0, round(target * stable / base))
+    # Leave at least one step of decay, which is the phase this whole function exists to save.
+    if scaled_warmup + scaled_stable >= target:
+        scaled_stable = max(0, target - scaled_warmup - 1)
+    print(
+        f"  schedule      --max-steps {target} scales the template's {warmup}+{stable}/{base} "
+        f"to warmup {scaled_warmup} + stable {scaled_stable}, leaving "
+        f"{target - scaled_warmup - scaled_stable} step(s) of decay"
+    )
+    _engine.emit(
+        STAGE,
+        "log",
+        f"schedule derived for --max-steps {target}: warmup {scaled_warmup}, "
+        f"stable {scaled_stable}, decay {target - scaled_warmup - scaled_stable}",
+    )
+    return [
+        "--warmup-steps",
+        str(scaled_warmup),
+        "--stable-steps",
+        str(scaled_stable),
+    ]
+
+
+def corpus_warnings(manifest: Path) -> list[str]:
+    """What step 1 found wrong with the audio, said out loud before an hour is spent on it.
+
+    `prepare_dataset.py` writes a QA report beside its dataset (`<dataset>.qa.json`) and, until
+    this function existed, NOTHING read it. A real run trained on 163 clips of which 96 were
+    flagged `clipping (peak 1.0)` and the only place that number appeared was one line of step
+    1's console output, an hour earlier. Flagging is advisory by design - the clips still train -
+    which is exactly why the flags have to reach the moment the cost is about to be paid.
+
+    Read from the manifest's own directory rather than passed in: the caller gives us
+    `train_manifest.jsonl`, and the stages agree on a scratch directory per pack, so the report
+    is a sibling. Absent report, no output - an older scratch tree is not an error.
+    """
+    reports = sorted(manifest.parent.glob("*.qa.json"))
+    lines: list[str] = []
+    for report_path in reports:
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        problems = report.get("problems") or []
+        if not problems:
+            continue
+        count = int(report.get("count") or 0)
+        kinds: dict[str, int] = {}
+        for entry in problems:
+            issue = str(entry.get("issue", "?")) if isinstance(entry, dict) else str(entry)
+            # `clipping (peak 1.0)` -> `clipping`: the parenthesis carries a per-clip number,
+            # and what a reader needs first is how many clips share the kind.
+            kind = issue.split("(")[0].strip()
+            kinds[kind] = kinds.get(kind, 0) + 1
+        summary = ", ".join(f"{kind} x{n}" for kind, n in sorted(kinds.items(), key=lambda kv: -kv[1]))
+        scope = f" of {count} clip(s)" if count else ""
+        lines.append(f"  corpus        {len(problems)} finding(s){scope}: {summary}")
+        lines.append(f"                {report_path.name} - flagged clips still train")
+        _engine.emit(
+            STAGE,
+            "log",
+            f"corpus quality: {len(problems)} finding(s){scope}: {summary} ({report_path.name})",
+        )
+    return lines
 
 
 def launch(args: argparse.Namespace) -> None:
@@ -323,6 +454,7 @@ def launch(args: argparse.Namespace) -> None:
     ]
 
     train_cfg = load_train_section(config)
+    argv += schedule_for(train_cfg, args.passthrough)
     print(engine.describe())
     print(f"  trainer       {engine.upstream / UPSTREAM}")
     print(f"  config        {config}")
@@ -332,6 +464,8 @@ def launch(args: argparse.Namespace) -> None:
     )
     print(f"  checkpoint    {checkpoint}")
     print(f"  output        {output_dir}")
+    for line in corpus_warnings(manifest):
+        print(line)
     for line in summarise(train_cfg, rows, output_dir):
         print(line)
     print("command:")
@@ -365,8 +499,10 @@ def launch(args: argparse.Namespace) -> None:
         f"{steps or '?'} steps at batch {batch or '?'} over {rows} row(s) -> {output_dir}"
         + (f"   overrides {' '.join(overrides)}" if overrides else ""),
     )
-    # `bar` is the dedupe key for tqdm redraws; the rest is what the `ok` event reports.
-    seen = {"total": steps, "done": -1, "bar": None, "checkpoint": None, "val": None}
+    # `bar` is the dedupe key for tqdm redraws; `best` is the (val loss, name) MINIMUM across
+    # every validation, which is what the `ok` event reports - not `checkpoint`, which is only
+    # the last one written. See the `saved` branch in `relay` for why those differ.
+    seen = {"total": steps, "done": -1, "bar": None, "checkpoint": None, "val": None, "best": None}
     status = engine.stream_upstream(UPSTREAM, argv, on_line=relay(seen))
     if status != 0:
         raise SystemExit(
@@ -382,14 +518,30 @@ def launch(args: argparse.Namespace) -> None:
             "  valid_ratio must be above 0 for best-checkpoint selection, and the run must "
             "reach at least one valid_every boundary"
         )
+    best = seen["best"]
+    if best is None:
+        # Every checkpoint upstream wrote carried an unparseable loss, so there is a tree on
+        # disk but nothing this side can rank. Name the last one and say the ranking failed,
+        # rather than presenting it as a selection.
+        _engine.emit(
+            STAGE,
+            "ok",
+            f"{seen['done']} step(s) done; {seen['checkpoint']} saved last, val loss unreadable "
+            "- pick a checkpoint from the scores or by ear",
+            done=seen["done"],
+            total=seen["total"],
+            checkpoint=seen["checkpoint"],
+        )
+        return
+    loss, name = best
+    tail = "" if name == seen["checkpoint"] else f"; {seen['checkpoint']} was written later and is worse"
     _engine.emit(
         STAGE,
         "ok",
-        f"{seen['done']} step(s) done; best checkpoint {seen['checkpoint']} "
-        f"(val loss {seen['val'] or '?'})",
+        f"{seen['done']} step(s) done; lowest val loss {loss:.6f} at {name}{tail}",
         done=seen["done"],
         total=seen["total"],
-        checkpoint=seen["checkpoint"],
+        checkpoint=name,
     )
 
 

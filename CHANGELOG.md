@@ -8,6 +8,56 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.4.1] - 2026-09-06
+
+Voice training, audited and repaired. Every item here was found by measuring the pipeline against
+a real 163-clip run rather than by reading it, and two of them were selecting the wrong checkpoint.
+
+### Fixed
+
+- **The pipeline reported the LAST checkpoint as the best one.** Upstream writes a
+  `checkpoint_best_val_loss_<step>_<loss>` directory at every validation, improvement or not, so a
+  run whose validation loss went 0.804 → 0.843 → 0.839 → 0.844 ended with four directories all
+  named `best`, and the wrapper's summary named the last one. The run now reports the minimum, and
+  a saved checkpoint that did not improve is labelled as saved rather than best. `checkpoint_best_n`
+  drops from 5 to 3 so upstream's pruning gate can actually fire — above the number of validations
+  it never did.
+- **Validation was a different problem every time it ran.** The trainer re-drew the flow-matching
+  timesteps, the noise and the reference-audio concatenation at every validation, so successive
+  losses were not comparable: four validations spanned 0.0395 while the same loss functional's
+  point-to-point noise is 0.0358. Selecting the minimum of those four was selecting noise.
+  Validation now runs from a fixed seed and its loader runs in-process, and two independent runs
+  agree to 1.75e-4 — 205x below the noise floor. Also returns ~1.4 GB of worker RAM.
+- **The scoring stage recommended a checkpoint by alphabetical tie-break.** Three candidates that
+  were byte-identical weights scored identically, and a stable sort left the PERIODIC checkpoint
+  first, purely because `0` sorts before `b`. Ties now prefer a checkpoint a validation selected,
+  then the lower validation loss, then the earlier step.
+- **Overriding `--max-steps` silently deleted the learning-rate decay.** `warmup_steps` and
+  `stable_steps` are absolute, so the documented `-- --max-steps 1000` left 1600 steps of
+  warmup-plus-stable inside a 1000-step run and the cosine decay never happened. The schedule now
+  scales with the template's own 5%/75% shape, and says what it derived.
+- **`ref_max_seconds` 120 → 30.** Upstream's own documentation says ~30 s of reference captures
+  most of the measured speaker-similarity gain; at 120 s on a 16-minute corpus the draw exhausted
+  the speaker's clips and "the reference" became a large random slice of the whole dataset.
+
+### Added
+
+- **The dataset stage measures corpus quality and says what it found.** Clipping as a flat-top
+  count rather than a grazed peak, integrated loudness (ITU-R BS.1770-4), a noise-floor SNR, lead
+  and trailing silence, and real signal bandwidth. Every threshold carries its source. The training
+  stage now reads that report and prints it before spending an hour, which is where a corpus with
+  77 clipped clips out of 163 becomes visible.
+- **Opt-in quality filters, all off by default:** `--drop-clipped`, `--min-snr`, `--min-bandwidth`.
+  Removing clips from somebody's voice corpus is their decision; the report tells them what each
+  flag would cost before they pass it.
+
+### Changed
+
+- **The engine worker declines Windows' power throttle; the trainer no longer pretends to.** The
+  declination was measured at every call site: 3.02x in the synthesis worker, 1.88x generating
+  samples, 1.42x encoding latents, and **1.01x on a training step**. It is gone from the training
+  path rather than left inert — the trainer runs in its own process and never inherited it anyway.
+
 ## [1.4.0] - 2026-09-06
 
 **A warm utterance now takes about 0.6 s instead of about 4.8 s — 7.5x faster, with

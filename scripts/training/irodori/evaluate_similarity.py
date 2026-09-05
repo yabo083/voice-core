@@ -51,6 +51,39 @@ GROUP_SUFFIX = re.compile(r"_t\d+$")
 # This step's name in the progress protocol (`scripts/training/_layout.py`).
 STAGE = "score"
 
+#: `lora_checkpoint_best_val_loss_0002000_0.843894` -> step 2000, val loss 0.843894. The trainer
+#: puts both in the directory name, which is the only place a scorer can read them from: this
+#: stage never sees the training log.
+VALIDATED = re.compile(r"best_val_loss_(?P<step>\d+)_(?P<loss>[\d.]+)")
+#: `lora_checkpoint_0002000` - a PERIODIC checkpoint. No validation stands behind it.
+PERIODIC = re.compile(r"checkpoint_(?P<step>\d+)$")
+
+
+def selection_key(entry: dict) -> tuple[float, float, float, float]:
+    """Sort key for `groups`, used with `reverse=True`, so bigger is better in every component.
+
+    1. `lower_bound` - the worst clip in the group, which is what a listener actually hears.
+    2. whether a validation selected this checkpoint at all. Periodic checkpoints and
+       `checkpoint_final` are written unconditionally; a tie between them and a validated one
+       must not go to the unvalidated candidate.
+    3. the validation loss carried in the directory name, lower being better.
+    4. the step, earlier being better - the safer side of an overfitting curve, and the same
+       direction the trainer's own tie-break takes.
+    """
+    name = str(entry.get("group", ""))
+    validated = VALIDATED.search(name)
+    if validated is not None:
+        return (
+            float(entry.get("lower_bound", 0.0)),
+            1.0,
+            -float(validated["loss"]),
+            -float(validated["step"]),
+        )
+    periodic = PERIODIC.search(name)
+    step = float(periodic["step"]) if periodic is not None else float("inf")
+    # No val loss to rank on, so this candidate loses every tie it takes part in.
+    return (float(entry.get("lower_bound", 0.0)), 0.0, float("-inf"), -step)
+
 
 def collect_refs(ref_dir: Path) -> list[str]:
     if not ref_dir.is_dir():
@@ -225,7 +258,21 @@ def score(args: argparse.Namespace) -> None:
         if ceiling_p10 is not None:
             entry["below_natural_p10"] = bool(entry["lower_bound"] < ceiling_p10)
         report["groups"].append(entry)
-    report["groups"].sort(key=lambda entry: entry["lower_bound"], reverse=True)
+    # Ties are the normal case, not the exception, so the tie-break has to mean something.
+    #
+    # A real run scored `lora_checkpoint_0002000`, `lora_checkpoint_best_val_loss_0002000_...`
+    # and `lora_checkpoint_final` at byte-identical numbers (mean 0.8013, p10 0.7864,
+    # lower_bound 0.5745) because all three ARE the same weights, and a stable sort on
+    # `lower_bound` alone then left them in alphabetical order - so the pipeline recommended
+    # the PERIODIC checkpoint, purely because `0` sorts before `b` and `f`. `install_pack.py`
+    # would have taken it without a word.
+    #
+    # So after `lower_bound`, prefer a checkpoint that a validation actually selected, then the
+    # lower validation loss carried in its own directory name, then the earlier step - earlier
+    # being the safer side of an overfitting curve. Nothing here invents quality: it only stops
+    # a coin toss between identical scores from landing on the one candidate with no validation
+    # behind it.
+    report["groups"].sort(key=selection_key, reverse=True)
 
     out_dir = args.out_dir.expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)

@@ -264,6 +264,11 @@ class Engine:
         # tqdm buffers into a pipe and only flushes at exit, which hides a two-hour run's
         # entire progress until it is over.
         env["PYTHONUNBUFFERED"] = "1"
+        # Nothing else is injected here on purpose. A `sitecustomize.py` used to be put on the
+        # child's PYTHONPATH so every process in the training tree declined Windows' power
+        # throttle; it worked, and it bought 1.01x (784 vs 792 ms/step, interleaved). Removed
+        # rather than left in place: the child's environment is the hardest place to debug, and
+        # a variable that changes nothing does not belong in it.
         return env
 
     def _upstream_command(self, script: str, argv: list[str]) -> list[str]:

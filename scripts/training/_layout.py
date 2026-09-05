@@ -511,16 +511,24 @@ _EXECUTION_SPEED = 0x1
 
 
 def decline_eco_qos(stage: str) -> None:
-    """Ask Windows not to throttle this process, and report what it actually did.
+    """Ask Windows not to throttle THIS process, and report what it actually did.
 
     Reported rather than assumed. The first version of this call in the worker failed silently
     with ERROR_INVALID_HANDLE - ctypes had truncated the `GetCurrentProcess()` pseudo-handle to
     32 bits - and the read-back is the only reason anyone noticed. So this sets the state, reads
     it back out of the OS, and says both: what was asked for, and what is in force.
+
+    The pid is in the line because the policy is per-process and is NOT inherited, and this
+    package spawns. `run_training.py` calls this and then launches upstream `train.py` as a
+    separate process, so a line without a pid reads as a statement about the trainer while
+    describing the launcher - which is exactly what it did until a pid-by-pid read-back showed
+    the launcher at throttle-off and the trainer, holding the CUDA context, at the Windows
+    heuristic. Each process that wants the policy declares it and says which process it is.
     """
     asked, got = _apply_eco_qos()
-    emit(stage, "log", f"scheduling: qos_asked={asked} qos={got}")
-    print(f"scheduling    qos_asked={asked}   qos={got}")
+    pid = os.getpid()
+    emit(stage, "log", f"scheduling: pid={pid} qos_asked={asked} qos={got}")
+    print(f"scheduling    pid={pid}   qos_asked={asked}   qos={got}")
 
 
 def _apply_eco_qos() -> tuple[str, str]:

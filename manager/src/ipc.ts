@@ -12,10 +12,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** The host spawns `voice-core-runtime.exe --data-dir <root>\data` and passes no
- *  --bind, so the runtime's own default stands. Printed on the Status screen. */
-export const RUNTIME_BASE_URL = "http://127.0.0.1:8760";
-
 export type PackKind = "lora-adapter" | "speaker-embedding" | "reference-audio";
 
 export interface Pack {
@@ -171,9 +167,10 @@ export const registerPack = (pack: Pack): Promise<void> => invoke("register_pack
 export const importAvatar = (path: string, packPath: string): Promise<string> =>
   invoke("import_avatar", { path, packPath });
 
-/** The pack's own `voicepack.json`, verbatim, or null when it has none. */
-export const packManifest = (id: string): Promise<unknown | null> =>
-  invoke("pack_manifest", { id });
+/** The pack's portrait as a `data:` URL, or null when there is none, it is unreadable, or it
+ *  is too large to inline. The bytes come from Rust on purpose: the webview has no filesystem
+ *  access, and a portrait is not a reason to give it one. */
+export const packAvatar = (id: string): Promise<string | null> => invoke("pack_avatar", { id });
 
 export const removePack = (id: string): Promise<void> => invoke("remove_pack", { id });
 
@@ -217,9 +214,6 @@ export interface EffectivePack {
   [field: string]: unknown;
 }
 
-/** `data/config.json` and `data/runtime.json`, in that order. */
-export const configFiles = (): Promise<ConfigFile[]> => invoke("config_files");
-
 /** The pack's own `voicepack.json` as the file on disk. null when no pack is registered
  *  under `id`; `exists: false` when the pack simply never wrote one. */
 export const packManifestFile = (id: string): Promise<ConfigFile | null> =>
@@ -231,10 +225,12 @@ export const packManifestFile = (id: string): Promise<ConfigFile | null> =>
 export const packEffective = (id: string): Promise<EffectivePack | null> =>
   invoke("pack_effective", { id });
 
-// --- 训练 screen: the training pipeline as one job ------------------------------------
+// --- 训练 screen: an agent runs the pipeline, the panel watches it --------------------
 //
-// The event shape is bootstrap's, key for key, with one addition (`checkpoint`): the panel
-// renders one stream renderer, not two.
+// Every shape below is read off the disk. `scripts/training/_layout.py` writes
+// `data/logs/training-<pack id>.status.json` and the `.jsonl` beside it from inside each
+// step, whoever started it, so a run an agent drove from a shell with this window closed
+// reads exactly like one the panel watched from the first event.
 
 export const TRAIN_STAGES = [
   "dataset",
@@ -246,75 +242,41 @@ export const TRAIN_STAGES = [
 ] as const;
 export type TrainStage = (typeof TRAIN_STAGES)[number];
 
-export type TrainEventKind = "start" | "progress" | "log" | "ok" | "skip" | "fail";
-
-/** One line of a step's stdout, forwarded verbatim. The seven keys are bootstrap's, key for
- *  key; `checkpoint` is this pipeline's addition, and it is optional only because the
- *  runner's synthetic `log` line for a non-JSON stdout line carries the seven and no more. */
-export interface TrainEvent {
-  ts: number;
-  stage: TrainStage;
-  event: TrainEventKind;
+/** One stage's row of a run's status. `state` is an event kind — `pending`, `running`, `ok`,
+ *  `skip`, `fail` — plus one word the stream cannot produce: `interrupted`, for a stage that
+ *  was still running when its process ended. */
+export interface TrainingStageStatus {
+  stage: string;
+  state: string;
   message: string;
   done: number | null;
   total: number | null;
+  started: number | null;
+  ended: number | null;
+}
+
+/** `data/logs/training-<pack id>.status.json`, verbatim: is a run live, which stage, how
+ *  far, what failed. The panel calls the command; an agent reads the file. */
+export interface TrainingRun {
+  schema: number;
+  pack_id: string;
+  live: boolean;
+  /** The step process that wrote it. `live` is only true while that process is, which is
+   *  the rule the host applies before answering and SKILL.md §6 gives an agent. */
+  pid: number;
+  stage: string;
+  state: string;
+  message: string;
+  done: number | null;
+  total: number | null;
+  failed_stage: string | null;
+  failure: string | null;
   remedy: string | null;
-  checkpoint?: string | null;
-}
-
-export interface TrainingPreflight {
-  python: string | null;
-  missing: string[];
-  cuda: string | null;
-  gpu_name: string | null;
-  vram_free_mib: number | null;
-  vram_total_mib: number | null;
-  runtime_reachable: boolean;
-  model_loaded: boolean;
-  running: boolean;
-  pack_id: string | null;
-  blockers: string[];
-}
-
-export interface TrainRequest {
-  audio_dir: string;
-  transcripts: string | null;
-  speaker_id: string;
-  pack_id: string;
-  display_name: string;
-  character: string | null;
-  avatar: string | null;
-  batch_size: number;
-  max_steps: number;
-  learning_rate: number;
-  save_every: number;
-  /** Permission to delete the previous run of this voice. False unless the user ticked the
-   *  confirm: `start_training` refuses and names what is at risk. */
-  overwrite: boolean;
-}
-
-export interface InstallRequest {
-  checkpoint: string;
-  pack_id: string;
-  display_name: string;
-  character: string | null;
-  avatar: string | null;
-}
-
-/** `prepare_dataset.py`'s QA report, verbatim — which is why these are its snake_case field
- *  names and not this app's. */
-export interface QaReport {
-  count: number;
-  total_minutes: number;
-  duration_mean_s: number;
-  duration_p05_s: number;
-  duration_p95_s: number;
-  duration_max_s: number;
-  sample_rates: number[];
-  channels: number[];
-  subtypes: string[];
-  problems: { clip: string; issue: string }[];
-  skipped: { clip: string; reason: string }[];
+  started: number;
+  updated: number;
+  ended: number | null;
+  stages: TrainingStageStatus[];
+  log: string;
 }
 
 export interface TrainingCheckpoint {
@@ -327,36 +289,64 @@ export interface TrainingCheckpoint {
   best: boolean;
 }
 
-export interface TrainingResult {
-  dir: string;
+export interface ScratchEntry {
+  name: string;
+  path: string;
+  dir: boolean;
   exists: boolean;
-  qa: QaReport | null;
-  request: TrainRequest | null;
-  checkpoints: TrainingCheckpoint[];
-  /** How many of those checkpoints no pack has been installed from. Non-zero is what makes
-   *  starting again refuse until it is allowed explicitly. */
-  at_risk: number;
+  /** Recursive for a directory. */
+  bytes: number;
+  /** How many files a directory holds; zero for a file. */
+  files: number;
 }
 
-/** Answers without starting anything, and without touching the GPU while a run is live. */
-export const trainingPreflight = (): Promise<TrainingPreflight> => invoke("training_preflight");
+export interface ScratchTree {
+  dir: string;
+  exists: boolean;
+  bytes: number;
+  entries: ScratchEntry[];
+  /** Sorted by validation loss, best first — the trainer's own selection rule. */
+  checkpoints: TrainingCheckpoint[];
+  /** Named apart from `entries` because they live in data\logs and a discard keeps them. */
+  transcript: ScratchEntry;
+  status: ScratchEntry;
+}
 
-/** Resolves when the last step's process EXITS. A failed step resolves too: it reported
- *  itself on the stream, with its remedy, while it was happening. */
-export const startTraining = (req: TrainRequest): Promise<void> => invoke("start_training", { req });
+/** A slice of one run's transcript. `offset` is always a line boundary, so the next call
+ *  resumes without repeating a line or splitting one. */
+export interface LogTail {
+  offset: number;
+  lines: string[];
+}
 
-/** No-op when nothing is running. Kills the trainer and its DataLoader workers with it. */
-export const cancelTraining = (): Promise<void> => invoke("cancel_training");
+/** The checkpoint and the run it came from. The pack is named by its id; its display name,
+ *  character and portrait live in its own manifest, which the 音色 screen edits. */
+export interface InstallRequest {
+  checkpoint: string;
+  pack_id: string;
+}
 
+/** Every run with a status file in data\logs, live ones first, then most recently updated.
+ *  Includes runs this panel never started, which is the point. */
+export const trainingRuns = (): Promise<TrainingRun[]> => invoke("training_runs");
+
+export const trainingScratch = (packId: string): Promise<ScratchTree> =>
+  invoke("training_scratch", { packId });
+
+/** The transcript forward from `offset`. Zero answers with the tail rather than with
+ *  megabytes of a fifty-minute run. */
+export const trainingLog = (packId: string, offset: number): Promise<LogTail> =>
+  invoke("training_log", { packId, offset });
+
+/** Copies the chosen adapter into data\voicepacks and registers it. Resolves when
+ *  `install_pack.py` exits; its progress is in the run's own transcript. */
 export const installTrainedPack = (req: InstallRequest): Promise<void> =>
   invoke("install_trained_pack", { req });
 
-/** What a run left on disk, for a pack that may never have been trained. */
-export const trainingResult = (packId: string): Promise<TrainingResult> =>
-  invoke("training_result", { packId });
-
-export const onTrainEvent = (fn: (e: TrainEvent) => void): Promise<UnlistenFn> =>
-  listen<TrainEvent>("train://event", (e) => fn(e.payload));
+/** Deletes the scratch tree and resolves with the bytes it freed. Rejects, naming what would
+ *  be lost, while a checkpoint no pack came from is still in it. */
+export const trainingDiscard = (packId: string, confirmed: boolean): Promise<number> =>
+  invoke("training_discard", { packId, confirmed });
 
 /** Tauri rejects with a plain string; a dev-server tab outside Tauri rejects with
  *  a TypeError. Both must read as one sentence in a toast. */

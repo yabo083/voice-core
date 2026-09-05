@@ -404,10 +404,9 @@ def main() -> None:
             "trainer starts truncating the audio but not the text). 0 disables the check."
         ),
     )
-    _engine.add_json_flag(parser)
+    _engine.add_progress_flags(parser)
     args = parser.parse_args()
-    if args.json:
-        _engine.json_mode()
+    _engine.progress_mode(args, STAGE)
     _engine.guard(STAGE, lambda: produce(args))
 
 

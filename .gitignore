@@ -41,8 +41,16 @@ token.txt
 
 # Development documentation. It is written for us, on this machine, and stays here: not in
 # the repository and not in the installer. What has to travel is written to stand alone -
-# README.md, skills/voice-core/SKILL.md and the packaged README.txt.
-/docs/
+# README.md, skills/voice-core-tts/SKILL.md, skills/voice-core-voice-training/SKILL.md and the
+# packaged README.txt.
+#
+# One exception, and it is a published interface rather than a note to ourselves:
+# docs/api.md is the HTTP contract somebody building on the runtime reads, so it is tracked
+# and scripts/package.ps1 ships it into the install. The pattern has to be `/docs/*` rather
+# than `/docs/`, because git cannot re-include a file whose parent directory is itself
+# excluded - with the directory pattern the negation below would never be consulted.
+/docs/*
+!/docs/api.md
 
 # Local assets carried over from the v1 checkout: candidate engine weights, the upstream
 # WebUI and its venv, the training corpus, pruned adapters and finished deliverables. Tens of

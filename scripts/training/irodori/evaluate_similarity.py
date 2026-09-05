@@ -123,10 +123,9 @@ def main() -> None:
         action="store_true",
         help="Skip the leave-one-out pass. You lose the only reference point for the numbers.",
     )
-    _engine.add_json_flag(parser)
+    _engine.add_progress_flags(parser)
     args = parser.parse_args()
-    if args.json:
-        _engine.json_mode()
+    _engine.progress_mode(args, STAGE)
     _engine.guard(STAGE, lambda: score(args))
 
 

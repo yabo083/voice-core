@@ -8,6 +8,130 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.4.0] - 2026-09-06
+
+**A warm utterance now takes about 0.6 s instead of about 4.8 s — 7.5x faster, with
+bitwise-identical audio** (total p50 4794 -> 636 ms, p95 -> 701 ms; `sample_rf` 4412 -> 477 ms).
+A first utterance still pays the model load, 17.4 s end to end, so the "allow well over a
+minute" guidance for a cold caller stands. Two of the three causes were not in our code at all,
+and the third was a duplicate call we had been paying for since v1.
+
+The panel also stopped explaining itself: configuration is a form, training is something an
+agent does while the panel watches, and the copy was rewritten end to end from a review sheet.
+
+### Changed
+
+- **Windows was power-throttling the engine, and declining it is 3x.** With no stated policy,
+  Windows' EcoQoS heuristic treats a windowless child of a console process as background work
+  and parks it on an E-core at reduced clock. The synthesis loop is a single-threaded dispatch
+  loop, so it paid for that placement in full: **4794 ms -> 1589 ms** per utterance from one
+  `SetProcessInformation(ProcessPowerThrottling, EXECUTION_SPEED, 0)` call, and the spread
+  across identical work went from **33% to 3.3%** — which is also why every latency number this
+  project published before today wobbled. The worker declares the policy itself, so a worker
+  started by hand behaves like one started by the runtime; the subtitle presenter and the
+  training scripts do the same. `VC_ENGINE_ECOQOS=1` keeps Windows' heuristic for anyone who
+  would rather have the battery. The state is read back from the OS and reported in the
+  worker's `boot.device` line, because a failed syscall that logs like a success is worse than
+  no log at all.
+- **CUDA graphs on the sampler: another 2.4x, on by default.** The Euler loop issued about 7200
+  ATen dispatches per step and the card sat idle waiting for Python — measured, not assumed:
+  quadrupling the DiT work cost 1.3% more wall time. Capturing the step takes a warm utterance
+  from **1511 ms to 636 ms** (`sample_rf` 1360 -> 477 ms) and the **per-step cost from 40.1 ms
+  to 8.6 ms**, for **+292 MiB allocated / +788 MiB peak reserved** (peak now 3194 MiB:
+  comfortable on 8 GiB, workable on 6). Capture is paid per utterance, not per process, because
+  the latent length comes from the duration predictor and almost never recurs — **+116 ms**, so
+  break-even is 3.7 steps and every real utterance wins. Output is bitwise identical, and
+  `VC_ENGINE_CUDA_GRAPHS=0` returns to eager with output identical to the code before the
+  change: the same utterance measured 747 ms against 2542 ms with the **same sha256**.
+  **A capture that fails does not fail the utterance**: the reason is logged once, the process
+  samples eagerly for the rest of its life at the previous release's speed and VRAM, and the log
+  says so. Verified by forcing capture to raise — audio still bitwise identical.
+  Two things had to be fixed in the engine before capture was possible at all, both recorded in
+  the fork: a `torch.tensor(10000.0, device=cuda)` rebuilt on every model evaluation (a
+  host-to-device copy 32 times per utterance, which capture rejects outright) and an accumulator
+  that silently promotes to fp32 on the first step, so that step stays eager.
+- **The engine is now a maintained fork**
+  ([yabo083/Irodori-TTS, branch `voice-core`](https://github.com/yabo083/Irodori-TTS/tree/voice-core),
+  from upstream `8224daf`; decision in `docs/adr/0002-engine-fork.md`). Upstream Irodori-TTS is
+  MIT and excellent; these patches belong in its sampler, not in a wrapper around it, and a 2.4x
+  should not wait on a merge. `origin` stays pristine upstream and our work is a branch, so
+  `git diff origin/main` is exactly the patch series and `git rebase origin/main` is how it
+  follows upstream. `FORK.md` names the upstream commit, each patch with its measurement, and
+  the one command that returns the tree to pristine. LICENSE is byte-identical and no upstream
+  file gained a copyright line.
+- **`encode_conditions` ran twice per utterance.** Same arguments, once from the runtime and
+  once from the sampler: **78 ms** back, bitwise identical.
+
+### Added
+
+- **设置 is a visual configuration manager.** Forms, switches, colour wells, segmented choices
+  and steppers over `data/config.json`, auto-saving with a debounce, validated twice (in the UI
+  and again in the writer, because a hand-edited file never passes through the UI), and written
+  through the same span splice that keeps every comment, key order and BOM in that file intact.
+  Version history is a bounded record of the **changes** — which key, before, after — capped at
+  50 in `data/settings.history.jsonl`, with a restore that re-splices the inverse edit and gets
+  the bytes back exactly. It is not a pile of timestamped file copies.
+- **音色 opens a page per pack.** Identity, subtitle style with a live preview, synthesis
+  parameters, expression defaults and a 试听 — all writing the pack's own `voicepack.json`,
+  which is the file that wins. Keys this build has never heard of survive a save, and every
+  field says whether the value came from the pack, from `config.json`, or from a derivation.
+  The list rows now show the portrait itself rather than the path to it, served as a `data:` URL
+  from the backend so the webview keeps no filesystem access at all.
+- **`docs/api.md` is the published HTTP reference** for anyone building on the runtime: every
+  route, the error envelope, the event stream, and the two costs to design around (a cold start
+  measured in tens of seconds, and a single-tenant GPU). It is the one documentation file that
+  ships in the install and lives in the repository; the rest of `docs/` stays on the machine it
+  is written on. Installs therefore grow a `docs\` folder holding exactly this file — a fresh
+  install gets it from the installer, and an updated one gets it when the tree is replaced.
+- **One agent skill became two, and the installer puts them where an agent already looks.**
+  `skills/voice-core-tts/` is for speaking, `skills/voice-core-voice-training/` for making a
+  pack; `skills/voice-core/` is gone, with no stub. A daily `speak` call no longer injects the
+  whole training pipeline into someone's context, and the speaking skill stopped keeping a
+  second copy of the HTTP surface — route table, request fields, event kinds and examples are
+  `docs/api.md`'s job, and two copies of one contract only drift. The installer also writes
+  both to `%USERPROFILE%\.agents\skills\<name>\SKILL.md`, so an agent finds them by name
+  instead of being handed a path; ours are overwritten on upgrade and removed on uninstall.
+- **状态 gained 使用说明: two sentences to copy, one per skill.** That is the whole card. The
+  panel used to hand an agent a wall of prose and PowerShell — the 训练提示词 card on 训练,
+  now deleted along with the builder behind it. The skill file is the artefact; the panel's job
+  is to say which one and where it is.
+
+### Removed
+
+- **The 使用方式 card on 状态.** It existed to hand an agent a copy-paste call, which is the
+  shipped skills' job — `skills/voice-core-tts/` and `skills/voice-core-voice-training/`.
+  数据目录 and 安装目录 moved into 环境, where "what is installed and where" already lives.
+- **`data\backups\` is no longer written or read.** The version history above replaced it. Any
+  copies already in there are left exactly where they are — they are a user's recoverable copies
+  of their own configuration and deleting them silently is not a refactor's business — but
+  nothing adds to them from now on, and the directory can be removed by hand.
+
+### Fixed
+
+- **Simultaneous setting writes lost changes, and the history recorded ones that never
+  landed.** Each write read `config.json`, spliced its own value in and replaced the file, so
+  five writes issued together raced: measured on the previous build, one was rejected outright
+  (`os error 5`, the replace hitting another writer's temp file), only one of four colours
+  reached the file, and the record kept an entry for a key that never got there — a history
+  offering to restore something that had never been written. Both write paths now serialise on
+  one lock across read → splice → replace → record: five for five, every key in `written`, five
+  entries that all describe a change the file actually took.
+- **Clicking the sidebar never announced the screen change.** The rail called the shell's
+  `show()` directly instead of going through `navigate()`, so `app:navigate` was dispatched by
+  in-page jumps only and the two things listening for it were dead on the path users actually
+  take: 设置 kept showing values from boot after `config.json` changed underneath it, and 音色
+  re-entered on an open pack page instead of the list, so the rail disagreed with what was
+  under it.
+- **An error message named a document the caller cannot have.** A rejected `dialog` sent a
+  third-party caller to `docs/voicepack-spec.md`, which is an internal note that ships nowhere;
+  it now names `"Appearance: dialog"` in `docs/api.md`, which travels with the install.
+- **The Start Menu kept three shortcuts from 1.1.0, one of them broken.** Dropping an entry from
+  the installer's `[Icons]` does not take it off a machine that already has it, so 初始化向导,
+  环境诊断 and 托盘控制台 survived every upgrade — and 托盘控制台 pointed at
+  `bin\app\VoiceCoreTray.exe`, a path that stopped existing when the presenter moved and was
+  renamed, so clicking it produced a Windows error. The installer now deletes all three by name.
+  A fresh install of 1.4.0 over 1.3.0 leaves exactly two: the app and its uninstaller.
+
 ## [1.3.0] - 2026-09-05
 
 Three things a caller and an owner both asked for: train a voice inside the app, see which file

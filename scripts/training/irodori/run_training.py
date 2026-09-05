@@ -207,11 +207,11 @@ def main() -> None:
         "--check", action="store_true", help="Resolve and print everything, launch nothing."
     )
     parser.add_argument("passthrough", nargs="*", help=argparse.SUPPRESS)
-    _engine.add_json_flag(parser)
+    _engine.add_progress_flags(parser)
     _engine.add_engine_args(parser)
     args = parser.parse_args()
-    if args.json:
-        _engine.json_mode()
+    _engine.progress_mode(args, STAGE)
+    _engine.decline_eco_qos(STAGE)
     _engine.guard(STAGE, lambda: launch(args))
 
 
@@ -355,10 +355,15 @@ def launch(args: argparse.Namespace) -> None:
             print(f"output -> {log}")
         raise SystemExit(engine.run_upstream(UPSTREAM, argv, log=log))
 
+    # `steps` and `batch` come from the config FILE, and anything after `--` overrides them
+    # inside the trainer - which is the documented way to change them, so the record has to
+    # name it. Without this line a 100-step run announces the template's 2000.
+    overrides = [item for item in args.passthrough if item != "--"]
     _engine.emit(
         STAGE,
         "start",
-        f"{steps or '?'} steps at batch {batch or '?'} over {rows} row(s) -> {output_dir}",
+        f"{steps or '?'} steps at batch {batch or '?'} over {rows} row(s) -> {output_dir}"
+        + (f"   overrides {' '.join(overrides)}" if overrides else ""),
     )
     # `bar` is the dedupe key for tqdm redraws; the rest is what the `ok` event reports.
     seen = {"total": steps, "done": -1, "bar": None, "checkpoint": None, "val": None}

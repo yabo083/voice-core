@@ -79,8 +79,8 @@ code {
 .icon {
   display: block;
   flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 }
 
 .spin {
@@ -121,8 +121,11 @@ code {
   padding: var(--sp-6) var(--sp-2) 0;
   background: var(--bg-rail);
   border-right: 1px solid var(--line);
-  /* A short window must not clip the nav out of existence. */
+  /* A short window must not clip the nav out of existence. Sideways it must: a nav
+     label elides (.navitem__label), so anything reaching past this edge is a bug, and
+     a horizontal scrollbar under the rail would be the first anyone heard of it. */
   overflow-y: auto;
+  overflow-x: hidden;
   scrollbar-width: thin;
 }
 
@@ -272,7 +275,21 @@ code {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  padding: var(--sp-9);
+  /* Nothing in a screen is meant to be wider than the window: the one horizontal
+     scrollbar this app grew came from tooltips laid out past the right edge, and that is
+     fixed where it happened (see .tip). This is the backstop that stops the next such
+     regression from arriving as chrome. `clip` would say it better - it does not make the
+     box scrollable at all - but a box that scrolls in one axis cannot clip in the other:
+     `overflow-x: clip` beside `overflow-y: auto` computes to `hidden` (CSS Overflow 3,
+     verified in this WebView2), so this is written as the value it would become. Panes
+     whose content really is wider than the window (.code-block, .jsonview) scroll
+     themselves and are unaffected. */
+  overflow-x: hidden;
+  /* Named because `.detail__head` sticks against this padding and has to know its size. It is
+     NOT a constant: the narrow-window rule below changes it, and a sticky offset that hardcoded
+     `--sp-9` clipped the header's title by 12px under 900px wide. One fact, one place. */
+  --main-pad-y: var(--sp-9);
+  padding: var(--main-pad-y) var(--sp-9);
   scrollbar-width: thin;
   scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
 }
@@ -552,13 +569,16 @@ code {
 .tipwrap {
   position: relative;
   display: inline-flex;
+  align-items: center;
 }
 
 .tip {
   position: absolute;
-  right: 0;
-  bottom: calc(100% + var(--sp-4));
+  left: 0;
+  bottom: calc(100% + var(--sp-2));
   z-index: var(--z-pop);
+  max-width: 280px;
+  width: max-content;
   padding: var(--sp-3) var(--sp-4);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-control);
@@ -566,12 +586,27 @@ code {
   box-shadow: var(--shadow-pop);
   color: var(--ink);
   font-size: var(--fs-sm);
-  white-space: nowrap;
+  line-height: var(--lh);
+  white-space: normal;
+  word-break: break-word;
   opacity: 0;
   pointer-events: none;
   /* Delayed in, instant out: Windows tooltips do not follow a pointer that is
-     just passing over a toolbar. */
-  transition: opacity var(--dur-1) var(--ease) 350ms;
+     just passing over a toolbar or label. */
+  transition: opacity var(--dur-1) var(--ease) 300ms;
+}
+
+/* A tooltip on a control docked at the right edge opens leftwards. It is laid out even
+   at opacity 0, so without this the 280px box sits past a control that is already at
+   the window edge and the page becomes horizontally scrollable whether or not anyone
+   hovers it. Measured before this rule, against an 814px viewport: 设置 scrollWidth 999,
+   训练 969, 音色's pack page 949. */
+.cmdbar .tip,
+.cmdslot .tip,
+.form__control .tip,
+.inv > .tipwrap .tip {
+  left: auto;
+  right: 0;
 }
 
 .tipwrap:hover .tip,
@@ -687,23 +722,40 @@ code {
 }
 
 /* --- inputs --------------------------------------------------------------- */
-
-.field {
-  display: grid;
-  gap: var(--sp-3);
-  min-width: 0;
+/* Wrapper around label and info glyph for hover tooltip hints */
+.field__labelwrap {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  cursor: default;
+  width: fit-content;
 }
 
-.field__label {
+.field__labelwrap > .field__label {
+  cursor: pointer;
+}
+
+/* Quiet 12px info icon beside field label indicating a tooltip exists */
+.field__more {
+  width: 12px;
+  height: 12px;
+  color: var(--ink-faint);
+  flex: 0 0 auto;
+  transition: color var(--dur-1) var(--ease);
+}
+
+.field__labelwrap:hover .field__more,
+.field:hover .field__more {
   color: var(--ink-muted);
-  font-size: var(--fs-sm);
 }
 
+/* Kept strictly for rare cases where a line genuinely must stay visible,
+   such as a destructive action's irreversible consequence or permanent security warning.
+   Standard explanatory prose should use field(..., hint) hover tooltips instead. */
 .field__hint {
   color: var(--ink-faint);
   font-size: var(--fs-sm);
 }
-
 .input {
   width: 100%;
   padding: var(--sp-4);
@@ -1494,11 +1546,31 @@ select.input {
   padding-top: 0;
 }
 
-.pack__icon {
-  width: 20px;
-  height: 20px;
-  margin-top: 2px;
-  color: var(--accent);
+/* The pack's own portrait, at the row's lead. Square and cropped rather than fitted:
+   a portrait scaled to fit letterboxes, and every row would then be a different shape.
+   32px, so the lead stays shorter than the three lines beside it and cannot be what
+   decides the row's height. */
+.pack__portrait {
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-control);
+  object-fit: cover;
+  /* A portrait with transparency sits on a well, not on the panel. */
+  background: var(--bg-inset);
+}
+
+/* The same box with no portrait in it: one character of type (docs/voicepack-spec.md's
+   头像的回退), centred, in the accent so it reads as a stand-in rather than as content. */
+.pack__portrait--glyph {
+  display: grid;
+  place-items: center;
+  background: var(--accent-wash);
+  color: var(--accent-text);
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  /* One character: without this a tall CJK glyph would set the box's height. */
+  line-height: 1;
 }
 
 .pack__main {
@@ -1695,6 +1767,9 @@ select.input {
   right: var(--sp-6);
   bottom: var(--sp-6);
   z-index: var(--z-toast);
+  /* The stack sits over the bottom-right of a scrolled form, which is where the pointer
+     goes back to. It must not be what receives that click. */
+  pointer-events: none;
   display: grid;
   gap: var(--sp-4);
   width: min(420px, calc(100vw - var(--sp-9)));
@@ -1711,6 +1786,8 @@ select.input {
   background: var(--bg-raised);
   box-shadow: var(--shadow-pop);
   animation: toast-in var(--dur-3) var(--ease-out);
+  /* Re-armed per toast: the close button is the one thing here that takes a click. */
+  pointer-events: auto;
 }
 /* File path and action row on config screens */
 .cfg__path {
@@ -2128,6 +2205,10 @@ select.input {
 
 /* Clean tabular data surface with optional row selection */
 .table {
+  /* One declaration for the tracks, inherited by both the head and every row: two lists that
+     have to agree cannot be two lists. A table with different columns overrides `--table-cols`
+     on its own `.table` element. */
+  --table-cols: repeat(auto-fit, minmax(100px, 1fr));
   display: grid;
   width: 100%;
   border: 1px solid var(--line);
@@ -2139,7 +2220,7 @@ select.input {
 /* Table header row */
 .table__head {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  grid-template-columns: var(--table-cols);
   align-items: center;
   gap: var(--sp-4);
   padding: var(--sp-3) var(--sp-5);
@@ -2155,14 +2236,24 @@ select.input {
 /* Table data row */
 .table__row {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+  grid-template-columns: var(--table-cols);
   align-items: center;
   gap: var(--sp-4);
   padding: var(--sp-3) var(--sp-5);
+  /* A row is a <button> (it carries role=radio), and it had been keeping three pieces of UA
+     button styling that a table row must not have. Measured in this WebView2, with only these
+     three declarations removed: `text-align` computed `center` while the head stayed left, the
+     font computed `Arial` while the head used Noto Sans SC, and the UA's `2px outset` border
+     survived on the left, right and bottom - pushing the first cell to x=64 against the head's
+     x=62 and drawing a phantom edge under every row. That is what made the runs table look
+     like its data had slipped out from under its own columns. */
+  border: 0;
   border-top: 1px solid var(--line);
   background: var(--bg-panel);
   color: var(--ink);
+  font-family: inherit;
   font-size: var(--fs-sm);
+  text-align: left;
   transition: background var(--dur-1) var(--ease);
   cursor: pointer;
 }
@@ -2175,11 +2266,18 @@ select.input {
   background: var(--bg-hover);
 }
 
-/* Selected checkpoint row */
+/* Selected row.
+
+   `--bg-selected` rather than `--accent-wash`: selection marks which row a command will act
+   on, it is not the subject of the screen, and a purple slab across a dark table reads as an
+   error state. The 2px bar is the non-colour cue, so the row is still identifiable without
+   relying on the wash. `aria-checked` is here because a radio row states its selection that
+   way and the style has to follow the semantics rather than a parallel class. */
 .table__row.is-selected,
-.table__row[aria-selected="true"] {
-  background: var(--accent-wash);
-  box-shadow: inset 3px 0 0 var(--accent);
+.table__row[aria-selected="true"],
+.table__row[aria-checked="true"] {
+  background: var(--bg-selected);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 /* Table cell */
@@ -2195,10 +2293,21 @@ select.input {
 }
 
 .toast__icon {
-  margin-top: 1px;
+  align-self: start;
+  /* Centred in the FIRST line box of the message, not in the block: a wrapped message must
+     keep its icon beside the first line. Derived from the tokens that decide that line box,
+     so it stays centred if either changes - the 1px this replaces was correct at no font
+     size (13px x 1.55 = 20.15px against a 16px glyph wants 2.075px). */
+  margin-top: calc((1em * var(--lh) - var(--icon-size)) / 2);
   color: var(--ink-muted);
 }
 
+.toast__close {
+  align-self: start;
+  /* The close button (.btn--icon) is 16px icon + 2x6px padding + 2x1px border = 30px,
+     or in quiet button without border 28px. Centred with the same first line box: */
+  margin-top: calc((1em * var(--lh) - 28px) / 2);
+}
 .toast__text {
   overflow-wrap: anywhere;
 }
@@ -2222,6 +2331,903 @@ select.input {
   }
 }
 
+/* --- forms & visual configuration manager -------------------------------- */
+
+/* Root container for configuration forms */
+.form {
+  display: grid;
+  gap: var(--sp-7);
+  width: 100%;
+}
+
+/* Titled section inside a form card */
+.form__group {
+  display: grid;
+  gap: var(--sp-3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-panel);
+  background: var(--bg-panel);
+  box-shadow: var(--shadow-panel);
+  padding: var(--sp-6);
+}
+
+/* Quiet heading for a form group */
+.form__group-title {
+  margin: 0 0 var(--sp-2);
+  color: var(--ink);
+  font-size: var(--fs-md);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+/* Form row pairing label/hint on the left and control/feedback on the right */
+.form__row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-rows: auto auto;
+  align-items: center;
+  column-gap: var(--sp-6);
+  row-gap: var(--sp-1);
+  padding: var(--sp-4) 0;
+  border-top: 1px solid var(--line);
+}
+
+.form__row:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.form__row:last-of-type {
+  padding-bottom: 0;
+}
+
+/* Primary label text for a form field */
+.form__label {
+  grid-column: 1;
+  grid-row: 1;
+  color: var(--ink);
+  font-size: var(--fs-body);
+  font-weight: 500;
+  line-height: var(--lh);
+  cursor: default;
+}
+
+/* Descriptive hint or explanation beneath the form label */
+.form__hint {
+  grid-column: 1;
+  grid-row: 2;
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  line-height: var(--lh);
+}
+
+/* Interactive control host slot on the right of a form row */
+.form__control {
+  grid-column: 2;
+  grid-row: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--sp-3);
+}
+
+/* Feedback container on row 2 right */
+.form__row > .form__error {
+  grid-column: 2;
+  grid-row: 2;
+  justify-self: end;
+}
+/* Inline validation error message displayed beneath a form control */
+.form__error {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  color: var(--st-fail);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-tight);
+}
+
+/* 版本: the bounded change log on 设置. A fixed height with its own scrollbar, because the
+   list grows by one row on every write and a panel that grows with it pushes the window
+   past the bottom of the screen - which is what it used to do. */
+.history {
+  /* Four rows and a cut fifth, measured: a row is 51px because .history__what stacks the
+     field over the two values, so this is not the six rows a one-line row would give. The
+     cut row is the affordance - the box has to look like it continues. */
+  max-height: 216px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  border: 1px solid var(--line);
+  border-radius: var(--r-inset);
+  background: var(--bg-sunken);
+  scrollbar-width: thin;
+  scrollbar-color: rgba(255, 255, 255, 0.18) transparent;
+}
+
+/* One change: which setting, what it went from and to, when, and the way back. */
+.history__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  padding: var(--sp-3) var(--sp-5);
+  border-top: 1px solid var(--line);
+}
+
+.history__row:first-child {
+  border-top: 0;
+}
+
+.history__row:hover {
+  background: var(--bg-hover);
+}
+
+/* Name over values, so a row reads as a sentence at two weights rather than as a table. */
+.history__what {
+  display: grid;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+.history__field {
+  color: var(--ink);
+  font-size: var(--fs-sm);
+}
+
+/* The two values, as the file carries them. */
+.history__delta {
+  color: var(--ink-muted);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+
+.history__tail {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: var(--sp-4);
+}
+
+.history__time {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- form controls: switch, swatch, stepper, seg ------------------------- */
+
+/* WinUI 3 toggle switch component (button role="switch" or label wrapper) */
+.switch {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  width: 40px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-chip);
+  background: var(--bg-inset);
+  cursor: pointer;
+  user-select: none;
+  transition:
+    background var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
+}
+
+/* Sliding thumb indicator inside the switch */
+.switch__thumb {
+  display: block;
+  width: 14px;
+  height: 14px;
+  margin-left: 2px;
+  border-radius: var(--r-chip);
+  background: var(--ink-muted);
+  transition:
+    transform var(--dur-2) var(--ease),
+    background var(--dur-2) var(--ease);
+}
+
+.switch:hover:not(:disabled):not([aria-disabled="true"]) {
+  border-color: var(--ink-faint);
+}
+
+/* Button switch on / checked state */
+.switch[aria-checked="true"] {
+  background: var(--accent-fill);
+  border-color: var(--accent);
+}
+
+.switch[aria-checked="true"] .switch__thumb {
+  transform: translateX(20px);
+  background: var(--ink-on-accent);
+}
+
+/* Focus ring for button switch */
+.switch:focus-visible {
+  outline: var(--focus-ring) solid var(--accent);
+  outline-offset: var(--focus-offset);
+}
+
+/* Disabled state */
+.switch:disabled,
+.switch[aria-disabled="true"],
+.switch.is-disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+/* Backward-compat for input checkbox inside label.switch */
+.switch__input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+  margin: 0;
+}
+
+.switch__track {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 20px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-chip);
+  background: var(--bg-inset);
+  transition:
+    background var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
+}
+
+.switch__input:checked + .switch__track {
+  background: var(--accent-fill);
+  border-color: var(--accent);
+}
+
+.switch__input:checked + .switch__track .switch__thumb {
+  transform: translateX(20px);
+  background: var(--ink-on-accent);
+}
+
+.switch__input:focus-visible + .switch__track {
+  outline: var(--focus-ring) solid var(--accent);
+  outline-offset: var(--focus-offset);
+}
+
+/* Color well swatch paired with hexadecimal text input */
+.swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-1) var(--sp-3) var(--sp-1) var(--sp-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-inset);
+  transition: border-color var(--dur-2) var(--ease);
+}
+
+.swatch:hover,
+.swatch:focus-within {
+  border-color: var(--ink-faint);
+}
+
+/* Color chip button opening native color picker */
+.swatch__chip,
+.swatch__well {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border-radius: var(--r-control);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+  cursor: pointer;
+  overflow: hidden;
+  flex: 0 0 auto;
+}
+
+/* Native invisible color input overlaying or inside the chip */
+.swatch__input,
+.swatch__chip input[type="color"] {
+  position: absolute;
+  top: -4px;
+  left: -4px;
+  width: 32px;
+  height: 32px;
+  opacity: 0;
+  cursor: pointer;
+  border: 0;
+  padding: 0;
+}
+
+/* Text input field for the hex value in a swatch */
+.swatch__hex {
+  width: 9ch;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  text-transform: uppercase;
+  padding: 0;
+  outline: none;
+}
+
+/* Numeric stepper with increment and decrement affordances */
+.stepper {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-inset);
+  padding-right: var(--sp-2);
+  overflow: hidden;
+  transition: border-color var(--dur-2) var(--ease);
+}
+
+.stepper:hover,
+.stepper:focus-within {
+  border-color: var(--ink-faint);
+}
+
+/* Number input display within a stepper */
+.stepper__input {
+  width: 5ch;
+  padding: var(--sp-2) var(--sp-1);
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  text-align: center;
+  outline: none;
+  box-shadow: none !important;
+  -moz-appearance: textfield;
+}
+
+.stepper__input::-webkit-outer-spin-button,
+.stepper__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+/* Unit indicator label inside a stepper (e.g. "秒") */
+.stepper__unit {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  user-select: none;
+  padding-right: var(--sp-1);
+}
+.stepper__btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+
+.stepper__btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.stepper__btn:active:not(:disabled) {
+  background: var(--bg-active);
+}
+
+.stepper__btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+/* Segmented single-choice option group following WinUI 3 segment pattern */
+.seg {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: var(--bg-sunken);
+  user-select: none;
+}
+
+/* Individual choice item within a segmented control */
+.seg__item {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2) var(--sp-5);
+  border: 0;
+  border-radius: var(--r-inset);
+  background: transparent;
+  color: var(--ink-muted);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  font-weight: 500;
+  line-height: var(--lh-tight);
+  cursor: pointer;
+  transition:
+    background var(--dur-2) var(--ease),
+    color var(--dur-2) var(--ease);
+}
+
+.seg__item:hover:not(.is-active):not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.seg__item.is-active,
+.seg__item[aria-checked="true"] {
+  background: var(--bg-raised);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.seg__item:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* Select dropdown styled to fit visual config manager */
+select.input,
+.select {
+  width: auto;
+  min-width: 140px;
+  padding: var(--sp-2) var(--sp-4);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-inset);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  outline: none;
+  transition: border-color var(--dur-2) var(--ease);
+}
+
+select.input:hover,
+.select:hover {
+  border-color: var(--ink-faint);
+}
+
+select.input:focus-visible,
+.select:focus-visible {
+  outline: var(--focus-ring) solid var(--accent);
+  outline-offset: var(--focus-offset);
+}
+
+/* Tag list container (e.g. pack languages list) */
+.tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-1);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--r-control);
+  background: var(--bg-inset);
+  min-height: 32px;
+}
+
+/* Individual tag item */
+.tags__item {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  padding: 1px var(--sp-3) 1px var(--sp-3);
+  border-radius: var(--r-inset);
+  background: var(--bg-raised);
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+/* Tag dismiss / remove button */
+.tags__x {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--ink-faint);
+  font-size: var(--fs-body);
+  line-height: 1;
+  cursor: pointer;
+  border-radius: var(--r-chip);
+  transition:
+    color var(--dur-1) var(--ease),
+    background var(--dur-1) var(--ease);
+}
+
+.tags__x:hover {
+  background: var(--bg-hover);
+  color: var(--st-fail);
+}
+
+/* Inline input for appending a new tag */
+.tags__input {
+  border: 0 !important;
+  background: transparent !important;
+  color: var(--ink);
+  font-size: var(--fs-sm);
+  padding: var(--sp-1) var(--sp-2);
+  min-width: 80px;
+  flex: 1 1 auto;
+  outline: none;
+  box-shadow: none !important;
+}
+
+/* --- secondary page / pack detail view ----------------------------------- */
+
+/* Full-page shell for secondary detail views navigated from a parent screen */
+.detail {
+  display: grid;
+  gap: var(--sp-7);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  width: 100%;
+  animation: detail-in var(--dur-2) var(--ease-out);
+}
+
+@keyframes detail-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+/* Header of a secondary detail page carrying back affordance and title.
+
+   Sticky, because this is the only way out of a pack page and a pack page is long: scrolled
+   down to the synthesis parameters, the user was two screens away from the button that goes
+   back. The scroller is `.main` - not the viewport, and not `document.scrollingElement`, which
+   is not the scroller in this app.
+
+   `top` is MINUS the scroller's own vertical padding, and that is not a nudge. A sticky child
+   of a padded scroller parks at the padding edge, so with `top: 0` this header stopped 32px
+   down and the page's content scrolled through the gap above it - measured with
+   `elementFromPoint` 4px above the stuck header, which returned a panel. Offsetting by that
+   padding parks it flush against the scrollport and the gap goes to 0.
+
+   It reads `--main-pad-y` rather than `--sp-9` because that padding is NOT a constant: under
+   900px wide `.main` pads with `--sp-7`, and hardcoding the wide value overshot by 12px there,
+   lifting the header above the scrollport and cutting the top off its own title. That was a
+   real bug in a shipped build, found by a user on a narrow window, and the shape of the fix is
+   the point: the offset now comes from the same declaration that sets the padding.
+
+   The surface must be opaque. A translucent header with text sliding underneath reads as a
+   rendering bug, and there is nothing behind this one worth seeing. `--bg-window` is what
+   `.main` shows, so stuck and unstuck are the same colour.
+
+   The top padding is what keeps the title off the window edge once stuck; the negative margin
+   hands it back at rest, which is why an unscrolled pack page puts its title at exactly the
+   y it did before this rule existed. */
+.detail__head {
+  position: sticky;
+  top: calc(-1 * var(--main-pad-y));
+  z-index: var(--z-sticky);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-5);
+  margin-top: calc(-1 * var(--sp-6));
+  padding-top: var(--sp-6);
+  padding-bottom: var(--sp-6);
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-window);
+}
+
+/* Left cluster of detail head containing back button and titles */
+.detail__lead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-5);
+  min-width: 0;
+}
+
+/* Back button affordance navigating to the parent screen */
+.detail__back {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-control);
+  background: transparent;
+  color: var(--ink-muted);
+  cursor: pointer;
+  transition:
+    background var(--dur-2) var(--ease),
+    color var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
+  flex: 0 0 auto;
+}
+
+.detail__back:hover {
+  background: var(--bg-hover);
+  border-color: var(--ink-faint);
+  color: var(--ink);
+}
+
+.detail__back:active {
+  transform: translateY(1px);
+}
+
+/* Title and subtitle stack inside detail head */
+.detail__titles {
+  display: grid;
+  gap: var(--sp-1);
+  min-width: 0;
+}
+
+/* Large primary title on a secondary detail page */
+.detail__title {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: var(--fs-xl);
+  font-weight: 600;
+  letter-spacing: var(--tracking-title);
+  line-height: var(--lh-tight);
+}
+
+/* Subtitle or id metadata on a secondary detail page */
+.detail__subtitle {
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+
+
+/* Pack ID code pill inside detail head */
+.pack__id,
+.detail__id {
+  display: inline-block;
+  padding: 1px var(--sp-3);
+  border-radius: var(--r-control);
+  background: var(--bg-inset);
+  border: 1px solid var(--line);
+  color: var(--ink-faint);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+}
+/* Right actions slot in detail head (e.g. status chips, delete button) */
+.detail__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  flex: 0 0 auto;
+}
+
+/* Scrolling content body container of a secondary detail page */
+.detail__body {
+  display: grid;
+  gap: var(--sp-7);
+  width: 100%;
+}
+
+/* Isolated preview card demonstrating subtitle styling with custom colors */
+.preview {
+  position: relative;
+  display: grid;
+  gap: var(--sp-3);
+  padding: var(--sp-8);
+  border-radius: var(--r-panel);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  overflow: hidden;
+  color: var(--preview-text, #f2f2f2);
+}
+
+/* Trial voice result line inside preview card */
+.preview__result {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--ink-muted);
+  padding: var(--sp-2) 0;
+}
+
+/* Background wallpaper or game atmosphere mock layer behind subtitle */
+.preview__backdrop {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 85% 15%, rgba(139, 108, 239, 0.15), transparent 55%),
+    radial-gradient(ellipse at 15% 85%, rgba(8, 185, 78, 0.08), transparent 55%),
+    linear-gradient(180deg, #161616 0%, #0c0c0c 100%);
+  z-index: 0;
+}
+
+/* Subtitle dialog bubble floating inside the preview stage */
+.preview__dialog {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  gap: var(--sp-6);
+  padding: var(--sp-5) var(--sp-6);
+  border-radius: var(--r-panel);
+  background: rgba(22, 22, 22, 0.88);
+  backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+/* Left character column with avatar and name */
+.preview__character {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
+/* Avatar frame */
+.preview__avatar {
+  width: 44px;
+  height: 44px;
+  border-radius: var(--r-control);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  background: var(--bg-panel);
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Speaker character name line rendered in pack's nameColor */
+.preview__name {
+  color: var(--preview-name, #a48bff);
+  font-weight: 600;
+  font-size: var(--fs-sm);
+  letter-spacing: -0.01em;
+  text-align: center;
+}
+
+/* Right utterance content column */
+.preview__content {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: var(--sp-1);
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* Japanese ruby pronunciation text rendered in pack's rubyColor */
+.preview__ruby {
+  color: var(--preview-ruby, #a3a3a3);
+  font-size: var(--fs-micro);
+  line-height: 1;
+  letter-spacing: 0.05em;
+}
+
+/* Subtitle spoken utterance text line rendered in pack's textColor */
+.preview__text {
+  color: var(--preview-text, #f2f2f2);
+  font-size: var(--fs-md);
+  line-height: var(--lh);
+}
+
+/* Auto-dismiss countdown hairline along the plate's bottom edge */
+.preview__countdown {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--preview-countdown, #8b6cef);
+  opacity: 0.85;
+}
+
+/* --- file management tree / list row ------------------------------------- */
+
+/* Dense file row displaying item name, size, and open affordance */
+.filerow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  padding: var(--sp-3) var(--sp-4);
+  border-radius: var(--r-control);
+  background: transparent;
+  transition: background var(--dur-1) var(--ease);
+  min-width: 0;
+}
+
+.filerow:hover {
+  background: var(--bg-hover);
+}
+
+/* Leading icon, name, and folder path container of a filerow */
+.filerow__lead {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+/* Type icon preceding the file name (file, code, sound, folder) */
+.filerow__icon {
+  color: var(--ink-muted);
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+
+/* File or directory name text formatted in monospace */
+.filerow__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--ink);
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* Trailing metadata and action buttons slot of a filerow */
+.filerow__tail {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex: 0 0 auto;
+}
+
+/* File size or date stamp formatted in muted tabular text */
+.filerow__size {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  color: var(--ink-faint);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  min-width: 6ch;
+}
+
+/* Action button inside a filerow */
+.filerow__action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--sp-1) var(--sp-2);
+  border: 0;
+  border-radius: var(--r-inset);
+  background: transparent;
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition:
+    background var(--dur-1) var(--ease),
+    color var(--dur-1) var(--ease);
+}
+
+.filerow__action:hover {
+  background: var(--bg-active);
+  color: var(--ink);
+}
+
 /* --- narrow window -------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -2237,7 +3243,19 @@ select.input {
   }
 
   .main {
-    padding: var(--sp-7) var(--sp-6);
+    --main-pad-y: var(--sp-7);
+    padding: var(--main-pad-y) var(--sp-6);
+  }
+
+  /* Responsive form row: stack label and control when width is constrained */
+  .form__row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: var(--sp-3);
+  }
+
+  .form__control {
+    align-items: flex-start;
   }
 }
 

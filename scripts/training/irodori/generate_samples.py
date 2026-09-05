@@ -147,11 +147,11 @@ def main() -> None:
     parser.add_argument(
         "--precision", default="bf16", choices=["bf16", "fp32"], help="Model and codec precision."
     )
-    _engine.add_json_flag(parser)
+    _engine.add_progress_flags(parser)
     _engine.add_engine_args(parser)
     args = parser.parse_args()
-    if args.json:
-        _engine.json_mode()
+    _engine.progress_mode(args, STAGE)
+    _engine.decline_eco_qos(STAGE)
     _engine.guard(STAGE, lambda: generate(args))
 
 

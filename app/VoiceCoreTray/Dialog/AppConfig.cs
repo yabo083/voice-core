@@ -1,6 +1,7 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Windows.UI;
 
 namespace VoiceCoreTray.Dialog;
 
@@ -20,8 +21,10 @@ internal enum RevealStyle
 
 /// <summary>
 /// Everything about this app that a user may change, in ONE file: <c>config.json</c> in
-/// the runtime's data dir. Read once at startup, written with the defaults when absent,
-/// and edited from the tray's single 设置 entry - a change needs a tray restart.
+/// the runtime's data dir. Read at startup, written with the defaults when absent, edited
+/// from the tray's single 设置 entry or from the panel - and re-read while running, so a
+/// change to <c>dialog</c> or <c>hotkeys</c> takes effect on the next utterance instead of
+/// needing a restart (<see cref="ConfigWatcher"/>).
 ///
 /// It replaces the earlier per-feature files (<c>dialog.json</c>, <c>hotkeys.json</c>,
 /// <c>voicepacks.json</c>): a setting nobody can find is a setting nobody uses, and four
@@ -30,10 +33,12 @@ internal enum RevealStyle
 /// runtime owns it, and <c>subtitle-pos.json</c> because it is state the dialog writes,
 /// not a preference anyone edits.
 ///
-/// The tray is the only writer. The Rust runtime READS the <c>voicePacks</c> section from
-/// the same file (see <c>src/packs.rs</c>), reloading it whenever the mtime changes, so
-/// that section is carried verbatim through every write here - this class must never be
-/// the reason a pack disappears.
+/// The tray is the only writer, and it writes only on that one migration (see
+/// <see cref="Save"/>). The Rust runtime READS this file too - <c>voicePacks</c> AND the
+/// <c>dialog</c> section, which it merges under each pack's own (see <c>src/packs.rs</c>)
+/// - reloading whenever the mtime changes. Every section is therefore carried verbatim
+/// through a write here: this class must never be the reason a pack or a setting
+/// disappears.
 /// </summary>
 internal sealed record AppConfig
 {
@@ -67,16 +72,35 @@ internal sealed record AppConfig
         [JsonPropertyName("annotationAbove")]
         public bool AnnotationAbove { get; init; }
 
-        /// <summary>`typewriter`, `sweep` or `fade`.</summary>
+        /// <summary>`typewriter`, `sweep` or `fade`; the presenter plays exactly those
+        /// three, and the runtime refuses anything else by name.</summary>
         [JsonPropertyName("reveal")]
         public string Reveal { get; init; } = "typewriter";
 
-        public RevealStyle Style => Reveal?.Trim().ToLowerInvariant() switch
-        {
-            "sweep" => RevealStyle.Sweep,
-            "fade" => RevealStyle.Fade,
-            _ => RevealStyle.Typewriter,
-        };
+        // The subtitle's colours and dwell, app-wide: the tier under every voice pack's own
+        // `dialog` section and above the presenter's built-ins. Nullable, because absent has
+        // to mean "whatever the dialog already does" - writing a colour here as a default
+        // would pin it against a future built-in. `#rgb`, `#rrggbb` or `#aarrggbb`.
+        //
+        // The runtime reads these from the same file and folds them into the `dialog` it
+        // sends per utterance, so the presenter's own copy of them is only ever reached by a
+        // line that arrived without one - a local preview (--subtitle-test).
+
+        [JsonPropertyName("nameColor")]
+        public string? NameColor { get; init; }
+
+        [JsonPropertyName("textColor")]
+        public string? TextColor { get; init; }
+
+        [JsonPropertyName("rubyColor")]
+        public string? RubyColor { get; init; }
+
+        [JsonPropertyName("countdownColor")]
+        public string? CountdownColor { get; init; }
+
+        /// <summary>Auto-hide countdown length, seconds. Null = the built-in dwell.</summary>
+        [JsonPropertyName("displaySeconds")]
+        public double? DisplaySeconds { get; init; }
     }
 
     internal sealed record HotkeySection
@@ -143,6 +167,28 @@ internal sealed record AppConfig
     }
 
     /// <summary>
+    /// Just read it. No migration, no write, no defaults file - the reload path
+    /// (<see cref="ConfigWatcher"/>) calls this on every mtime change, and calling
+    /// <see cref="Load"/> there would be two bugs at once: it can WRITE, which reserialises
+    /// this file from the template and would drop any key this build does not know (the
+    /// panel writes some), and that write moves the mtime, which is what the watcher is
+    /// watching.
+    ///
+    /// A read that fails returns null rather than defaults: mid-save is a normal thing to
+    /// catch a file in, and re-theming the dialog to the built-ins for one frame because a
+    /// writer had the file open is worse than waiting for the next tick.
+    /// </summary>
+    public static AppConfig? Read(string dataDir)
+    {
+        try
+        {
+            var file = Path.Combine(dataDir, FileName);
+            return JsonSerializer.Deserialize<AppConfig>(File.ReadAllText(file), ReadOptions);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
     /// Written as an annotated template rather than serializer output: this file's whole job
     /// is to be opened in notepad by a human, and a bare <c>"reveal": "typewriter"</c> does
     /// not tell them what else they may type there. Comments are read back (see
@@ -154,10 +200,14 @@ internal sealed record AppConfig
     /// <c>MoveFileEx(MOVEFILE_REPLACE_EXISTING)</c>, so a reader sees either the whole old
     /// file or the whole new one, and the mtime moves exactly once.
     ///
-    /// Every interpolated scalar goes through the serializer. Two of them are typed by hand
-    /// (a hotkey spec, the reveal name) and one quote or backslash would otherwise emit a
-    /// broken file - taking the <c>voicePacks</c> section down with it, which is the one
-    /// thing this class must never do.
+    /// Every interpolated scalar goes through the serializer. Several are typed by hand (a
+    /// hotkey spec, the reveal name, four colours) and one quote or backslash would
+    /// otherwise emit a broken file - taking the <c>voicePacks</c> section down with it,
+    /// which is the one thing this class must never do.
+    ///
+    /// The colours and the dwell are written with the built-in values rather than left out:
+    /// this file's job is to be discoverable in notepad, and an absent key teaches nobody
+    /// that it exists. They are also the leaves the panel's settings page edits in place.
     /// </summary>
     public static void Save(string dataDir, AppConfig config)
     {
@@ -165,7 +215,7 @@ internal sealed record AppConfig
         var target = Path.Combine(dataDir, FileName);
         var temp = target + ".new";
         File.WriteAllText(temp, $$"""
-        // voice-core 设置。改完重启 voice-core 生效（声线包除外，运行时会自己重新读取）。
+        // voice-core 设置。改完保存即生效，不用重启。
         // 注释和尾随逗号都可以保留，不会导致解析失败。
         {
           "dialog": {
@@ -176,7 +226,18 @@ internal sealed record AppConfig
             //   "typewriter" 逐字打字机，按音频时长配速（默认，Galgame 手感）
             //   "sweep"      一道柔光从左到右扫过，把已排好的整行抹出（零排版抖动）
             //   "fade"       整段按子句依次淡入，印刷质感，最干净
-            "reveal": {{Scalar(config.Dialog.Reveal)}}
+            "reveal": {{Scalar(config.Dialog.Reveal)}},
+
+            // 字幕配色，`#rgb` / `#rrggbb` / `#aarrggbb`（前两位是透明度）。
+            // 这是全局默认；音色包自己的 voicepack.json 里的同名字段会覆盖它，
+            // 单次调用（CLI 的 --name-color 等）优先级最高。
+            "nameColor": {{Scalar(config.Dialog.NameColor ?? Hex(DialogTheme.NameInkDefault))}},
+            "textColor": {{Scalar(config.Dialog.TextColor ?? Hex(DialogTheme.PrimaryInkDefault))}},
+            "rubyColor": {{Scalar(config.Dialog.RubyColor ?? Hex(DialogTheme.SecondaryInkDefault))}},
+            "countdownColor": {{Scalar(config.Dialog.CountdownColor ?? Hex(DialogTheme.CountdownInkDefault))}},
+
+            // 字幕停留秒数（倒计时长度）。常驻模式下不倒计时。
+            "displaySeconds": {{Number(config.Dialog.DisplaySeconds ?? DialogTheme.DefaultDwellSeconds)}}
           },
 
           // 全局快捷键。至少要带一个修饰键（Ctrl/Alt/Shift/Win），否则会吞掉其他程序的按键。
@@ -199,6 +260,15 @@ internal sealed record AppConfig
     /// <summary>One JSON string literal, quotes included, escaped by the serializer.</summary>
     private static string Scalar(string value) =>
         JsonSerializer.Serialize(value, WriteOptions);
+
+    /// <summary>One JSON number, invariant, so a comma decimal separator can never land in
+    /// a JSON file on a machine whose locale uses one.</summary>
+    private static string Number(double value) =>
+        value.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+
+    /// <summary>A built-in colour as <c>#aarrggbb</c>, so the template shows the value that
+    /// is really in effect instead of a second copy of it spelled by hand here.</summary>
+    private static string Hex(Color ink) => $"#{ink.A:x2}{ink.R:x2}{ink.G:x2}{ink.B:x2}";
 
     private static readonly JsonSerializerOptions WriteOptions = new()
     {

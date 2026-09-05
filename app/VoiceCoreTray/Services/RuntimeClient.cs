@@ -7,6 +7,24 @@ using System.Text.Json;
 namespace VoiceCoreTray.Services;
 
 /// <summary>
+/// How one utterance should look, exactly as the runtime resolved it: per-call over the
+/// voice pack's manifest over <c>config.json</c>'s own <c>dialog</c> section
+/// (<c>src/packs.rs</c>). Every field optional, and absent means "the presenter's
+/// built-in" - the runtime has no opinion about colour, so it never invents one.
+///
+/// Still strings, because that is what came off the wire; <see cref="Dialog.DialogTheme"/>
+/// is where they become brushes. The merge is NOT redone here: one implementation of the
+/// precedence, in the runtime, is the point of carrying it per utterance.
+/// </summary>
+public sealed record DialogStyle(
+    string? NameColor,
+    string? TextColor,
+    string? RubyColor,
+    string? CountdownColor,
+    string? Reveal,
+    double? DisplaySeconds);
+
+/// <summary>
 /// The tray's only link to voice-core. It is a presenter: it subscribes to the
 /// runtime's event stream, fetches audio by id, and drives control actions
 /// through the same public API the CLI and an agent use.
@@ -75,7 +93,7 @@ public sealed class RuntimeClient : IAsyncDisposable
         string? DisplayText,
         string? Text,
         string? VoicePackId,
-        double? DisplaySeconds,
+        DialogStyle? Dialog,
         byte[]? Wav,
         IReadOnlyList<RubyPair>? RubyPairs);
 
@@ -523,10 +541,7 @@ public sealed class RuntimeClient : IAsyncDisposable
                         DisplayText: Read(root, "displayText"),
                         Text: Read(root, "text"),
                         VoicePackId: Read(root, "voicePackId"),
-                        DisplaySeconds: root.TryGetProperty("displaySeconds", out var s) &&
-                                        s.ValueKind == JsonValueKind.Number
-                            ? s.GetDouble()
-                            : null,
+                        Dialog: ReadDialog(root),
                         Wav: wav,
                         RubyPairs: ReadRubyPairs(root)));
                     break;
@@ -599,6 +614,32 @@ public sealed class RuntimeClient : IAsyncDisposable
             pairs.Add(new RubyPair(based, Read(item, "ruby") ?? string.Empty));
         }
         return pairs.Count > 0 ? pairs : null;
+    }
+
+    /// <summary>
+    /// Read this line's resolved appearance, or null when the runtime stated nothing for it.
+    /// Every field is optional on its own, so a partial object is normal rather than
+    /// suspect: `{"reveal":"fade"}` means "fade, and leave every colour alone".
+    /// </summary>
+    private static DialogStyle? ReadDialog(JsonElement root)
+    {
+        if (!root.TryGetProperty("dialog", out var dialog) || dialog.ValueKind != JsonValueKind.Object)
+            return null;
+
+        double? seconds = dialog.TryGetProperty("displaySeconds", out var value) &&
+                          value.ValueKind == JsonValueKind.Number
+            ? value.GetDouble()
+            : null;
+        var style = new DialogStyle(
+            Read(dialog, "nameColor"),
+            Read(dialog, "textColor"),
+            Read(dialog, "rubyColor"),
+            Read(dialog, "countdownColor"),
+            Read(dialog, "reveal"),
+            seconds);
+        // An empty object is the runtime saying "nothing was asked for anywhere"; carrying
+        // it as a style would be six nulls the theme would have to step over per utterance.
+        return style == new DialogStyle(null, null, null, null, null, null) ? null : style;
     }
 
     /// <summary>

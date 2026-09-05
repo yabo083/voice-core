@@ -259,7 +259,7 @@ def main() -> None:
     )
     for attribute, flag in RETIRED.items():
         retired.add_argument(flag, dest=attribute, default=None, help=argparse.SUPPRESS)
-    _engine.add_json_flag(parser)
+    _engine.add_progress_flags(parser)
     _engine.add_engine_args(parser)
     args = parser.parse_args()
     named = [flag for attribute, flag in RETIRED.items() if getattr(args, attribute) is not None]
@@ -272,8 +272,8 @@ def main() -> None:
             "encoded in this process now, from the local JSONL that --dataset-file names. For "
             "a HuggingFace dataset, run upstream's prepare_manifest.py directly."
         )
-    if args.json:
-        _engine.json_mode()
+    _engine.progress_mode(args, STAGE)
+    _engine.decline_eco_qos(STAGE)
     if args.log is not None:
         print(f"output -> {args.log}")
     with transcript(args.log):

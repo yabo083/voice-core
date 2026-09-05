@@ -1,447 +1,296 @@
-// 训练: the panel side of `scripts/training/`, which is where the work actually happens.
+// 训练: the panel side of `scripts/training/`, which is where the work happens — and where it
+// is started. An agent runs the six steps; this screen is what the human watches.
 //
-// Five steps run as one job — dataset, latents, train, samples, score — and installing the
-// result is a sixth the user asks for separately, because training produces several
-// candidates and picking one is a decision. The backend relays each step's own progress
-// stream on `train://event`, in the shape bootstrap established, so this screen renders
-// events and computes nothing: the step that measured a number is the step that reports it.
+// That is the inversion this file exists to serve. The pipeline is an hour of GPU time driven
+// from a shell, so the panel does not own it: every step writes its own record
+// (`--status-file`, `scripts/training/_layout.py`), and this screen reads
+// `data\logs\training-<pack id>.status.json` plus the `.jsonl` beside it. It therefore shows
+// runs it never started — which is the normal case — and there is no start button, no corpus
+// picker and no knobs, because none of those decisions are made here.
 //
-// Five cards, in the order the work happens: 准备 (can this machine do it), 语料 (what it
-// will learn from), 参数 (the four knobs that are safe to move), 进度 (the live run), 结果
-// (which checkpoint, and installing it). The progress card is built once and mutated in
-// place — a fifty-minute run emits an event per training step, and rebuilding that subtree
-// each time would move focus off the cancel button someone is reaching for.
+// So the page is one thing: observability. Which runs exist, which stage each reached, the live
+// metric strip, the console, the checkpoints, and the files on disk.
+//
+// There is no handover-prompt card here, and re-adding one is a regression. It held some sixty
+// lines of prose and PowerShell — the six-step pipeline, the `--json` protocol, the two
+// constraints that cost real time when ignored — which is exactly what
+// `skills/voice-core-voice-training/SKILL.md` is, a file that ships inside the install and is
+// written to be read by an agent. A window cannot keep a second copy of that in sync with it,
+// and a wall of text is not an interface: the 状态 screen's 使用说明 card hands an agent that
+// file in one sentence, and that is the whole handover.
+//
+// The one act left is installing a chosen checkpoint, and it is here because choosing among
+// candidates is a human judgement — the 训练成果 table exists to serve exactly that.
+//
+// Nothing here explains itself in prose. A label plus its value is the explanation; visible
+// text is reserved for a failure with its remedy, a destructive confirmation, and an empty
+// state saying what will appear here.
 
-
-import { el, fill, type Child } from "../dom";
-import { formatElapsed } from "../format";
+import { el, fill } from "../dom";
+import { formatBytes, formatDuration, formatElapsed } from "../format";
 import { icon, type IconName } from "../icons";
 import {
-  cancelTraining,
   installTrainedPack,
   ipcMessage,
-  onTrainEvent,
-  pickFile,
-  pickFolder,
-  startTraining,
-  trainingPreflight,
-  trainingResult,
+  trainingDiscard,
+  trainingLog,
+  trainingRuns,
+  trainingScratch,
   TRAIN_STAGES,
-  type TrainEvent,
+  type ScratchEntry,
+  type ScratchTree,
+  type TrainingRun,
+  type TrainingStageStatus,
   type TrainStage,
-  type TrainingPreflight,
-  type TrainingResult,
 } from "../ipc";
-import { refreshVoices, status } from "../state";
+import { refreshVoices } from "../state";
 import { toast } from "../toast";
 import {
   blockedButton,
   button,
   chip,
   emptyState,
-  expander,
-  field,
   note,
+  openButton,
   panel,
   pathText,
   type Tone,
 } from "../ui";
-// ---------------------------------------------------------------------------------------
 
-type StageState = "pending" | "running" | "ok" | "skip" | "fail";
-
-/** Result-oriented, and free of the engine's vocabulary: "DACVAE" and "manifest" belong in
- *  the console, where someone who needs them is already looking. */
+/** Result-oriented, and free of the engine's vocabulary: "DACVAE" and "manifest" belong in the
+ *  console, where someone who needs them is already looking. */
 const STAGE_LABEL: Record<TrainStage, string> = {
-  dataset: "检查语料",
-  latents: "编码音频",
+  dataset: "语料校验",
+  latents: "音频特征提取",
   train: "训练适配器",
-  samples: "生成试听",
-  score: "相似度评分",
+  samples: "生成试听样本",
+  score: "音色相似度评分",
   install: "安装音色包",
 };
 
+/** What the step produces, not what it does. A stage's own `message` replaces this the moment
+ *  it starts, so this line is only ever read before that step has run. */
 const STAGE_HINT: Record<TrainStage, string> = {
-  dataset: "逐个读取片段，写出数据集与 QA 报告",
-  latents: "用引擎自己的编解码器把音频编成潜变量",
-  train: "占用显卡最久的一步",
-  samples: "同一批文本、同一个随机种子，每个检查点各生成一遍",
-  score: "与原始录音比较说话人相似度，在 CPU 上跑",
-  install: "选定一个检查点，复制并登记为音色包",
+  dataset: "dataset.jsonl 与质检报告",
+  latents: "DACVAE 潜变量 (.pt) 与训练清单",
+  train: "LoRA 权重训练（高 GPU 负载阶段）",
+  samples: "固定随机种子 · 每个检查点各一组样本",
+  score: "GE2E d-vector · CPU",
+  install: "归档检查点并生成 voicepack.json",
 };
 
-const STATE_LABEL: Record<StageState, string> = {
+/** The words the status file uses, in the words the screen uses. `interrupted` is the one the
+ *  event stream cannot produce: a stage whose process died without a terminal event. */
+const STATE_LABEL: Record<string, string> = {
   pending: "待执行",
   running: "进行中",
-  ok: "完成",
+  ok: "已完成",
   skip: "已跳过",
   fail: "失败",
+  interrupted: "已中断",
 };
 
-const STATE_GLYPH: Record<StageState, IconName> = {
+const STATE_GLYPH: Record<string, IconName> = {
   pending: "circle-dashed",
   running: "spinner-gap",
   ok: "check-circle",
   skip: "recycle",
   fail: "warning-circle",
+  interrupted: "stop",
 };
 
-/** The stylesheet names these states in the vocabulary a wizard uses, not the one a job
- *  status uses (`app.css`: `--todo/--active/--done/--fail/--skip`). Mapping here rather than
- *  renaming either side keeps the job's own words in the job's code and the stylesheet's in
- *  the stylesheet — and without this map every state rule silently applies to nothing. */
-const STATE_CLASS: Record<StageState, string> = {
+/** The stylesheet names these states in the vocabulary a wizard uses, not the one a job status
+ *  uses (`app.css`: `--todo/--active/--done/--fail/--skip`). Mapping here rather than renaming
+ *  either side keeps the file's own words in the file's reader and the stylesheet's in the
+ *  stylesheet — and without this map every state rule silently applies to nothing.
+ *  `interrupted` draws as `todo`: nothing is happening in that step, and it is not a failure. */
+const STATE_CLASS: Record<string, string> = {
   pending: "todo",
   running: "active",
   ok: "done",
   skip: "skip",
   fail: "fail",
+  interrupted: "todo",
+};
+
+const STATE_TONE: Record<string, Tone> = {
+  pending: "idle",
+  running: "run",
+  ok: "ok",
+  skip: "reuse",
+  fail: "fail",
+  interrupted: "warn",
 };
 
 /** Beyond this the console is scrollback nobody reads and DOM the window pays for on every
- *  layout. The full transcript of every step is in data\logs either way. */
+ *  layout. The full transcript is the `.jsonl` either way, and the file panel opens it. */
 const LOG_CAP = 2000;
 
-/** `lora.yaml`'s own defaults, which are the values a reference run on an RTX 5060 Ti
- *  actually used. The panel starts from those rather than from round numbers. */
-const DEFAULTS = { batch: 16, steps: 2000, rate: 0.0001, save: 500 } as const;
+/** How often the two files are re-read. The status files are a couple of KiB each and the
+ *  transcript read resumes at a byte offset, so a poll costs a seek; the scratch tree is
+ *  measured only when a stage changes, because walking `latents\` is thousands of stats. */
+const POLL_MS = 2000;
 
-/** Below this, batch 16 at bf16 does not fit and the warning is worth showing before an hour
- *  of GPU time ends in an out-of-memory. */
-const BATCH16_MIB = 15000;
+/** What each file of a run is for. Keyed by the name on disk because that is what the backend
+ *  reports — it measures files, it does not name them in Chinese. */
+const ARTEFACT: Record<string, string> = {
+  "dataset.jsonl": "数据集清单 (dataset.jsonl)",
+  "dataset.jsonl.qa.json": "语料质检报告 (dataset.jsonl.qa.json)",
+  "train_manifest.jsonl": "训练样本清单 (train_manifest.jsonl)",
+  latents: "潜变量特征目录 (latents)",
+  lora: "模型检查点目录 (lora)",
+  samples: "试听音频样本 (samples)",
+  score: "相似度评估报告 (score)",
+  "installed.txt": "安装记录 (installed.txt)",
+};
 
-interface StageModel {
-  state: StageState;
-  message: string;
-  done: number | null;
-  total: number | null;
-  startedAt: number | null;
-  endedAt: number | null;
-}
-
-interface WizardRow {
-  root: HTMLElement;
-  dot: HTMLElement;
-  label: HTMLElement;
-  sub: HTMLElement;
-}
-
-function blankStage(): StageModel {
-  return { state: "pending", message: "", done: null, total: null, startedAt: null, endedAt: null };
-}
+/** Directories all draw as a folder — which of them is which is what the label is for. */
+const ARTEFACT_GLYPH: Record<string, IconName> = {
+  "dataset.jsonl": "database",
+  "dataset.jsonl.qa.json": "info",
+  "train_manifest.jsonl": "database",
+  "installed.txt": "check",
+};
 
 export interface TrainingScreen extends HTMLElement {
-  /** Lives in the shell, below the scroll region, so 取消 cannot scroll away mid-run. */
+  /** Lives in the shell, below the scroll region, so the one action on this page cannot scroll
+   *  away. */
   commandBar: HTMLElement;
 }
 
 export function createTrainingScreen(): TrainingScreen {
-  const stages: Record<TrainStage, StageModel> = {
-    dataset: blankStage(),
-    latents: blankStage(),
-    train: blankStage(),
-    samples: blankStage(),
-    score: blankStage(),
-    install: blankStage(),
-  };
-
-  let preflight: TrainingPreflight | null = null;
-  let result: TrainingResult | null = null;
-  let running = false;
-  let ticker = 0;
-  let autoScroll = true;
+  let runs: TrainingRun[] = [];
+  /** Which run the observability half is about. The live one by default. */
+  let selected: string | null = null;
+  let tree: ScratchTree | null = null;
+  /** Which checkpoint 安装为音色包 would install. */
   let chosen: string | null = null;
-  /** Which voice the live job belongs to. The id field is editable, and an event arriving
-   *  after someone started typing in it must still read the running job's directory. */
-  let livePack: string | null = null;
-  let audioDir: string | null = null;
-  let transcripts: string | null = null;
-  let avatar: string | null = null;
+  /** Where the console has read up to in the transcript, in bytes. */
+  let logOffset = 0;
+  /** `stage|state|live` at the last tree measurement, so the walk happens on a boundary rather
+   *  than once per poll. */
+  let treeKey = "";
+  /** The backend's refusal to delete a scratch tree, held so the panel can show it beside the
+   *  button that would override it. */
+  let discardRefusal: string | null = null;
+  /** An install is in flight. Nothing else on this page starts a process. */
+  let installing = false;
+  let autoScroll = true;
+  let ticker = 0;
 
-  // ------------------------------------------------------------------------------ 准备
-  const ready = expander({ title: "准备", id: "train-ready", open: true });
-
-  function readyRow(glyph: IconName, label: string, detail: string, right: Child): HTMLElement {
-    return el(
-      "div",
-      { class: "inv" },
-      icon(glyph, "inv__icon"),
-      el(
-        "div",
-        { class: "inv__main" },
-        el("p", { class: "inv__label", text: label }),
-        el("p", { class: "inv__value", text: detail }),
-      ),
-      right,
-    );
+  function current(): TrainingRun | null {
+    return runs.find((run) => run.pack_id === selected) ?? null;
   }
 
-  function renderReady(): void {
-    if (preflight === null) {
-      fill(ready.body, el("p", { class: "field__hint", text: "正在检查本机环境…" }));
-      ready.tail.textContent = "检查中";
-      return;
-    }
-    const state = preflight;
-    const vram =
-      state.vram_total_mib === null
-        ? "未知"
-        : `${gib(state.vram_free_mib)} 可用 / ${gib(state.vram_total_mib)}`;
+  // ---------------------------------------------------------------------------- 运行
+  // Every run with a status file, including the ones this window never saw start.
+  const runsPanel = panel({ title: "训练运行" });
+  const runsTable = el("div", { class: "table" });
+  const runsState = el("div", { class: "panel__body" });
 
-    fill(
-      ready.body,
-      el(
-        "div",
-        { class: "inv" },
-        icon("terminal-window", "inv__icon"),
-        el(
-          "div",
-          { class: "inv__main" },
-          el("p", { class: "inv__label", text: "训练用 Python" }),
-          state.python === null
-            ? el("p", { class: "inv__value", text: "没有找到解释器" })
-            : el("div", { class: "inv__value" }, pathText(state.python, 64)),
-        ),
-        state.python === null
-          ? chip("缺失", "fail", "warning-circle")
-          : chip("就绪", "ok", "check-circle"),
-      ),
-      readyRow(
-        "file-code",
-        "训练依赖",
-        state.missing.length === 0
-          ? "torch、datasets、peft、soundfile、resemblyzer、yaml 均可导入"
-          : `缺少 ${state.missing.join("、")}`,
-        state.missing.length === 0
-          ? chip("齐全", "ok", "check-circle")
-          : chip(`缺 ${state.missing.length} 个`, "fail", "warning-circle"),
-      ),
-      readyRow(
-        "graphics-card",
-        "显卡",
-        state.gpu_name === null
-          ? "torch 看不到 CUDA 设备"
-          : `${state.gpu_name} · CUDA ${state.cuda ?? "?"} · 显存 ${vram}`,
-        state.gpu_name === null
-          ? chip("不可用", "fail", "warning-circle")
-          : chip("可用", "ok", "check-circle"),
-      ),
-      readyRow(
-        "pulse",
-        "后端占用",
-        state.runtime_reachable
-          ? state.model_loaded
-            ? "后端正持有模型；第一个用显卡的步骤开始前会自动请求它释放"
-            : "后端在运行，但没有加载模型"
-          : "后端没在运行，显卡是空的",
-        state.model_loaded
-          ? chip("持有显存", "warn", "warning")
-          : chip("无占用", "ok", "check-circle"),
-      ),
-      ...state.blockers.map((blocker) => note("fail", "不能开始训练", el("p", { text: blocker }))),
-      state.vram_total_mib !== null && state.vram_total_mib < BATCH16_MIB
-        ? note(
-            "warn",
-            "显存可能不够",
-            el("p", {
-              text: `批大小 16 在 bf16 下约需 14 GiB，这张卡是 ${gib(state.vram_total_mib)}。先把「批大小」调小，而不是硬跑。`,
-            }),
-          )
-        : null,
-    );
-    ready.tail.textContent =
-      state.blockers.length === 0 ? "可以开始" : `${state.blockers.length} 项阻塞`;
-  }
-
-  // ------------------------------------------------------------------------------ 语料
-  const corpus = panel({
-    title: "语料",
-    hint: "一个文件夹的片段，加上每个片段的文本。48 kHz 单声道 16 位 WAV 最不损失什么；其他格式引擎会自己重采样。",
-  });
-  const audioValue = el("div", { class: "inv__value" });
-  const transcriptValue = el("div", { class: "inv__value" });
-  const transcriptSlot = el("span", {});
-  const speakerInput = el("input", { class: "input", type: "text", placeholder: "my-voice" });
-  const qaBody = el("div", { class: "panel__body" });
-
-  function renderCorpus(): void {
-    fill(
-      audioValue,
-      audioDir === null ? el("span", { text: "还没有选择" }) : pathText(audioDir, 64),
-    );
-    fill(
-      transcriptValue,
-      transcripts === null
-        ? el("span", { text: "不选则使用音频旁边的 <片段名>.txt" })
-        : pathText(transcripts, 64),
-    );
-    fill(
-      transcriptSlot,
-      transcripts === null
-        ? button({
-            label: "选择",
-            glyph: "file-code",
-            small: true,
-            kind: "quiet",
-            onClick: () => {
-              void pickFile("选择文本对照文件", ["jsonl", "json", "csv", "tsv"])
-                .then((picked) => {
-                  if (picked === null) return;
-                  transcripts = picked;
-                  renderCorpus();
-                })
-                .catch((err: unknown) => toast(ipcMessage(err), "fail"));
-            },
-          })
-        : button({
-            glyph: "x",
-            name: "清除文本对照",
-            title: "清除",
-            small: true,
-            kind: "quiet",
-            onClick: () => {
-              transcripts = null;
-              renderCorpus();
-            },
-          }),
-    );
-  }
-
-  function renderQa(): void {
-    const qa = result?.qa ?? null;
-    if (qa === null) {
+  function renderRuns(): void {
+    if (runs.length === 0) {
       fill(
-        qaBody,
-        el("p", {
-          class: "field__hint",
-          text: "「检查语料」这一步完成后，这里显示它量出来的数字。",
+        runsTable,
+        emptyState({
+          glyph: "magic-wand",
+          title: "暂无训练运行",
+          lines: [
+            el("p", {
+              text: "让 agent 按 voice-core-voice-training 技能执行训练，它每一步写下的状态文件会让这次运行出现在这里。",
+            }),
+          ],
         }),
       );
+      fill(runsState);
       return;
     }
+
     fill(
-      qaBody,
+      runsTable,
       el(
         "div",
-        { class: "metrics" },
-        metric("可用片段", String(qa.count)),
-        metric("总时长", `${qa.total_minutes} 分钟`),
-        metric("时长 p05 / p95", `${qa.duration_p05_s}s / ${qa.duration_p95_s}s`),
-        metric("最长", `${qa.duration_max_s}s`),
-        metric("采样率", `${qa.sample_rates.join("、")} Hz`),
-        metric("声道", qa.channels.join("、")),
-        metric("编码", qa.subtypes.join("、")),
+        { class: "table__head" },
+        el("span", { class: "table__cell", text: "音色包 ID" }),
+        el("span", { class: "table__cell", text: "阶段" }),
+        el("span", { class: "table__cell", text: "状态" }),
+        el("span", { class: "table__cell", text: "更新于" }),
       ),
-      qa.problems.length === 0
-        ? null
-        : note(
-            "warn",
-            `${qa.problems.length} 个片段有问题，但仍会参与训练`,
-            findings(qa.problems.map((item) => `${item.clip}: ${item.issue}`)),
+      ...runs.map((run) =>
+        el(
+          "button",
+          {
+            class: `table__row${run.pack_id === selected ? " is-selected" : ""}`,
+            type: "button",
+            role: "radio",
+            "aria-checked": String(run.pack_id === selected),
+            onclick: () => void select(run.pack_id),
+          },
+          el("span", { class: "table__cell", dir: "ltr", text: run.pack_id }),
+          el("span", { class: "table__cell", text: stageLabel(run.stage) }),
+          el(
+            "span",
+            { class: "table__cell" },
+            chip(stateLabel(run.state), STATE_TONE[run.state] ?? "idle"),
           ),
-      qa.skipped.length === 0
+          el("span", {
+            class: "table__cell",
+            text: `${formatDuration(Math.max(0, Date.now() - run.updated))} 前`,
+          }),
+        ),
+      ),
+    );
+
+    const run = current();
+    if (run === null) {
+      fill(runsState);
+      return;
+    }
+    const position = run.total !== null && run.done !== null ? ` · ${run.done}/${run.total}` : "";
+    const sentence = run.live
+      ? `正在运行 · ${stageLabel(run.stage)}${position}`
+      : run.failure !== null
+        ? `上次运行在阶段「${stageLabel(run.failed_stage ?? "")}」失败`
+        : run.state === "interrupted"
+          ? `上次运行在阶段「${stageLabel(run.stage)}」被中断`
+          : `上次运行至阶段「${stageLabel(run.stage)}」· ${stateLabel(run.state)}`;
+
+    fill(
+      runsState,
+      el(
+        "div",
+        { class: run.live ? "livestate livestate--up" : "livestate" },
+        el("span", { class: "livestate__dot" }),
+        el("span", { text: sentence }),
+        el("span", {
+          class: "field__hint",
+          text: `PID ${run.pid} · 更新于 ${formatDuration(Math.max(0, Date.now() - run.updated))} 前`,
+        }),
+      ),
+      run.failure === null
         ? null
         : note(
-            "info",
-            `${qa.skipped.length} 个片段被跳过`,
-            findings(qa.skipped.map((item) => `${item.clip}: ${item.reason}`)),
+            "fail",
+            run.failure,
+            el("p", {
+              class: "remedy",
+              text: run.remedy ?? "标准错误流 (stderr) 中包含详细错误堆栈",
+            }),
           ),
     );
   }
 
-  fill(
-    corpus.body,
-    el(
-      "div",
-      { class: "inv" },
-      icon("folder-open", "inv__icon"),
-      el(
-        "div",
-        { class: "inv__main" },
-        el("p", { class: "inv__label", text: "音频文件夹" }),
-        audioValue,
-      ),
-      button({
-        label: "选择",
-        glyph: "folder-open",
-        small: true,
-        onClick: () => {
-          void pickFolder("选择音频文件夹")
-            .then((picked) => {
-              if (picked === null) return;
-              audioDir = picked;
-              renderCorpus();
-              renderControls();
-            })
-            .catch((err: unknown) => toast(ipcMessage(err), "fail"));
-        },
-      }),
-    ),
-    el(
-      "div",
-      { class: "inv" },
-      icon("file-code", "inv__icon"),
-      el(
-        "div",
-        { class: "inv__main" },
-        el("p", { class: "inv__label", text: "文本对照（可选）" }),
-        transcriptValue,
-      ),
-      transcriptSlot,
-    ),
-    field(
-      "train-speaker",
-      "说话人标识",
-      speakerInput,
-      "训练 LoRA 一定要填：它是让训练器把同一个人的另一个片段当成参考音频的唯一依据。留空对 LoRA 是错的。",
-    ),
-    qaBody,
-  );
+  fill(runsPanel.body, runsTable, runsState);
 
-  // ------------------------------------------------------------------------------ 参数
-  const knobs = expander({ title: "参数", id: "train-knobs", open: false, tail: "四项" });
-  const batchInput = numberInput(DEFAULTS.batch, 1, 64, 1);
-  const stepsInput = numberInput(DEFAULTS.steps, 100, 20000, 100);
-  const rateInput = numberInput(DEFAULTS.rate, 0.000001, 0.01, 0.00001);
-  const saveInput = numberInput(DEFAULTS.save, 50, 20000, 50);
+  // ---------------------------------------------------------------------------- 进度
+  const progress = panel({ title: "训练进度" });
 
-  fill(
-    knobs.body,
-    field(
-      "train-batch",
-      "批大小",
-      batchInput,
-      "默认 16：bf16 下约需 14 GiB 显存，参考机器的 16 GiB 刚好装得下。显存不足先降这一项。",
-    ),
-    field(
-      "train-steps",
-      "步数预算",
-      stepsInput,
-      "默认 2000：在 RTX 5060 Ti 上约 50–90 分钟。参考运行里最好的验证损失出现在 1000 步，2000 步已经过拟合——所以这是预算，不是答案。",
-    ),
-    field(
-      "train-rate",
-      "学习率",
-      rateInput,
-      "默认 0.0001，上游默认值。调大收敛更快，也更容易把音色学坏；共享的文本编码器另有固定的 0.00001，不受这里影响。",
-    ),
-    field(
-      "train-save",
-      "检查点间隔",
-      saveInput,
-      "默认每 500 步存一个检查点，每个约 100 MiB。验证固定每 500 步一次，最好的那个由验证损失挑出来。",
-    ),
-    note(
-      "info",
-      "其余参数是固定的",
-      el("p", {
-        text: "num_workers 2 与 persistent_workers 是 Windows 上不让显卡饿着的设置，model 段必须与基础检查点逐字一致——两者都不在这里暴露。",
-      }),
-    ),
-  );
-
-  // ------------------------------------------------------------------------------ 进度
-  const progress = panel({ title: "进度" });
+  interface WizardRow {
+    root: HTMLElement;
+    dot: HTMLElement;
+    label: HTMLElement;
+    sub: HTMLElement;
+  }
 
   function wizardRow(index: number, stage: TrainStage): WizardRow {
     const dot = icon(STATE_GLYPH.pending, "wizard__dot");
@@ -452,7 +301,7 @@ export function createTrainingScreen(): TrainingScreen {
       "div",
       {
         class: `wizard__step wizard__step--${STATE_CLASS.pending}`,
-        "aria-label": `第 ${index} 步：${STAGE_LABEL[stage]}`,
+        "aria-label": `步骤 ${index}：${STAGE_LABEL[stage]}`,
       },
       num,
       el("div", { class: "wizard__body" }, label, sub),
@@ -469,11 +318,10 @@ export function createTrainingScreen(): TrainingScreen {
     install: wizardRow(6, "install"),
   };
 
-  const metrics = el("div", { class: "metrics" });
+  const liveTiles = el("div", { class: "tiles tiles--compact" });
   const bar = el("progress", { class: "bar", max: "1", value: "0" });
-  const barText = el("span", { class: "metric__label" });
-  const barCell = el("div", { class: "metric", hidden: true }, bar, barText);
-  const remedySlot = el("div", {});
+  const barText = el("span", { class: "stage__bartext" });
+  const progressWrap = el("div", { class: "stage__progress", hidden: true }, bar, barText);
   const logLines = el("ol", {
     class: "console",
     role: "log",
@@ -489,54 +337,55 @@ export function createTrainingScreen(): TrainingScreen {
   fill(
     progress.body,
     el("div", { class: "wizard" }, TRAIN_STAGES.map((stage) => wizardRows[stage].root)),
-    metrics,
-    barCell,
-    remedySlot,
+    liveTiles,
+    progressWrap,
     logLines,
   );
 
+  /** The six steps, filled in from the record on disk. A panel opened forty minutes into a run
+   *  someone else started shows forty minutes of run. */
   function renderWizard(): void {
+    const run = current();
     for (const stage of TRAIN_STAGES) {
-      const model = stages[stage];
-      const row = wizardRows[stage];
-      row.root.className = `wizard__step wizard__step--${STATE_CLASS[model.state]}`;
-      fill(row.dot, icon(STATE_GLYPH[model.state], "wizard__dot"));
+      const row = rowFor(run, stage);
+      const view = wizardRows[stage];
+      const state = row?.state ?? "pending";
+      view.root.className = `wizard__step wizard__step--${STATE_CLASS[state] ?? "todo"}`;
+      fill(view.dot, icon(STATE_GLYPH[state] ?? "circle-dashed", "wizard__dot"));
       const elapsed =
-        model.startedAt === null || model.state === "pending"
+        row === null || row.started === null || state === "pending"
           ? ""
-          : ` · ${formatElapsed((model.endedAt ?? Date.now()) - model.startedAt)}`;
-      row.label.textContent = `${STAGE_LABEL[stage]}${elapsed}`;
-      row.sub.textContent =
-        model.state === "pending"
+          : ` · ${formatElapsed((row.ended ?? Date.now()) - row.started)}`;
+      view.label.textContent = `${STAGE_LABEL[stage]}${elapsed}`;
+      view.sub.textContent =
+        row === null || state === "pending"
           ? STAGE_HINT[stage]
-          : model.message === ""
-            ? STATE_LABEL[model.state]
-            : model.message;
+          : row.message === ""
+            ? stateLabel(state)
+            : row.message;
     }
   }
 
   /** The running stage's message, in cells, plus the bar.
    *
    *  Splitting is layout, not parsing: `run_training.py` writes
-   *  `step 100/2000   loss 0.8147   2.38s/step   ETA 1:15:13`, self-labelling fields
-   *  separated by three spaces, because it is the side that read the tqdm bar. Nothing here
-   *  goes near a bar. */
+   *  `step 100/2000   loss 0.8147   2.38s/step   ETA 1:15:13`, self-labelling fields separated
+   *  by three spaces, because it is the side that read the tqdm bar. Nothing here goes near a
+   *  bar. */
   function renderMetrics(): void {
-    const live = TRAIN_STAGES.map((stage) => stages[stage]).find(
-      (model) => model.state === "running",
-    );
-    if (live === undefined || live.message === "") {
-      fill(metrics);
-      barCell.hidden = true;
+    const live = current()?.stages.find((row) => row.state === "running") ?? null;
+    if (live === null || live.message === "") {
+      fill(liveTiles);
+      progressWrap.hidden = true;
       return;
     }
-    fill(metrics, ...live.message.split(/\s{3,}/).map((cell) => metric(null, cell)));
+    fill(liveTiles, ...live.message.split(/\s{3,}/).map((cell) => tile(cell)));
 
     if (live.done === null) {
-      barCell.hidden = true;
+      progressWrap.hidden = true;
       return;
     }
-    barCell.hidden = false;
+    progressWrap.hidden = false;
     if (live.total !== null && live.total > 0) {
       bar.max = live.total;
       bar.value = live.done;
@@ -548,13 +397,28 @@ export function createTrainingScreen(): TrainingScreen {
     }
   }
 
-  function appendLog(event: TrainEvent): void {
+  /** One transcript line, as the step wrote it.
+   *
+   *  `progress` is skipped on purpose: a 2000-step run emits thousands of them and the live
+   *  strip above already shows the latest. What is left is the stage boundaries and the
+   *  sentences a step chose to say, which is what a console is for. */
+  function appendLog(line: string): void {
+    let event: { stage?: string; event?: string; message?: string };
+    try {
+      event = JSON.parse(line) as typeof event;
+    } catch {
+      // Not protocol: something wrote to this file that is not one of the six steps. Showing it
+      // verbatim is more useful than dropping it.
+      event = { stage: "", event: "log", message: line };
+    }
+    const kind = event.event ?? "log";
+    if (kind === "progress") return;
     logLines.appendChild(
       el(
         "li",
-        { class: `console__line console__line--${event.event}` },
-        el("code", { class: "console__stage", dir: "ltr", text: event.stage }),
-        el("span", { class: "console__text", text: event.message }),
+        { class: `console__line console__line--${kind}` },
+        el("code", { class: "console__stage", dir: "ltr", text: event.stage ?? "" }),
+        el("span", { class: "console__text", text: event.message ?? "" }),
       ),
     );
     while (logLines.childElementCount > LOG_CAP && logLines.firstChild !== null) {
@@ -563,73 +427,30 @@ export function createTrainingScreen(): TrainingScreen {
     if (autoScroll) logLines.scrollTop = logLines.scrollHeight;
   }
 
-  // ------------------------------------------------------------------------------ 结果
+  // ---------------------------------------------------------------------------- 成果
   const results = panel({
-    title: "结果",
-    hint: "按验证损失排序，最好的一个已经选中。相似度看「下界」而不是均值：均值会藏住偶尔跑偏的那几句。",
+    title: "训练成果",
+    hint: "已按验证损失升序排序，默认选中最优检查点",
   });
-  const idInput = el("input", { class: "input", type: "text", placeholder: "my-voice" });
-  const nameInput = el("input", { class: "input", type: "text", placeholder: "My Voice (LoRA)" });
-  const characterInput = el("input", { class: "input", type: "text" });
-  const avatarValue = el("div", { class: "inv__value" });
   const table = el("div", { class: "table" });
-  const installSlot = el("div", { class: "panel__actions" });
-  const overwriteBox = el("input", { type: "checkbox" });
-  const overwriteSlot = el("div", {});
-
-  function renderAvatar(): void {
-    fill(
-      avatarValue,
-      avatar === null ? el("span", { text: "不选则音色包没有头像" }) : pathText(avatar, 64),
-    );
-  }
-
-  /** The confirmation that lets a second run of this voice delete the first one's work.
-   *
-   *  Rendered beside the very table it would empty, and only while there is something to
-   *  lose: `at_risk` counts the checkpoints no pack was installed from, and the backend
-   *  refuses the call until this is ticked whatever the panel thinks. */
-  function renderOverwrite(): void {
-    const risk = result?.at_risk ?? 0;
-    if (risk === 0) {
-      overwriteBox.checked = false;
-      fill(overwriteSlot);
-      return;
-    }
-    fill(
-      overwriteSlot,
-      note(
-        "warn",
-        `上一次训练留下 ${risk} 个还没有安装的检查点`,
-        el("p", {
-          text: "「开始训练」会先清空这个音色的暂存目录，那些检查点就没有了。想留下哪一个，先在上面选中它并点「安装为音色包」。",
-        }),
-        field(
-          "train-overwrite",
-          `我知道，开始训练时删掉这 ${risk} 个检查点`,
-          overwriteBox,
-        ),
-      ),
-    );
-  }
 
   function renderResults(): void {
-    renderOverwrite();
-    const items = result?.checkpoints ?? [];
+    const items = tree?.checkpoints ?? [];
     if (items.length === 0) {
+      chosen = null;
       fill(
         table,
         emptyState({
           glyph: "magic-wand",
-          title: "还没有检查点",
+          title: "暂无检查点生成",
           lines: [
             el("p", {
-              text: "「训练适配器」每存下一个检查点，这里就多一行；评分完成后再补上相似度。",
+              text: "模型训练过程中将按保存间隔生成检查点，评分阶段将追加相似度评估指标。",
             }),
           ],
         }),
       );
-      fill(installSlot);
+      renderControls();
       return;
     }
 
@@ -675,309 +496,279 @@ export function createTrainingScreen(): TrainingScreen {
         ),
       ),
     );
+    renderControls();
+  }
 
-    fill(
-      installSlot,
-      running
-        ? blockedButton({ label: "安装为音色包", glyph: "check" }, "有任务正在运行")
-        : button({
-            label: "安装为音色包",
-            glyph: "check",
-            kind: "primary",
-            onClick: () => void install(),
-          }),
+  fill(results.body, table);
+
+  // ---------------------------------------------------------------------------- 文件
+  // The run as it exists on disk. The two log files are named apart from the rest because a
+  // discard keeps them: they are the record, and the tree is regenerable.
+  const files = panel({ title: "产物文件" });
+  const fileList = el("div", { class: "stage__detail" });
+  const fileActions = el("div", { class: "panel__actions" });
+
+  /** One measured file or directory: what it is, how big, and a way into it. */
+  function fileRow(item: ScratchEntry, label: string): HTMLElement {
+    const glyph: IconName = item.dir ? "folder-open" : (ARTEFACT_GLYPH[item.name] ?? "file-code");
+    return el(
+      "div",
+      { class: "filerow" },
+      el(
+        "div",
+        { class: "filerow__lead" },
+        icon(glyph, "filerow__icon"),
+        el("span", { class: "filerow__name", dir: "ltr", title: item.path, text: item.name }),
+        el("span", {
+          class: "field__hint",
+          text: item.dir && item.exists ? `${label} · ${item.files} 个文件` : label,
+        }),
+      ),
+      el(
+        "div",
+        { class: "filerow__tail" },
+        el("span", {
+          class: "filerow__size",
+          text: item.exists ? formatBytes(item.bytes) : "未生成",
+        }),
+        item.exists ? openButton(item.path) : null,
+      ),
     );
   }
 
-  fill(
-    results.body,
-    overwriteSlot,
-    table,
-    field(
-      "train-pack-id",
-      "音色包 id",
-      idInput,
-      "会成为 voicepacks 下的目录名和 API 里的标识，只能用字母、数字、点、短横线和下划线。",
-    ),
-    field("train-pack-name", "显示名称", nameInput, "面板和字幕弹窗里显示的名字。留空则用 id。"),
-    field("train-pack-character", "角色名", characterInput, "字幕弹窗显示的说话人。"),
-    el(
-      "div",
-      { class: "inv" },
-      icon("file-plus", "inv__icon"),
+  function renderFiles(): void {
+    if (tree === null) {
+      fill(fileList);
+      fill(fileActions);
+      return;
+    }
+    const scratch = tree;
+
+    fill(
+      fileList,
+      scratch.exists
+        ? el("div", {}, ...scratch.entries.map((item) => fileRow(item, ARTEFACT[item.name] ?? "")))
+        : emptyState({
+            glyph: "folder-open",
+            title: "暂无暂存目录",
+            lines: [pathText(scratch.dir, 72)],
+          }),
+      el("p", { class: "field__hint", text: "日志文件（清理暂存区时将予以保留）" }),
       el(
         "div",
-        { class: "inv__main" },
-        el("p", { class: "inv__label", text: "头像（可选）" }),
-        avatarValue,
+        {},
+        fileRow(scratch.transcript, "事件日志"),
+        fileRow(scratch.status, "状态数据 (JSON)"),
       ),
-      button({
-        label: "选择",
-        glyph: "file-plus",
-        small: true,
-        kind: "quiet",
-        onClick: () => {
-          void pickFile("选择头像", ["png", "jpg", "jpeg", "webp", "bmp"])
-            .then((picked) => {
-              if (picked === null) return;
-              avatar = picked;
-              renderAvatar();
-            })
-            .catch((err: unknown) => toast(ipcMessage(err), "fail"));
-        },
-      }),
-    ),
-    installSlot,
-  );
+      discardRefusal === null
+        ? null
+        : note(
+            "warn",
+            "暂存目录中存在未安装的检查点",
+            el("p", { text: discardRefusal }),
+            el(
+              "div",
+              { class: "panel__actions" },
+              button({
+                label: "确认清理并删除未保存检查点",
+                glyph: "trash",
+                kind: "danger",
+                onClick: () => void discard(true),
+              }),
+            ),
+          ),
+      !scratch.exists
+        ? null
+        : el("p", {
+            class: "panel__meta",
+            text: `${formatBytes(scratch.bytes)} · ${scratch.dir}`,
+          }),
+    );
+
+    const run = current();
+    fill(
+      fileActions,
+      !scratch.exists
+        ? null
+        : run?.live === true
+          ? blockedButton({ label: "清理暂存", glyph: "trash", small: true }, "该音色包正在训练")
+          : button({
+              label: "清理暂存",
+              glyph: "trash",
+              kind: "danger",
+              small: true,
+              onClick: () => void discard(false),
+            }),
+    );
+  }
+
+  fill(files.body, fileList, fileActions);
 
   // ------------------------------------------------------------------------- command bar
   const cmdLeft = el("div", { class: "cmdbar__left" });
   const cmdRight = el("div", { class: "cmdbar__right" });
   const commandBar = el("div", { class: "cmdbar" }, cmdLeft, cmdRight);
 
-  /** Why the start button is not live, in one sentence, or null. The backend validates every
-   *  one of these again — this is the half that can say so before the click. */
-  function startBlocker(): string | null {
-    if (preflight === null) return "正在检查本机环境";
-    if (preflight.blockers.length > 0) return preflight.blockers[0];
-    if (audioDir === null) return "先选择音频文件夹";
-    if (idInput.value.trim() === "") return "先填音色包 id";
-    if ((result?.at_risk ?? 0) > 0 && !overwriteBox.checked) {
-      return `先安装要保留的检查点，或勾选删掉这 ${result?.at_risk ?? 0} 个`;
-    }
+  /** Why 安装为音色包 is not live, in one sentence, or null. */
+  function installBlocker(): string | null {
+    if (installing) return "正在安装音色包";
+    if (current() === null) return "请先选择一次训练运行";
+    if (chosen === null) return "本次运行尚无可安装的检查点";
     return null;
   }
 
   function renderControls(): void {
-    if (running) {
-      fill(
-        cmdLeft,
-        button({
-          label: "取消",
-          kind: "danger",
-          glyph: "x",
-          onClick: () => {
-            void cancelTraining().catch((err: unknown) => toast(ipcMessage(err), "fail"));
-          },
-        }),
-      );
-      // One sentence, only true while a job is in flight, which is exactly a tooltip.
-      fill(cmdRight, blockedButton({ label: "进行中…" }, "关掉窗口不会中断训练"));
-      renderResults();
-      return;
-    }
-
     fill(
       cmdLeft,
       button({
-        label: "重新检查环境",
+        label: "刷新",
         glyph: "arrow-clockwise",
         kind: "quiet",
-        onClick: () => void loadPreflight(),
+        onClick: () => void poll(),
       }),
     );
-    const reason = startBlocker();
+    const reason = installBlocker();
     fill(
       cmdRight,
       reason === null
         ? button({
-            label: "开始训练",
+            label: "安装为音色包",
             kind: "primary",
-            glyph: "magic-wand",
-            onClick: () => void start(),
+            glyph: "check",
+            onClick: () => void install(),
           })
-        : blockedButton({ label: "开始训练", glyph: "magic-wand" }, reason),
+        : blockedButton({ label: "安装为音色包", glyph: "check" }, reason),
     );
-    renderResults();
   }
 
   // ----------------------------------------------------------------------------- actions
-  async function loadPreflight(): Promise<void> {
+  /** One read of the runs, and of the selected run's transcript. */
+  async function poll(): Promise<void> {
     try {
-      preflight = await trainingPreflight();
-    } catch (err: unknown) {
-      toast(`训练环境检查失败：${ipcMessage(err)}`, "fail");
-      return;
-    }
-    // A panel restarted mid-training re-attaches to the live job instead of offering to start
-    // a second one. The event listener has been up since the first frame either way.
-    if (preflight.running && preflight.pack_id !== null) {
-      running = true;
-      livePack = preflight.pack_id;
-      if (idInput.value.trim() === "") idInput.value = preflight.pack_id;
-      await loadResult(preflight.pack_id);
-      restoreRequest();
-      if (ticker === 0) ticker = window.setInterval(renderWizard, 250);
-    }
-    renderReady();
-    renderControls();
-  }
-
-  async function loadResult(packId: string): Promise<void> {
-    try {
-      result = await trainingResult(packId);
+      runs = await trainingRuns();
     } catch (err: unknown) {
       toast(ipcMessage(err), "fail");
       return;
     }
-    renderQa();
-    renderResults();
-  }
-
-  /** The fields the live run was started with, so a restarted panel does not ask the user to
-   *  remember what they typed an hour ago. */
-  function restoreRequest(): void {
-    const request = result?.request ?? null;
-    if (request === null) return;
-    audioDir = request.audio_dir;
-    transcripts = request.transcripts;
-    speakerInput.value = request.speaker_id;
-    batchInput.value = String(request.batch_size);
-    stepsInput.value = String(request.max_steps);
-    rateInput.value = String(request.learning_rate);
-    saveInput.value = String(request.save_every);
-    if (nameInput.value.trim() === "") nameInput.value = request.display_name;
-    if (characterInput.value.trim() === "") characterInput.value = request.character ?? "";
-    avatar = request.avatar;
-    renderCorpus();
-    renderAvatar();
-  }
-
-  async function start(): Promise<void> {
-    if (running || audioDir === null) return;
-    const packId = idInput.value.trim();
-    livePack = packId;
-    running = true;
-    for (const stage of TRAIN_STAGES) stages[stage] = blankStage();
-    result = null;
-    chosen = null;
-    fill(logLines);
-    fill(remedySlot);
-    // The checklist did its job; the spotlight belongs on the steps now.
-    ready.setOpen(false);
-    knobs.setOpen(false);
-    renderQa();
+    if (selected === null || !runs.some((run) => run.pack_id === selected)) {
+      selected = runs[0]?.pack_id ?? null;
+      treeKey = "";
+      logOffset = 0;
+      fill(logLines);
+    }
+    renderRuns();
     renderWizard();
     renderMetrics();
-    renderControls();
-    if (ticker === 0) ticker = window.setInterval(renderWizard, 250);
 
+    const run = current();
+    if (run === null) {
+      tree = null;
+      renderResults();
+      renderFiles();
+      stopTicker();
+      return;
+    }
+    // A stage boundary is where the tree on disk changed shape; between boundaries measuring it
+    // again would walk `latents\` for the same answer.
+    const key = `${run.stage}|${run.state}|${String(run.live)}`;
+    if (key !== treeKey) {
+      treeKey = key;
+      await refreshTree(run.pack_id);
+    }
+    await pumpLog(run.pack_id);
+    // A live run's stage elapsed time moves between polls; a finished one's does not.
+    if (run.live) startTicker();
+    else stopTicker();
+  }
+
+  async function select(packId: string): Promise<void> {
+    if (packId === selected) return;
+    selected = packId;
+    chosen = null;
+    tree = null;
+    treeKey = "";
+    logOffset = 0;
+    discardRefusal = null;
+    autoScroll = true;
+    fill(logLines);
+    renderRuns();
+    renderWizard();
+    renderMetrics();
+    await poll();
+  }
+
+  async function refreshTree(packId: string): Promise<void> {
     try {
-      await startTraining({
-        audio_dir: audioDir,
-        transcripts,
-        speaker_id: speakerInput.value.trim(),
-        pack_id: packId,
-        display_name: nameInput.value.trim(),
-        character: characterInput.value.trim() || null,
-        avatar,
-        batch_size: knob(batchInput, DEFAULTS.batch),
-        max_steps: knob(stepsInput, DEFAULTS.steps),
-        learning_rate: knob(rateInput, DEFAULTS.rate),
-        save_every: knob(saveInput, DEFAULTS.save),
-        overwrite: overwriteBox.checked,
-      });
+      tree = await trainingScratch(packId);
     } catch (err: unknown) {
       toast(ipcMessage(err), "fail");
-    } finally {
-      await settle(packId);
+      return;
     }
+    renderResults();
+    renderFiles();
+  }
+
+  async function pumpLog(packId: string): Promise<void> {
+    let tailed;
+    try {
+      tailed = await trainingLog(packId, logOffset);
+    } catch (err: unknown) {
+      toast(ipcMessage(err), "fail");
+      return;
+    }
+    // The transcript shrank: the first stage of a new run truncated it, so the console is
+    // showing a run that no longer exists.
+    if (tailed.offset < logOffset) fill(logLines);
+    logOffset = tailed.offset;
+    for (const line of tailed.lines) appendLog(line);
   }
 
   async function install(): Promise<void> {
-    if (chosen === null) return;
-    const packId = idInput.value.trim();
-    livePack = packId;
-    running = true;
-    stages.install = blankStage();
-    renderWizard();
+    const run = current();
+    if (run === null || chosen === null || installing) return;
+    installing = true;
     renderControls();
-    if (ticker === 0) ticker = window.setInterval(renderWizard, 250);
     try {
-      await installTrainedPack({
-        checkpoint: chosen,
-        pack_id: packId,
-        display_name: nameInput.value.trim(),
-        character: characterInput.value.trim() || null,
-        avatar,
-      });
+      await installTrainedPack({ checkpoint: chosen, pack_id: run.pack_id });
       await refreshVoices();
-      toast(`${packId} 已安装，后端会在下次列出音色时读到它`, "ok");
+      toast(`音色包 ${run.pack_id} 已安装，将在下次服务加载时生效`, "ok");
     } catch (err: unknown) {
       toast(ipcMessage(err), "fail");
     } finally {
-      await settle(packId);
+      installing = false;
+      treeKey = "";
+      await poll();
     }
   }
 
-  /** The job's processes are gone. A stage still marked running was cancelled or died without
-   *  a terminal event, and leaving it spinning forever would be a lie. */
-  async function settle(packId: string): Promise<void> {
-    running = false;
-    if (ticker !== 0) {
-      window.clearInterval(ticker);
-      ticker = 0;
-    }
-    for (const stage of TRAIN_STAGES) {
-      const model = stages[stage];
-      if (model.state !== "running") continue;
-      model.state = "pending";
-      model.message = "已中断";
-      model.endedAt = Date.now();
-    }
-    if (packId !== "") await loadResult(packId);
-    renderWizard();
-    renderMetrics();
-    renderControls();
-    void loadPreflight();
-  }
-
-  function apply(event: TrainEvent): void {
-    const model = stages[event.stage] as StageModel | undefined;
-    if (model === undefined) return;
-
-    if (event.event === "progress") {
-      model.done = event.done;
-      model.total = event.total;
-      if (event.message !== "") model.message = event.message;
-      // Every training step arrives here, so this path touches the wizard row's text and the
-      // bar and nothing else.
-      renderWizard();
-      renderMetrics();
+  /** Delete one run's scratch tree.
+   *
+   *  `confirmed` is asked for the way the backend asks: it refuses first and names what would
+   *  be lost, and that refusal is what the panel puts in front of the user. */
+  async function discard(confirmed: boolean): Promise<void> {
+    const run = current();
+    if (run === null) return;
+    try {
+      const freed = await trainingDiscard(run.pack_id, confirmed);
+      discardRefusal = null;
+      toast(`已清理 ${run.pack_id} 的暂存目录，释放存储空间 ${formatBytes(freed)}`, "ok");
+    } catch (err: unknown) {
+      discardRefusal = ipcMessage(err);
+      renderFiles();
       return;
     }
+    treeKey = "";
+    await poll();
+  }
 
-    appendLog(event);
+  function startTicker(): void {
+    if (ticker === 0) ticker = window.setInterval(renderWizard, 250);
+  }
 
-    if (event.event === "start") {
-      model.state = "running";
-      model.message = event.message;
-      model.done = null;
-      model.total = null;
-      model.startedAt = event.ts;
-      model.endedAt = null;
-    } else if (event.event === "log") {
-      if (event.message !== "") model.message = event.message;
-      if (event.remedy !== null) {
-        fill(remedySlot, note("warn", event.message, el("p", { class: "remedy", text: event.remedy })));
-      }
-    } else {
-      model.state = event.event;
-      model.message = event.message;
-      model.endedAt = event.ts;
-      if (model.startedAt === null) model.startedAt = event.ts;
-      fill(
-        remedySlot,
-        event.remedy === null
-          ? null
-          : note("fail", "怎么解决", el("p", { class: "remedy", text: event.remedy })),
-      );
-      // A finished step wrote files this screen shows: the QA report after `dataset`, the
-      // checkpoints after `train`, their scores after `score`.
-      if (livePack !== null && REREAD[event.stage] === true) void loadResult(livePack);
-    }
-    renderWizard();
-    renderMetrics();
+  function stopTicker(): void {
+    if (ticker === 0) return;
+    window.clearInterval(ticker);
+    ticker = 0;
   }
 
   const root = el(
@@ -992,89 +783,46 @@ export function createTrainingScreen(): TrainingScreen {
         el("h1", { class: "screen__title", tabindex: "-1", text: "训练" }),
       ),
     ),
-    ready.root,
-    corpus.root,
-    knobs.root,
+    runsPanel.root,
     progress.root,
     results.root,
+    files.root,
   );
 
-  idInput.addEventListener("input", renderControls);
-  // On commit rather than per keystroke: this asks the backend what the named run left on
-  // disk, which is how the confirmation appears before the click rather than after it.
-  idInput.addEventListener("change", () => {
-    const packId = idInput.value.trim();
-    if (running || packId === "") return;
-    void loadResult(packId);
-  });
-  overwriteBox.addEventListener("change", renderControls);
-
-  renderCorpus();
-  renderAvatar();
-  renderQa();
+  renderRuns();
   renderWizard();
   renderMetrics();
-  renderReady();
+  renderResults();
+  renderFiles();
   renderControls();
-  void onTrainEvent(apply);
-  void loadPreflight();
-  // 后端占用 is a claim about the card, and it goes stale the moment somebody starts or stops
-  // the service from another screen — which is exactly what a user does right before training.
-  // On the transition only: `status` polls every second, and preflight probes the interpreter,
-  // imports six packages and asks the driver, which is not a once-per-second question.
-  let backendUp = status.value.reachable;
-  status.subscribe((next) => {
-    if (next.reachable === backendUp) return;
-    backendUp = next.reachable;
-    if (!running) void loadPreflight();
-  });
+  void poll();
+  window.setInterval(() => void poll(), POLL_MS);
 
   return Object.assign(root, { commandBar });
 }
 
 // ------------------------------------------------------------------------------ helpers --
 
-/** Which finished stages left a file on disk worth re-reading. */
-const REREAD: Partial<Record<TrainStage, true>> = { dataset: true, train: true, score: true };
-
-function metric(label: string | null, value: string): HTMLElement {
-  return el(
-    "div",
-    { class: "metric" },
-    label === null ? null : el("span", { class: "metric__label", text: label }),
-    el("span", { class: "metric__value", text: value }),
-  );
+/** One cell of a `.tiles--compact` strip, unlabelled: this strip renders `step 100/2000`, which
+ *  labels itself — the step that printed it already said what it is. */
+function tile(value: string): HTMLElement {
+  return el("div", { class: "tile" }, el("span", { class: "tile__value", text: value }));
 }
 
-function numberInput(value: number, min: number, max: number, step: number): HTMLInputElement {
-  return el("input", {
-    class: "input",
-    type: "number",
-    min: String(min),
-    max: String(max),
-    step: String(step),
-    value: String(value),
-  });
+/** The status file's stage row for one step, or null when the file has no row for it — which is
+ *  what a status written by an older build would look like. */
+function rowFor(run: TrainingRun | null, stage: TrainStage): TrainingStageStatus | null {
+  return run?.stages.find((row) => row.stage === stage) ?? null;
 }
 
-/** A number the user may have emptied. The backend rejects an out-of-range knob either way;
- *  this only keeps a blank field from becoming NaN on the wire. */
-function knob(input: HTMLInputElement, fallback: number): number {
-  const parsed = Number(input.value);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+/** A stage name in Chinese, or the name itself when the file says something this build does not
+ *  know: an unknown stage is data, not a reason to render nothing. */
+function stageLabel(stage: string): string {
+  return STAGE_LABEL[stage as TrainStage] ?? stage;
 }
 
-/** The QA report's own cut: past ten, a list of findings stops being something a human reads.
- *  All of them are in the report on disk. */
-function findings(lines: string[]): HTMLElement {
-  return el(
-    "ul",
-    { class: "stage__notes" },
-    lines.slice(0, 10).map((line) => el("li", { class: "stage__note" }, el("p", { text: line }))),
-    lines.length > 10
-      ? el("li", { class: "stage__note" }, el("p", { text: `…以及另外 ${lines.length - 10} 条` }))
-      : null,
-  );
+function stateLabel(state: string): string {
+  return STATE_LABEL[state] ?? state;
 }
 
 /** 0.6 is not a threshold the engine has; it is where the reference corpus's own leave-one-out
@@ -1082,8 +830,4 @@ function findings(lines: string[]): HTMLElement {
  *  "look at this before installing it". */
 function lowerBoundTone(value: number): Tone {
   return value >= 0.6 ? "ok" : "warn";
-}
-
-function gib(mib: number | null): string {
-  return mib === null ? "未知" : `${(mib / 1024).toFixed(1)} GiB`;
 }

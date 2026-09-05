@@ -44,6 +44,7 @@ public sealed partial class MainWindow : Window
     private readonly DialogPresenter _presenter;
     private readonly HotkeyManager _hotkeys;
     private readonly WheelGestureWatcher _wheel;
+    private readonly ConfigWatcher _config;
     private readonly bool _presenterMode;
 
     private bool _autoplayEnabled = true;
@@ -133,6 +134,15 @@ public sealed partial class MainWindow : Window
                 [HotkeyAction.ToggleHold] = _presenter.ToggleHold,
             });
 
+        // One watcher, two owners. Both halves of config.json's user-facing half live
+        // behind it - the dialog's appearance and the hotkeys - and neither needs a restart
+        // any more, which is what the panel's settings page and hand-editing both depend on.
+        _config = new ConfigWatcher(_runtime.DataDir, _dispatcher, updated =>
+        {
+            _presenter.ApplyConfig(updated.Dialog);
+            _hotkeys.Rebind(updated.Hotkeys);
+        });
+
         // Wheel over the dialog walks its backlog, Galgame style.
         _wheel = new WheelGestureWatcher(_presenter.ScrollGesture, Note);
 
@@ -148,7 +158,7 @@ public sealed partial class MainWindow : Window
             {
                 _presenter.Show(new DialogUtterance(
                     speech.AudioId, speech.DisplayText, speech.Text, speech.Wav,
-                    speech.DisplaySeconds, _autoplayEnabled,
+                    speech.Dialog, _autoplayEnabled,
                     character?.Name, character?.AvatarPath,
                     speech.RubyPairs?.Select(p => (p.Base, p.Ruby)).ToList()));
             });
@@ -385,8 +395,9 @@ public sealed partial class MainWindow : Window
     /// <summary>
     /// One settings entry: everything a user may want to change lives in
     /// <c>config.json</c> - dialog, hotkeys and the voice pack registry - so 设置 opens that
-    /// one file. The tray reads it at startup (a change needs a restart); the runtime
-    /// re-reads the packs section by itself whenever the file's mtime changes.
+    /// one file. Nothing needs restarting after an edit: this process re-reads the dialog
+    /// and hotkey sections when the file's mtime moves (<see cref="ConfigWatcher"/>), and
+    /// the runtime re-reads the packs and the app-wide dialog tier the same way.
     /// </summary>
     private void OnSettingsClick(object sender, RoutedEventArgs e)
     {
@@ -394,12 +405,16 @@ public sealed partial class MainWindow : Window
         AppConfig.Load(_runtime.DataDir, Note);
         Process.Start(new ProcessStartInfo("notepad.exe",
             Path.Combine(_runtime.DataDir, AppConfig.FileName)));
-        Note("改完设置后重启托盘生效（声线包除外）。");
+        // No note. There is nothing for the user to do after saving - the next line they
+        // hear is already wearing the change - and a status line that says so is a sentence
+        // explaining something the screen shows on its own. The line this replaces existed
+        // because a restart WAS needed; the requirement is gone, so the line goes with it.
     }
 
     private async void OnExitClick(object sender, RoutedEventArgs e)
     {
         _wheel.Dispose();
+        _config.Dispose();
         _hotkeys.Dispose();
         _presenter.Dispose();
         if (!_presenterMode)

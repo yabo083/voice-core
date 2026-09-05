@@ -12,7 +12,7 @@ import { toast } from "./toast";
 export type Tone = "ok" | "reuse" | "run" | "fail" | "warn" | "idle" | "accent";
 export type ButtonKind = "primary" | "default" | "quiet" | "danger";
 
-export type ScreenName = "deploy" | "voices" | "train" | "status" | "config";
+export type ScreenName = "deploy" | "status" | "voices" | "train" | "settings";
 
 /** Ask the shell to switch screens.
  *
@@ -214,7 +214,7 @@ export function pathText(path: string, max?: number): HTMLElement {
   });
 }
 
-export function openButton(path: string, name = "在资源管理器中打开"): HTMLButtonElement {
+export function openButton(path: string, name = "在文件资源管理器中显示"): HTMLButtonElement {
   return button({
     glyph: "arrow-square-out",
     name,
@@ -240,7 +240,7 @@ async function copyText(value: string, source: HTMLElement, label: string): Prom
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    toast("剪贴板不可用：文本已选中，请按 Ctrl+C", "fail");
+    toast("剪贴板访问受限：内容已选中，请按 Ctrl+C 复制", "fail");
   }
 }
 
@@ -304,14 +304,29 @@ export function emptyState(spec: EmptySpec): HTMLElement {
 }
 
 /** A label bound to its control by id, which is the only reason this exists as a
- *  helper: every screen that forgets the binding produces an unusable field. */
+ *  helper: every screen that forgets the binding produces an unusable field.
+ *
+ *  `hint` is a **hover/focus tooltip, not a line of prose under the control**. A panel
+ *  where every field explains itself in a sentence reads like documentation someone left
+ *  in the product, and the sentences are exactly what a user stops reading first. The
+ *  label plus the control's own value is the explanation; the hint is there for the
+ *  question a label cannot answer, and only when asked. Same `.tip` mechanism as
+ *  `withTip`, so there is one tooltip in this app and not two. */
 export function field(id: string, label: string, control: HTMLElement, hint?: string): HTMLElement {
   control.id = id;
+  const labelNode = el("label", { class: "field__label", for: id, text: label });
   return el(
     "div",
     { class: "field" },
-    el("label", { class: "field__label", for: id, text: label }),
+    hint === undefined
+      ? labelNode
+      : el(
+          "span",
+          { class: "tipwrap field__labelwrap" },
+          el("span", { class: "tip", role: "tooltip", text: hint }),
+          labelNode,
+          icon("info", "field__more"),
+        ),
     control,
-    hint === undefined ? null : el("p", { class: "field__hint", text: hint }),
   );
 }

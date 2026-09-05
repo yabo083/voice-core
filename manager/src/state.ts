@@ -60,7 +60,7 @@ export async function refreshInventory(): Promise<void> {
   try {
     inventory.set(await detect());
   } catch (err: unknown) {
-    toast(`检测本机环境失败：${ipcMessage(err)}`, "fail");
+    toast(`环境检测失败：${ipcMessage(err)}`, "fail");
   }
 }
 
@@ -68,7 +68,7 @@ export async function refreshVoices(): Promise<void> {
   try {
     voices.set(await listVoices());
   } catch (err: unknown) {
-    toast(`读取音色包失败：${ipcMessage(err)}`, "fail");
+    toast(`加载音色包列表失败：${ipcMessage(err)}`, "fail");
   }
 }
 

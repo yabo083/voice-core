@@ -1,3 +1,5 @@
+using VoiceCoreTray.Services;
+
 namespace VoiceCoreTray.Dialog;
 
 /// <summary>
@@ -9,7 +11,11 @@ namespace VoiceCoreTray.Dialog;
 /// <param name="DisplayText">What a human reads. Falls back to <paramref name="Text"/>.</param>
 /// <param name="Text">What was spoken (source language); shown as the dim second line.</param>
 /// <param name="Wav">Already-fetched WAV bytes, or null.</param>
-/// <param name="DisplaySeconds">Runtime-supplied auto-hide hint; null = the default dwell.</param>
+/// <param name="Dialog">How this line should look, as the runtime resolved it for THIS
+/// utterance (per-call over the voice pack's manifest over <c>config.json</c>). Null = the
+/// presenter's own theme. It rides along with the line rather than being set globally for
+/// the same reason the portrait does: a pack decides it, and the box must look like
+/// whoever is speaking, including while the backlog is walked back through.</param>
 /// <param name="Autoplay">Whether the tray's autoplay toggle is on.</param>
 /// <param name="Character">Speaker's display name, resolved from the utterance's voice
 /// pack. Carried per utterance, not set globally: the portrait has to follow the line
@@ -25,7 +31,7 @@ public sealed record DialogUtterance(
     string? DisplayText,
     string? Text,
     byte[]? Wav,
-    double? DisplaySeconds,
+    DialogStyle? Dialog,
     bool Autoplay,
     string? Character = null,
     string? AvatarPath = null,

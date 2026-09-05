@@ -24,13 +24,14 @@ import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, type Inventory } from "./ipc";
 import { inventory, refreshInventory, stack, startStatusPolling, status } from "./state";
 import { toast } from "./toast";
-import { createConfigScreen } from "./screens/config";
+import { navigate } from "./ui";
 import { createDeployScreen, type DeployScreen } from "./screens/deploy";
+import { createSettingsScreen } from "./screens/settings";
 import { createStatusScreen } from "./screens/status";
 import { createTrainingScreen, type TrainingScreen } from "./screens/train";
 import { createVoicesScreen } from "./screens/voices";
 
-type ScreenId = "deploy" | "voices" | "train" | "status" | "config";
+type ScreenId = "deploy" | "status" | "voices" | "train" | "settings";
 
 /** Screens may own a command bar; the shell, not the screen, decides where it sits. */
 type ScreenElement = HTMLElement & { commandBar?: HTMLElement };
@@ -41,13 +42,14 @@ interface NavSpec {
   glyph: IconName;
 }
 
+// The order the work happens in: what is running, whose voice, teaching a new one, and the
+// knobs last — a rail is a statement about what a user came here to do.
 const NAV: NavSpec[] = [
   { id: "deploy", label: "部署", glyph: "download-simple" },
+  { id: "status", label: "状态", glyph: "pulse" },
   { id: "voices", label: "音色", glyph: "microphone-stage" },
   { id: "train", label: "训练", glyph: "magic-wand" },
-  { id: "status", label: "状态", glyph: "pulse" },
-  // Last on purpose: a reference surface, not somewhere work starts.
-  { id: "config", label: "配置", glyph: "file-code" },
+  { id: "settings", label: "设置", glyph: "gear" },
 ];
 
 function mount(app: HTMLElement): void {
@@ -55,10 +57,10 @@ function mount(app: HTMLElement): void {
   const train: TrainingScreen = createTrainingScreen();
   const screens: Record<ScreenId, ScreenElement> = {
     deploy,
+    status: createStatusScreen(),
     voices: createVoicesScreen(),
     train,
-    status: createStatusScreen(),
-    config: createConfigScreen(),
+    settings: createSettingsScreen(),
   };
 
   const buttons = {} as Record<ScreenId, HTMLButtonElement>;
@@ -118,9 +120,17 @@ function mount(app: HTMLElement): void {
         {
           class: "navitem",
           type: "button",
-          // `detail === 0` means the button was activated from the keyboard. A mouse
-          // user does not need focus yanked onto the heading; a keyboard user does.
-          onclick: (ev: MouseEvent) => show(spec.id, ev.detail === 0),
+          // Through `navigate` rather than straight to `show`, because the rail is not the
+          // only thing that has to know a screen changed: `settings.ts` re-reads
+          // `config.json` on `app:navigate` and `voices.ts` closes an open pack page on it.
+          // Calling `show` directly moves the screen without either of them hearing about
+          // it, which is a form showing values the file no longer holds and a rail label
+          // that disagrees with what is under it.
+          //
+          // `detail === 0` means the button was activated from the keyboard, which is the
+          // focus rule `navigate` applies from the event: a mouse user does not need focus
+          // yanked onto the heading, a keyboard user does.
+          onclick: (ev: MouseEvent) => navigate(spec.id, ev),
         },
         icon(spec.glyph, "navitem__icon"),
         el("span", { class: "navitem__label", text: spec.label }),

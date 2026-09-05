@@ -69,6 +69,29 @@ enum Command {
         steps: Option<u32>,
         #[arg(long)]
         display_seconds: Option<f64>,
+        /// Subtitle colours for this one line: `#rgb`, `#rrggbb` or `#aarrggbb`. Highest
+        /// tier there is - above the pack's manifest, which is above `config.json`.
+        #[arg(long)]
+        name_color: Option<String>,
+        #[arg(long)]
+        text_color: Option<String>,
+        #[arg(long)]
+        ruby_color: Option<String>,
+        #[arg(long)]
+        countdown_color: Option<String>,
+        /// How the line arrives on screen: `typewriter`, `sweep` or `fade`. Anything else
+        /// is refused by name rather than quietly becoming the default.
+        #[arg(long)]
+        reveal: Option<String>,
+        /// Expression caption: a style annotation the engine conditions on separately from
+        /// the words, so it changes delivery without being spoken. The checkpoint's 45
+        /// emoji work here and inline in `--text`; repeating one strengthens it. Omit it to
+        /// use the pack's own `expression.emotion`; pass `""` to speak it plainly for once.
+        #[arg(long)]
+        emotion: Option<String>,
+        /// How hard `--emotion` steers, 0-10. The engine's default is 3.0.
+        #[arg(long)]
+        cfg_scale_caption: Option<f64>,
         #[arg(long)]
         timeout_ms: Option<u64>,
         #[arg(long, value_enum, default_value_t = PlayMode::Auto)]
@@ -120,6 +143,13 @@ async fn main() -> Result<()> {
             steps,
             display_seconds,
             timeout_ms,
+            name_color,
+            text_color,
+            ruby_color,
+            countdown_color,
+            reveal,
+            emotion,
+            cfg_scale_caption,
             play,
             out,
             wait,
@@ -151,6 +181,31 @@ async fn main() -> Result<()> {
             }
             if let Some(ms) = timeout_ms {
                 body["timeoutMs"] = serde_json::json!(ms);
+            }
+            // One object, because that is the shape the API takes and the shape the
+            // `speech` event carries back: five fields of one theme, not five parameters.
+            let mut dialog = serde_json::Map::new();
+            for (key, value) in [
+                ("nameColor", &name_color),
+                ("textColor", &text_color),
+                ("rubyColor", &ruby_color),
+                ("countdownColor", &countdown_color),
+                ("reveal", &reveal),
+            ] {
+                if let Some(value) = value {
+                    dialog.insert(key.to_string(), Value::String(value.clone()));
+                }
+            }
+            if !dialog.is_empty() {
+                body["dialog"] = Value::Object(dialog);
+            }
+            // Sent even when empty: `--emotion ""` is how a caller says "plainly, ignoring
+            // this pack's default", which is not the same as saying nothing.
+            if let Some(emotion) = &emotion {
+                body["emotion"] = Value::String(emotion.clone());
+            }
+            if let Some(scale) = cfg_scale_caption {
+                body["cfgScaleCaption"] = serde_json::json!(scale);
             }
 
             // Subscribed BEFORE the request: a playback report that lands between the

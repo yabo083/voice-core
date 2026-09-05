@@ -21,9 +21,10 @@ internal enum HotkeyAction
 /// <c>RegisterHotKey</c> needs a window that owns a message pump and that outlives
 /// every transient surface; the dialog is neither (it is hidden most of the time and
 /// deliberately never activates). Bindings come from <c>config.json</c> (see
-/// <see cref="AppConfig"/>) in the runtime's data dir, and a
-/// failed registration - almost always another app already owns the combination -
-/// is reported through the tray's status note instead of disappearing.
+/// <see cref="AppConfig"/>) in the runtime's data dir and are re-applied whenever that
+/// file changes (<see cref="Rebind"/>), so editing one takes effect where it was edited.
+/// A failed registration - almost always another app already owns the combination - is
+/// reported through the tray's status note instead of disappearing.
 /// </summary>
 internal sealed class HotkeyManager : IDisposable
 {
@@ -42,39 +43,81 @@ internal sealed class HotkeyManager : IDisposable
 
     private readonly nint _hwnd;
     private readonly WindowMessageMonitor _messages;
+    private readonly string _dataDir;
+    private readonly Action<string> _note;
+    private readonly IReadOnlyDictionary<HotkeyAction, Action> _actions;
     private readonly Dictionary<int, Action> _handlers = new();
-    private readonly List<int> _registered = new();
+    /// <summary>The spec each action is CURRENTLY registered with. It is what lets a rebind
+    /// tell an unchanged binding (leave it alone) from a changed one, and it is only ever
+    /// written after <c>RegisterHotKey</c> succeeded - so it can never claim a key this
+    /// window does not own.</summary>
+    private readonly Dictionary<HotkeyAction, string> _bound = new();
 
     public HotkeyManager(nint hwnd, string dataDir, AppConfig.HotkeySection bindings,
         Action<string> note, IReadOnlyDictionary<HotkeyAction, Action> actions)
     {
         _hwnd = hwnd;
+        _dataDir = dataDir;
+        _note = note;
+        _actions = actions;
         _messages = new WindowMessageMonitor(hwnd);
         _messages.WindowMessageReceived += OnWindowMessage;
+        Rebind(bindings);
+    }
 
-        foreach (var (action, handler) in actions)
+    /// <summary>
+    /// Apply the bindings as <c>config.json</c> now states them. Called at startup and again
+    /// on every change to that file.
+    ///
+    /// An action whose spec did not change is left registered: dropping and re-taking the
+    /// same combination would open a window in which the key belongs to nobody. One whose
+    /// spec DID change is unregistered first, because <c>RegisterHotKey</c> refuses a
+    /// combination this window already owns - which is how "the new binding silently does
+    /// nothing while the old one still works" happens.
+    ///
+    /// A failure leaves that action UNBOUND and says so. Keeping the old registration would
+    /// mean a live hotkey that no file agrees with, and the point of re-reading the file is
+    /// that what it says is what is in effect.
+    /// </summary>
+    public void Rebind(AppConfig.HotkeySection bindings)
+    {
+        foreach (var (action, handler) in _actions)
         {
-            var spec = action == HotkeyAction.ToggleDialog
-                ? bindings.ToggleDialog
-                : bindings.ToggleHold;
+            var spec = Spec(bindings, action);
+            if (_bound.TryGetValue(action, out var current) && current == spec) continue;
+
+            int id = IdBase + (int)action;
+            if (_bound.Remove(action))
+            {
+                UnregisterHotKey(_hwnd, id);
+                _handlers.Remove(id);
+            }
+
             if (!TryParse(spec, out uint modifiers, out uint key))
             {
-                note($"快捷键「{spec}」无法解析（{Label(action)}），已跳过：请修正 {Path.Combine(dataDir, AppConfig.FileName)}");
+                _note($"快捷键「{spec}」无法解析（{Label(action)}），现在没有绑定：请修正 {ConfigPath}");
                 continue;
             }
 
-            int id = IdBase + (int)action;
             if (!RegisterHotKey(_hwnd, id, modifiers | MOD_NOREPEAT, key))
             {
-                note($"快捷键 {spec}（{Label(action)}）注册失败：可能已被其他程序占用，" +
-                     $"可修改 {Path.Combine(dataDir, AppConfig.FileName)} 后重启 voice-core。");
+                // A failure with its remedy, in one line: what broke, that the key is now
+                // dead, and the file to fix it in. Whether a restart is needed is not part
+                // of it - nothing here ever needed one.
+                _note($"快捷键 {spec}（{Label(action)}）注册失败：可能已被其他程序占用，" +
+                      $"现在没有绑定；改 {ConfigPath} 里的绑定即可。");
                 continue;
             }
 
             _handlers[id] = handler;
-            _registered.Add(id);
+            _bound[action] = spec;
         }
     }
+
+    private static string Spec(AppConfig.HotkeySection bindings, HotkeyAction action) =>
+        action == HotkeyAction.ToggleDialog ? bindings.ToggleDialog : bindings.ToggleHold;
+
+    private string ConfigPath => Path.Combine(_dataDir, AppConfig.FileName);
 
     private void OnWindowMessage(object? sender, WindowMessageEventArgs e)
     {
@@ -89,8 +132,9 @@ internal sealed class HotkeyManager : IDisposable
 
     public void Dispose()
     {
-        foreach (int id in _registered) UnregisterHotKey(_hwnd, id);
-        _registered.Clear();
+        foreach (int id in _handlers.Keys) UnregisterHotKey(_hwnd, id);
+        _handlers.Clear();
+        _bound.Clear();
         _messages.Dispose();
     }
 

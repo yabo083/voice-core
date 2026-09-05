@@ -1,4 +1,6 @@
 using Microsoft.UI.Xaml;
+using System.Globalization;
+using VoiceCoreTray.Services;
 using Windows.UI;
 
 namespace VoiceCoreTray.Dialog;
@@ -10,9 +12,19 @@ namespace VoiceCoreTray.Dialog;
 /// needs some of these numbers too (the box width it resizes the window's client area
 /// to, the acrylic recipe it hands the backdrop controller), so a XAML-only theme
 /// would mean two copies that silently drift. <see cref="DialogWindow"/>'s XAML
-/// carries structure only and <c>ApplyTheme()</c> pushes these values onto it once.
+/// carries structure only and <c>ApplyTheme()</c> pushes these values onto it.
+///
+/// TWO KINDS OF VALUE LIVE HERE, and the split is the whole design:
+///   * <c>static</c> - geometry, motion, icon geometry, the acrylic recipe. Nobody
+///     themes these: they are what makes the plate this plate.
+///   * INSTANCE - the six a voice pack, `config.json` or one call may state. A pack
+///     speaks per line, so these cannot be constants; the dialog holds one of these
+///     records and is handed a new one per utterance
+///     (<see cref="DialogWindow.SetTheme"/>).
+/// The built-in tier is <see cref="BuiltIn"/>, and every tier above it arrives through
+/// <c>With</c>, which leaves an unstated field exactly as it was.
 /// </summary>
-internal static class DialogTheme
+internal sealed record DialogTheme
 {
     // -- placement -----------------------------------------------------------
 
@@ -35,7 +47,18 @@ internal static class DialogTheme
     /// between our corner and the system's.</summary>
     public const double BoxCornerRadius = 8;
     public const double BoxBorderThickness = 1;
-    public static readonly Thickness BodyPadding = new(20, 10, 20, 11);
+    /// <summary>
+    /// Asymmetric on purpose: the top is 4 where the bottom is 11.
+    ///
+    /// The gap above the text is not this padding alone - it is this plus
+    /// <see cref="TopBandHeight"/>, which is 22 DIP of band the text also sits under, so the
+    /// composite top gap was 32 against the bottom's 11 and read as a hole. The 20% that
+    /// came out of it (32 -> 26) came out of HERE rather than out of the band, because the
+    /// band's height IS the micro-controls' hit target
+    /// (<see cref="IconSize"/> 12 + 2 * <see cref="IconHitPadding"/> 5 = 22): shrinking the
+    /// band would shrink a press target to buy air.
+    /// </summary>
+    public static readonly Thickness BodyPadding = new(20, 4, 20, 11);
 
     /// <summary>Top band height. There is no title bar: the band is breathing room
     /// that doubles as the only caption (drag) region, and it holds the controls.</summary>
@@ -148,11 +171,11 @@ internal static class DialogTheme
     public static readonly Color InnerHighlight = Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF);
     /// <summary>Speaker name. The identity violet, which is what separates who is
     /// talking from what was said without adding a second type size.</summary>
-    public static readonly Color NameInk = Color.FromArgb(0xFF, 0xA4, 0x8B, 0xFF);
+    public static readonly Color NameInkDefault = Color.FromArgb(0xFF, 0xA4, 0x8B, 0xFF);
     /// <summary>Body ink. Hueless near-white, deliberately NOT the shell's dimmer body ink:
     /// this line sits over video and game frames, so its luminance is legibility, not style.</summary>
-    public static readonly Color PrimaryInk = Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2);
-    public static readonly Color SecondaryInk = Color.FromArgb(0x9E, 0xFF, 0xFF, 0xFF);
+    public static readonly Color PrimaryInkDefault = Color.FromArgb(0xFF, 0xF2, 0xF2, 0xF2);
+    public static readonly Color SecondaryInkDefault = Color.FromArgb(0x9E, 0xFF, 0xFF, 0xFF);
     public static readonly Color ActionInk = Color.FromArgb(0x8A, 0xFF, 0xFF, 0xFF);
     /// <summary>An engaged control (pin held down). Same violet as the name, so
     /// "on" reads as lit rather than as a different colour scheme.</summary>
@@ -182,7 +205,7 @@ internal static class DialogTheme
     /// <summary>Used when acrylic is unavailable (battery saver, transparency off).</summary>
     public static readonly Color AcrylicFallback = Color.FromArgb(0xF2, 0x1C, 0x1C, 0x1C);
     public static readonly Color CountdownTrackInk = Color.FromArgb(0x1A, 0xFF, 0xFF, 0xFF);
-    public static readonly Color CountdownInk = Color.FromArgb(0xD9, 0x8B, 0x6C, 0xEF);
+    public static readonly Color CountdownInkDefault = Color.FromArgb(0xD9, 0x8B, 0x6C, 0xEF);
     /// <summary>Countdown bar while the pointer freezes it, so the freeze is visible. The
     /// shell's warn amber: a held countdown is a state to notice, not a second accent.</summary>
     public static readonly Color CountdownFrozenInk = Color.FromArgb(0xFF, 0xE0, 0xAC, 0x00);
@@ -270,4 +293,117 @@ internal static class DialogTheme
     public const int QueueCapacity = 8;
     /// <summary>Bounded backlog kept for in-place backtracking (wheel up over the box).</summary>
     public const int HistoryCapacity = 50;
+
+    // -- themeable ------------------------------------------------------------
+    //
+    // The six values above the built-in tier, resolved per utterance. They are instance
+    // members and not constants because a voice pack decides them and a pack speaks one
+    // line at a time: `speech` carries the merged answer for THAT line (src/obs.rs), and
+    // walking back through the backlog re-themes to whoever said the line on screen.
+    //
+    // `record`, so two themes with equal values ARE equal - which is what lets
+    // ApplyTheme be called as often as anything wants without doing any work.
+
+    public Color NameInk { get; init; } = NameInkDefault;
+    public Color PrimaryInk { get; init; } = PrimaryInkDefault;
+    public Color SecondaryInk { get; init; } = SecondaryInkDefault;
+    public Color CountdownInk { get; init; } = CountdownInkDefault;
+    public RevealStyle Reveal { get; init; } = RevealStyle.Typewriter;
+    public double DisplaySeconds { get; init; } = DefaultDwellSeconds;
+    /// <summary>
+    /// Whether the annotation hugs the line above it or below it. Global-only: it is a
+    /// reading preference, not a costume, so no pack overrides it and it never travels on
+    /// the wire - it comes from <c>config.json</c> and is re-read when that file changes.
+    /// </summary>
+    public bool AnnotationAbove { get; init; }
+
+    /// <summary>The bottom tier: what the dialog looks like when no file says otherwise.</summary>
+    public static readonly DialogTheme BuiltIn = new();
+
+    /// <summary>The app-wide tier, from <c>config.json</c>'s <c>dialog</c> section.</summary>
+    public DialogTheme With(AppConfig.DialogSection config) =>
+        Overlay(config.NameColor, config.TextColor, config.RubyColor, config.CountdownColor,
+            config.Reveal, config.DisplaySeconds) with
+        {
+            AnnotationAbove = config.AnnotationAbove,
+        };
+
+    /// <summary>
+    /// One utterance's tier: what the runtime resolved for THIS line (per-call over the
+    /// pack's manifest over <c>config.json</c>), so applying it over the config tier again
+    /// is idempotent rather than a second opinion.
+    /// </summary>
+    public DialogTheme With(DialogStyle? style) =>
+        style is null
+            ? this
+            : Overlay(style.NameColor, style.TextColor, style.RubyColor, style.CountdownColor,
+                style.Reveal, style.DisplaySeconds);
+
+    /// <summary>
+    /// Lay six stated values over this theme. Absent stays absent: an unstated field keeps
+    /// the value it already had, which is what makes the tiers compose instead of the
+    /// topmost one blanking the rest of the costume.
+    /// </summary>
+    private DialogTheme Overlay(string? nameColor, string? textColor, string? rubyColor,
+        string? countdownColor, string? reveal, double? displaySeconds) => this with
+    {
+        NameInk = TryInk(nameColor, out var name) ? name : NameInk,
+        PrimaryInk = TryInk(textColor, out var primary) ? primary : PrimaryInk,
+        SecondaryInk = TryInk(rubyColor, out var secondary) ? secondary : SecondaryInk,
+        CountdownInk = TryInk(countdownColor, out var countdown) ? countdown : CountdownInk,
+        Reveal = ParseReveal(reveal) ?? Reveal,
+        DisplaySeconds = displaySeconds is double seconds && seconds > 0 ? seconds : DisplaySeconds,
+    };
+
+    /// <summary>
+    /// The three the dialog can actually play, by their wire names. This enum IS the
+    /// contract the runtime validates against (`REVEALS` in src/packs.rs); anything else
+    /// leaves the current mode alone rather than silently becoming the default, because
+    /// the runtime already refused it by name upstream of here.
+    /// </summary>
+    private static RevealStyle? ParseReveal(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "typewriter" => RevealStyle.Typewriter,
+        "sweep" => RevealStyle.Sweep,
+        "fade" => RevealStyle.Fade,
+        _ => null,
+    };
+
+    /// <summary>
+    /// <c>#rgb</c>, <c>#rrggbb</c> or <c>#aarrggbb</c> into ARGB.
+    ///
+    /// The runtime validates these before they are ever sent (src/packs.rs), so this is
+    /// the second line of defence, and it must NOT throw: it also parses values that never
+    /// went through that check - a local preview, a hand-edited file read by this process,
+    /// a runtime older than this build - and it runs inside the SSE event handler, where
+    /// there is nothing above it to catch anything.
+    /// </summary>
+    private static bool TryInk(string? value, out Color color)
+    {
+        color = default;
+        if (value is null || value.Length < 4 || value[0] != '#') return false;
+        var body = value[1..];
+        if (!uint.TryParse(body, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out uint bits))
+            return false;
+
+        switch (body.Length)
+        {
+            // CSS shorthand: each nibble doubled, so #fff is white rather than near-black.
+            case 3:
+                color = Color.FromArgb(0xFF,
+                    (byte)((bits >> 8 & 0xF) * 0x11),
+                    (byte)((bits >> 4 & 0xF) * 0x11),
+                    (byte)((bits & 0xF) * 0x11));
+                return true;
+            case 6:
+                color = Color.FromArgb(0xFF, (byte)(bits >> 16), (byte)(bits >> 8), (byte)bits);
+                return true;
+            case 8:
+                color = Color.FromArgb(
+                    (byte)(bits >> 24), (byte)(bits >> 16), (byte)(bits >> 8), (byte)bits);
+                return true;
+            default:
+                return false;
+        }
+    }
 }

@@ -104,7 +104,10 @@ public sealed partial class DialogWindow : Window
 
     private readonly string _dataDir;
     private readonly DialogMetrics _metrics;
-    private readonly AppConfig.DialogSection _options;
+    /// <summary>What this window currently looks like. An instance, not the constants:
+    /// a voice pack decides six of these values and a pack speaks one line at a time, so
+    /// the presenter hands over a new theme per utterance (<see cref="SetTheme"/>).</summary>
+    private DialogTheme _theme;
     /// <summary>Current utterance's layout - clause cells grouped into wrapped lines, or a
     /// single gloss when the two languages could not be paired - plus the blocks rendering
     /// it. Rebuilt per utterance, filled per reveal.</summary>
@@ -123,7 +126,9 @@ public sealed partial class DialogWindow : Window
     private readonly WindowMessageMonitor _messages;
     private readonly InputNonClientPointerSource _nonClient;
     private readonly nint _hwnd;
-    private readonly SolidColorBrush _countdownInk;
+    /// <summary>Countdown brushes. The normal one follows the theme, so it is rebuilt by
+    /// <see cref="ApplyTheme"/>; the frozen one is a fixed state colour, not a costume.</summary>
+    private SolidColorBrush _countdownInk;
     private readonly SolidColorBrush _countdownFrozenInk;
 
     /// <summary>Box bounds in CLIENT physical pixels. The client area IS the box, so
@@ -158,12 +163,12 @@ public sealed partial class DialogWindow : Window
     private bool _inSync;
     private bool _shown;
 
-    internal DialogWindow(string dataDir, DialogMetrics metrics)
+    internal DialogWindow(string dataDir, DialogMetrics metrics, DialogTheme theme)
     {
         InitializeComponent();
         _dataDir = dataDir;
         _metrics = metrics;
-        _options = AppConfig.Load(dataDir).Dialog;
+        _theme = theme;
 
         Title = "voice-core dialog";
 
@@ -186,7 +191,7 @@ public sealed partial class DialogWindow : Window
         DwmSetWindowAttribute(_hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, ref corner, sizeof(int));
         EnableAcrylic();
 
-        _countdownInk = new SolidColorBrush(DialogTheme.CountdownInk);
+        _countdownInk = new SolidColorBrush(_theme.CountdownInk);
         _countdownFrozenInk = new SolidColorBrush(DialogTheme.CountdownFrozenInk);
         ApplyTheme();
 
@@ -306,8 +311,30 @@ public sealed partial class DialogWindow : Window
 
     // -- theme ---------------------------------------------------------------
 
-    /// <summary>Push every value from <see cref="DialogTheme"/> onto the structure the
-    /// XAML declares. One place, one direction.</summary>
+    /// <summary>
+    /// Adopt a theme. Idempotent by value - <see cref="DialogTheme"/> is a record, so an
+    /// utterance that looks like the last one does no work at all, which is what makes this
+    /// safe to call before every line and again whenever <c>config.json</c> changes.
+    /// </summary>
+    internal void SetTheme(DialogTheme theme)
+    {
+        if (_theme == theme) return;
+        _theme = theme;
+        ApplyTheme();
+    }
+
+    /// <summary>What the box is wearing. The presenter reads the dwell off it.</summary>
+    internal DialogTheme Theme => _theme;
+
+    /// <summary>
+    /// Push every value from <see cref="DialogTheme"/> onto the structure the XAML
+    /// declares. One place, one direction.
+    ///
+    /// Callable as often as anything likes: it assigns colours, sizes and paddings and
+    /// NOTHING that moves the box - no measure, no resize, no re-layout of the text - so
+    /// re-theming mid-utterance repaints without a flicker or a jump. The one thing that
+    /// changes is ink, including the ink of rows that are already on screen.
+    /// </summary>
     private void ApplyTheme()
     {
         var face = new FontFamily(DialogTheme.FontSource);
@@ -337,7 +364,7 @@ public sealed partial class DialogWindow : Window
 
         // Two lines allowed: a long character name wraps under the portrait instead of
         // stretching the column.
-        StyleText(NameText, face, DialogTheme.NameSize, 0, 2, DialogTheme.NameInk);
+        StyleText(NameText, face, DialogTheme.NameSize, 0, 2, _theme.NameInk);
         StyleText(HistoryBadge, face, DialogTheme.BadgeSize, 0, 1, DialogTheme.ActionInk);
 
         // Vector icons, not font glyphs: identical weight and size on any machine, and
@@ -367,7 +394,7 @@ public sealed partial class DialogWindow : Window
         // the probe MUST match the base line's font exactly or the wrap points are fiction.
         _face = face;
         StyleText(WrapProbe, face, DialogTheme.PrimarySize, DialogTheme.PrimaryLineHeight,
-            1, DialogTheme.PrimaryInk);
+            1, _theme.PrimaryInk);
         WrapProbe.TextWrapping = TextWrapping.NoWrap;
         WrapProbe.TextTrimming = TextTrimming.None;
         // Same rule for the annotation probe. RubyLayout measures every Cell.RubyWidth with
@@ -375,7 +402,7 @@ public sealed partial class DialogWindow : Window
         // default face instead makes the centring offset, the overhang clamp and the
         // shrink-to-fit decision all fire on a width the run does not have.
         StyleText(RubyProbe, face, DialogTheme.SecondarySize, DialogTheme.SecondaryLineHeight,
-            1, DialogTheme.SecondaryInk);
+            1, _theme.SecondaryInk);
         RubyProbe.TextWrapping = TextWrapping.NoWrap;
         RubyProbe.TextTrimming = TextTrimming.None;
         WaitingIndicator.Width = DialogTheme.IndicatorWidth;
@@ -387,11 +414,25 @@ public sealed partial class DialogWindow : Window
         // width, no track behind it, square (DialogBox's corner radius does the rounding).
         // Nothing else in the box moves when it appears.
         CountdownTrack.Height = DialogTheme.CountdownHeight;
+        _countdownInk = new SolidColorBrush(_theme.CountdownInk);
         CountdownFill.Background = _countdownInk;
 
         FontProbeBundled.FontFamily = face;
         FontProbeBundled.FontSize = DialogTheme.PrimarySize;
         FontProbeSystem.FontSize = DialogTheme.PrimarySize;
+
+        // Re-ink what is already on screen. The rows are built per utterance, so without
+        // this a theme arriving mid-line - a `config.json` edit while the box is up - would
+        // only be visible from the NEXT utterance, which is exactly the "did that setting
+        // do anything?" the live reload exists to end.
+        var primary = new SolidColorBrush(_theme.PrimaryInk);
+        var secondary = new SolidColorBrush(_theme.SecondaryInk);
+        foreach (var (baseText, ruby, _) in _cells)
+        {
+            baseText.Foreground = primary;
+            if (ruby is not null) ruby.Foreground = secondary;
+        }
+        if (_gloss is not null) _gloss.Foreground = secondary;
     }
 
     private static void StyleText(TextBlock block, FontFamily face, double size,
@@ -437,9 +478,9 @@ public sealed partial class DialogWindow : Window
 
     // -- content -------------------------------------------------------------
 
-    /// <summary>Which reveal preset is configured. The presenter drives the typewriter; the
-    /// other two are animations this window owns.</summary>
-    internal RevealStyle Reveal => _options.Style;
+    /// <summary>Which reveal preset this line asked for. The presenter drives the
+    /// typewriter; the other two are animations this window owns.</summary>
+    internal RevealStyle Reveal => _theme.Reveal;
 
     /// <summary>
     /// Start a new utterance. The layout is built from the FULL text either way, so
@@ -596,7 +637,7 @@ public sealed partial class DialogWindow : Window
             {
                 var baseText = new TextBlock();
                 StyleText(baseText, _face, DialogTheme.PrimarySize, DialogTheme.PrimaryLineHeight,
-                    1, DialogTheme.PrimaryInk);
+                    1, _theme.PrimaryInk);
                 baseText.TextWrapping = TextWrapping.NoWrap;
                 baseText.TextTrimming = TextTrimming.None;
 
@@ -632,7 +673,7 @@ public sealed partial class DialogWindow : Window
                     Canvas.SetLeft(ruby, offset);
                     layer.Children.Add(ruby);
 
-                    if (_options.AnnotationAbove) stack.Children.Insert(0, layer);
+                    if (_theme.AnnotationAbove) stack.Children.Insert(0, layer);
                     else stack.Children.Add(layer);
                 }
 
@@ -653,12 +694,12 @@ public sealed partial class DialogWindow : Window
             _gloss.TextWrapping = TextWrapping.Wrap;
             _gloss.MaxLines = DialogTheme.SecondaryMaxLines;
             _gloss.TextTrimming = TextTrimming.CharacterEllipsis;
-            _gloss.Margin = _options.AnnotationAbove
+            _gloss.Margin = _theme.AnnotationAbove
                 ? new Thickness(0, 0, 0, DialogTheme.AnnotationGap)
                 : new Thickness(0, DialogTheme.AnnotationGap, 0, 0);
 
             _segments.Add((_gloss, 0, _layout.Lines.Count > 0 ? _layout.Lines[0].Sum(c => c.Width) : 0));
-            if (_options.AnnotationAbove) rows.Insert(0, _gloss);
+            if (_theme.AnnotationAbove) rows.Insert(0, _gloss);
             else rows.Add(_gloss);
         }
 
@@ -670,7 +711,7 @@ public sealed partial class DialogWindow : Window
     {
         var ruby = new TextBlock { Visibility = Visibility.Collapsed };
         StyleText(ruby, _face, DialogTheme.SecondarySize, DialogTheme.SecondaryLineHeight,
-            1, DialogTheme.SecondaryInk);
+            1, _theme.SecondaryInk);
         ruby.TextWrapping = TextWrapping.NoWrap;
         ruby.TextTrimming = TextTrimming.None;
         return ruby;

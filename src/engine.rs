@@ -24,6 +24,14 @@ pub struct SynthRequest<'a> {
     pub pack: Option<PackTarget>,
     pub seed: Option<u64>,
     pub num_steps: u32,
+    /// The engine's caption channel: a style annotation conditioned by a head separate
+    /// from the text one (`use_caption_condition`). `None` and `""` are the same thing to
+    /// the engine - it zeroes the caption mask either way - so only a non-empty one is
+    /// ever sent, which is what keeps a request without expression byte-identical to
+    /// what this runtime sent before the channel existed.
+    pub caption: Option<&'a str>,
+    /// Guidance strength for that channel. `None` leaves the engine's own default (3.0).
+    pub cfg_scale_caption: Option<f64>,
     /// Where the engine must write its WAV. The runtime owns this path and
     /// never sees the samples themselves.
     pub out_path: &'a Path,
@@ -238,6 +246,14 @@ impl TtsEngine for IrodoriEngine {
         }
         if let Some(pack) = &req.pack {
             body["voicePack"] = serde_json::json!({ "kind": pack.kind, "path": pack.path });
+        }
+        // Both omitted unless asked for: an absent key is the engine's own default, and
+        // sending `caption: null` would be a wire change on every ordinary utterance.
+        if let Some(caption) = req.caption.filter(|caption| !caption.is_empty()) {
+            body["caption"] = serde_json::json!(caption);
+        }
+        if let Some(scale) = req.cfg_scale_caption {
+            body["cfgScaleCaption"] = serde_json::json!(scale);
         }
 
         let response = self

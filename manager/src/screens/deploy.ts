@@ -60,7 +60,7 @@ const STAGE_LABEL: Record<Stage, string> = {
   venv: "Python 环境",
   models: "模型权重",
   layout: "写入配置",
-  smoke: "试跑一句",
+  smoke: "功能测试",
 };
 
 const STATE_LABEL: Record<StageState, string> = {
@@ -235,7 +235,7 @@ export function createDeployScreen(): DeployScreen {
           { class: "skeletons", "aria-hidden": "true" },
           [1, 2, 3, 4, 5].map(() => el("div", { class: "skeleton" })),
         ),
-        el("p", { class: "sr-only", role: "status", text: "正在检测本机环境" }),
+        el("p", { class: "sr-only", role: "status", text: "正在检测系统运行环境" }),
       );
       return;
     }
@@ -259,7 +259,7 @@ export function createDeployScreen(): DeployScreen {
         "engine_root",
         "folder-open",
         "引擎源码",
-        "选择现成的引擎目录",
+        "选择本地已有引擎目录",
         inv.engine_root,
         chip("复用", "reuse", "recycle"),
       ),
@@ -272,10 +272,10 @@ export function createDeployScreen(): DeployScreen {
             text:
               inv.engine_python === null
                 ? inv.cuda === null
-                  ? "将由「Python 环境」这一步创建"
-                  : `将由「Python 环境」这一步创建 · CUDA ${inv.cuda}`
+                  ? "将在「Python 环境」阶段创建"
+                  : `将在「Python 环境」阶段创建 · CUDA ${inv.cuda}`
                 : inv.cuda === null
-                  ? "未检测到 CUDA，合成会非常慢"
+                  ? "未检测到 CUDA，推理性能将显著受限"
                   : `CUDA ${inv.cuda}`,
           }),
           inv.engine_python === null ? null : el("div", { class: "inv__value" }, pathText(inv.engine_python)),
@@ -290,7 +290,7 @@ export function createDeployScreen(): DeployScreen {
         "hf_home",
         "database",
         `模型权重 ${present.length} / ${inv.models.length}`,
-        "选择现成的模型缓存目录",
+        "选择本地已有模型缓存目录",
         inv.hf_cache,
         chip(`${formatGiB(reusableGiB)} 复用`, "reuse", "recycle"),
       ),
@@ -325,7 +325,7 @@ export function createDeployScreen(): DeployScreen {
             "voice_packs",
             "microphone-stage",
             "音色包",
-            "选择现成的音色包目录",
+            "选择本地已有音色包目录",
             null,
             chip("就绪", "ok", "check-circle"),
           ),
@@ -346,7 +346,7 @@ export function createDeployScreen(): DeployScreen {
               "p",
               { class: "disk__line" },
               el("strong", { text: formatGiB(inv.needs_gib) }),
-              el("span", { text: `本次需要 · 可用 ${formatGiB(inv.disk_free_gib)}` }),
+              el("span", { text: `所需空间 · 可用 ${formatGiB(inv.disk_free_gib)}` }),
             ),
             el(
               "div",
@@ -460,7 +460,7 @@ export function createDeployScreen(): DeployScreen {
 
     fill(
       row.detail,
-      model.remedy === null ? null : note("fail", "怎么解决", el("p", { class: "remedy", text: model.remedy })),
+      model.remedy === null ? null : note("fail", "排障指引", el("p", { class: "remedy", text: model.remedy })),
       model.notes.length === 0
         ? null
         : el(
@@ -483,7 +483,7 @@ export function createDeployScreen(): DeployScreen {
       row.retry,
       model.state === "fail"
         ? button({
-            label: "重试这一步",
+            label: "重试当前步骤",
             glyph: "arrow-clockwise",
             small: true,
             disabled: running,
@@ -516,7 +516,7 @@ export function createDeployScreen(): DeployScreen {
 
   const logBody = el("div", { class: "logpane__body", id: "deploy-log-body", hidden: true }, logScroll);
   const bottomBtn = button({
-    label: "回到底部",
+    label: "跳转至底部",
     glyph: "arrow-down",
     small: true,
     kind: "quiet",
@@ -528,7 +528,7 @@ export function createDeployScreen(): DeployScreen {
     },
   });
   const logToggle = button({
-    label: "显示详细日志",
+    label: "展开详细日志",
     // One caret, rotated by CSS on aria-expanded: swapping the glyph would rebuild
     // the button and drop focus while a user is toggling it.
     glyph: "caret-right",
@@ -547,7 +547,7 @@ export function createDeployScreen(): DeployScreen {
     logBody.hidden = !open;
     logToggle.setAttribute("aria-expanded", String(open));
     const label = logToggle.querySelector("span");
-    if (label !== null) label.textContent = open ? "隐藏详细日志" : "显示详细日志";
+    if (label !== null) label.textContent = open ? "折叠详细日志" : "展开详细日志";
     // A scroll control belongs to a visible pane; kept on screen while collapsed it
     // is a dead control next to a closed drawer.
     bottomBtn.hidden = !open;
@@ -593,7 +593,7 @@ export function createDeployScreen(): DeployScreen {
       );
       // The hint that used to be a paragraph under the stage list. It is one sentence
       // and it is only true while a run is in flight, which is exactly a tooltip.
-      fill(cmdRight, blockedButton({ label: "进行中…" }, "关掉窗口不会中断部署"));
+      fill(cmdRight, blockedButton({ label: "正在执行…" }, "后台任务运行中，关闭窗口不影响执行"));
     } else if (finished) {
       fill(cmdLeft, null);
       fill(
@@ -608,7 +608,7 @@ export function createDeployScreen(): DeployScreen {
     } else {
       fill(
         cmdLeft,
-        button({ label: "仅检查", glyph: "check", onClick: () => void run(null, true) }),
+        button({ label: "仅检测", glyph: "check", onClick: () => void run(null, true) }),
         button({
           label: "重新检测",
           glyph: "arrow-clockwise",
@@ -641,7 +641,7 @@ export function createDeployScreen(): DeployScreen {
 
   function renderStagesTail(): void {
     if (!running && !finished) {
-      stagesTail.textContent = `${STAGES.length} 步`;
+      stagesTail.textContent = `共 ${STAGES.length} 步`;
       return;
     }
     const index = STAGES.findIndex((stage) => stages.get(stage)?.state === "running");
@@ -653,8 +653,8 @@ export function createDeployScreen(): DeployScreen {
     }, 0);
     stagesTail.textContent =
       index === -1
-        ? `${STAGES.length} 步 · ${formatElapsed(spent)}`
-        : `第 ${index + 1} 步 / ${STAGES.length} · 已用 ${formatElapsed(spent)}`;
+        ? `共 ${STAGES.length} 步 · 耗时 ${formatElapsed(spent)}`
+        : `步骤 ${index + 1} / ${STAGES.length} · 耗时 ${formatElapsed(spent)}`;
   }
 
   function apply(event: BootstrapEvent): void {
@@ -696,7 +696,7 @@ export function createDeployScreen(): DeployScreen {
 
   function renderSummary(runError: string | null, checkOnly: boolean): void {
     if (runError !== null) {
-      fill(summary, note("fail", "这次运行没能开始", el("p", { text: runError })));
+      fill(summary, note("fail", "启动任务失败", el("p", { text: runError })));
       return;
     }
 
@@ -709,9 +709,9 @@ export function createDeployScreen(): DeployScreen {
         summary,
         note(
           "warn",
-          `${failed.length} 个步骤失败`,
+          `${failed.length} 个步骤执行失败`,
           el("p", {
-            text: `${failed.map((stage) => STAGE_LABEL[stage]).join("、")}。修好后点那一步的「重试这一步」，不必从头再来。`,
+            text: `${failed.map((stage) => STAGE_LABEL[stage]).join("、")}。排查问题后点击失败阶段的「重试当前步骤」，支持断点重试。`,
           }),
         ),
       );
@@ -720,11 +720,11 @@ export function createDeployScreen(): DeployScreen {
     if (done + reused === 0) {
       // Cancelled runs land here with nothing terminal reported. Calling that a
       // finished deployment would claim an install that did not happen.
-      fill(summary, note("warn", "已取消，环境没有变更"));
+      fill(summary, note("warn", "已取消，未对环境进行修改"));
       return;
     }
     if (checkOnly) {
-      fill(summary, note("reuse", `检查通过：${done + reused} 项就绪`));
+      fill(summary, note("reuse", `环境检查通过：${done + reused} 项就绪`));
       return;
     }
     fill(
@@ -733,8 +733,8 @@ export function createDeployScreen(): DeployScreen {
         "div",
         { class: "banner" },
         icon("check-circle", "banner__icon"),
-        el("p", { class: "banner__text", text: "部署完成，引擎可以合成了" }),
-        el("span", { class: "banner__meta", text: reused > 0 ? `${reused} 步复用` : "" }),
+        el("p", { class: "banner__text", text: "部署完成，语音合成引擎已就绪" }),
+        el("span", { class: "banner__meta", text: reused > 0 ? `${reused} 个步骤已复用` : "" }),
       ),
     );
   }

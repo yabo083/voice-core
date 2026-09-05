@@ -44,6 +44,10 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
     private readonly AudioPresenter _audio;
     private readonly DialogHistory _history = new();
     private readonly DialogMetrics _metrics;
+    /// <summary>The tier every utterance is dressed over: the built-ins with
+    /// <c>config.json</c>'s own <c>dialog</c> section laid on top. Rebuilt, not restarted
+    /// for, when that file changes (<see cref="ApplyConfig"/>).</summary>
+    private DialogTheme _base;
     /// <summary>Hover polling while a countdown runs. The bar itself is a compositor
     /// animation; this only decides whether it is frozen.</summary>
     private readonly DispatcherQueueTimer _tick;
@@ -74,7 +78,10 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         _dispatcher = DispatcherQueue.GetForCurrentThread();
 
         _metrics = new DialogMetrics(runtime.LogDir);
-        _window = new DialogWindow(runtime.DataDir, _metrics);
+        // The app-wide tier is read here rather than in the window: the presenter is what
+        // re-reads it while running, and the window should own no file.
+        _base = DialogTheme.BuiltIn.With(AppConfig.Load(runtime.DataDir).Dialog);
+        _window = new DialogWindow(runtime.DataDir, _metrics, _base);
         _window.HistoryRequested += OpenHistory;
         _window.ReplayRequested += ReplayCurrentEntry;
         _window.CloseRequested += Hide;
@@ -121,7 +128,7 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         var source = utterance.Text is { Length: > 0 } text && text != primary ? text : null;
         if (utterance.AudioId.Length > 0)
             _history.Add(utterance.AudioId, primary, source, utterance.Character,
-                utterance.AvatarPath, utterance.RubyPairs);
+                utterance.AvatarPath, utterance.RubyPairs, utterance.Dialog);
 
         if (_state is State.Typing or State.Speaking)
         {
@@ -159,6 +166,10 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         _backtrack = _wheelTarget = 0;
         _metrics.MarkUtteranceStart(queuedMs, _pending.Count);
 
+        // Before the layout is built, not after: the ink of every row is decided as the row
+        // is created, and `annotationAbove` decides which side of the line its annotation
+        // hangs on. A theme applied afterwards would dress the NEXT utterance.
+        _window.SetTheme(Theme(utterance.Dialog));
         _window.SetCharacter(utterance.Character ?? string.Empty, utterance.AvatarPath, null);
         _window.SetBrowsing(false);
         _window.BeginUtterance(primary, source, utterance.RubyPairs);
@@ -179,6 +190,7 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         }
 
         _state = State.Typing;
+        _metrics.RevealMode = _window.Reveal;
 
         // The typewriter is paced against the audio; the other presets are fixed-length
         // animations over an already-placed layout, so they only need to say when they are
@@ -334,6 +346,7 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         var entry = entries[index];
         // The portrait belongs to the line, not to the dialog: whoever said THIS is who
         // the box shows while it is on screen.
+        _window.SetTheme(Theme(entry.Dialog));
         _window.SetCharacter(entry.Character ?? string.Empty, entry.AvatarPath, null);
         _window.ShowLine(entry.DisplayText, entry.SourceText, entry.RubyPairs);
         _window.SetHistoryBadge(index == 0 ? null : PositionText(index));
@@ -454,15 +467,43 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
     /// How long to stay after the line lands. Null means "never auto-hide", which now
     /// happens only in 常驻 (<see cref="Pinned"/>): the DEFAULT is a countdown, so a
     /// caption the user never touches clears itself off the desktop. Order: 常驻 wins,
-    /// then a forced CLI dwell, then the runtime's per-utterance hint, then the default.
+    /// then a forced CLI dwell, then the theme - which has already resolved the runtime's
+    /// per-utterance hint over the pack's over `config.json`'s over the built-in, so there
+    /// is nothing left to fall back to here.
     /// </summary>
     private double? EffectiveDwell()
     {
         if (_pinned) return null;
         if (_options.ForcedDwell is double forced) return forced;
-        if (_current?.DisplaySeconds is double pushed && pushed > 0) return pushed;
-        return DialogTheme.DefaultDwellSeconds;
+        return _window.Theme.DisplaySeconds;
     }
+
+    /// <summary>
+    /// <c>config.json</c> changed on disk, so rebuild the app-wide tier and re-dress the
+    /// line that is on screen right now instead of waiting for the next one: a setting
+    /// whose effect you cannot see is the thing this whole path exists to end.
+    ///
+    /// Colours, the reveal mode and the dwell land immediately. <c>annotationAbove</c>
+    /// decides which side of a line its annotation is built on, so it applies from the next
+    /// utterance - rebuilding the rows under a running typewriter would jump the line to
+    /// its finished state, which is a worse lie than waiting one line.
+    /// </summary>
+    internal void ApplyConfig(AppConfig.DialogSection dialog)
+    {
+        _base = DialogTheme.BuiltIn.With(dialog);
+        _window.SetTheme(Theme(ShownStyle()));
+    }
+
+    /// <summary>This line's theme: the app-wide tier with whatever the runtime resolved for
+    /// THIS utterance over it.</summary>
+    private DialogTheme Theme(DialogStyle? style) => _base.With(style);
+
+    /// <summary>The style of the line in the box: the browsed one while browsing, otherwise
+    /// the live one.</summary>
+    private DialogStyle? ShownStyle() =>
+        _backtrack > 0 && _backtrack < _history.Entries.Count
+            ? _history.Entries[_backtrack].Dialog
+            : _current?.Dialog;
 
     private void EnterHold()
     {
@@ -541,6 +582,7 @@ public sealed class DialogPresenter : IDialogPresenter, IDisposable
         _audioPlaying = false;
         _backtrack = _wheelTarget = 0;
         // Recall is reading, not speaking: the full line at once, no growth motion.
+        _window.SetTheme(Theme(_current.Dialog));
         _window.ShowLine(primary, source, _current?.RubyPairs);
         _window.SetHistoryBadge(null);
         EnterHold();

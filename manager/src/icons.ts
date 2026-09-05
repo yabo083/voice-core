@@ -15,6 +15,7 @@ import caretRight from "@phosphor-icons/core/assets/regular/caret-right.svg?raw"
 import check from "@phosphor-icons/core/assets/regular/check.svg?raw";
 import checkCircle from "@phosphor-icons/core/assets/regular/check-circle.svg?raw";
 import circleDashed from "@phosphor-icons/core/assets/regular/circle-dashed.svg?raw";
+import clockCounterClockwise from "@phosphor-icons/core/assets/regular/clock-counter-clockwise.svg?raw";
 import code from "@phosphor-icons/core/assets/regular/code.svg?raw";
 import copy from "@phosphor-icons/core/assets/regular/copy.svg?raw";
 import cpu from "@phosphor-icons/core/assets/regular/cpu.svg?raw";
@@ -22,15 +23,20 @@ import database from "@phosphor-icons/core/assets/regular/database.svg?raw";
 import downloadSimple from "@phosphor-icons/core/assets/regular/download-simple.svg?raw";
 import fileCode from "@phosphor-icons/core/assets/regular/file-code.svg?raw";
 import filePlus from "@phosphor-icons/core/assets/regular/file-plus.svg?raw";
+import floppyDisk from "@phosphor-icons/core/assets/regular/floppy-disk.svg?raw";
 import folderOpen from "@phosphor-icons/core/assets/regular/folder-open.svg?raw";
+import gear from "@phosphor-icons/core/assets/regular/gear.svg?raw";
 import graphicsCard from "@phosphor-icons/core/assets/regular/graphics-card.svg?raw";
 import hardDrives from "@phosphor-icons/core/assets/regular/hard-drives.svg?raw";
 import info from "@phosphor-icons/core/assets/regular/info.svg?raw";
 import key from "@phosphor-icons/core/assets/regular/key.svg?raw";
 import magicWand from "@phosphor-icons/core/assets/regular/magic-wand.svg?raw";
 import microphoneStage from "@phosphor-icons/core/assets/regular/microphone-stage.svg?raw";
+import minus from "@phosphor-icons/core/assets/regular/minus.svg?raw";
+import palette from "@phosphor-icons/core/assets/regular/palette.svg?raw";
 import plus from "@phosphor-icons/core/assets/regular/plus.svg?raw";
 import play from "@phosphor-icons/core/assets/regular/play.svg?raw";
+import speakerHigh from "@phosphor-icons/core/assets/regular/speaker-high.svg?raw";
 import pulse from "@phosphor-icons/core/assets/regular/pulse.svg?raw";
 import recycle from "@phosphor-icons/core/assets/regular/recycle.svg?raw";
 import sparkle from "@phosphor-icons/core/assets/regular/sparkle.svg?raw";
@@ -53,6 +59,7 @@ const SOURCES = {
   "caret-right": caretRight,
   check,
   "check-circle": checkCircle,
+  "clock-counter-clockwise": clockCounterClockwise,
   "circle-dashed": circleDashed,
   code,
   copy,
@@ -61,18 +68,23 @@ const SOURCES = {
   "download-simple": downloadSimple,
   "file-code": fileCode,
   "file-plus": filePlus,
+  "floppy-disk": floppyDisk,
   "folder-open": folderOpen,
+  gear,
   "graphics-card": graphicsCard,
   "hard-drives": hardDrives,
   info,
   key,
   "magic-wand": magicWand,
   "microphone-stage": microphoneStage,
+  minus,
+  palette,
   play,
   plus,
   pulse,
   recycle,
   sparkle,
+  "speaker-high": speakerHigh,
   "spinner-gap": spinnerGap,
   stop,
   "terminal-window": terminalWindow,

@@ -155,6 +155,10 @@
   --lh: 1.55;
   --lh-mono: 1.55;
 
+  /* Every glyph in the app is this box. Named because two places now need to reason about it:
+     `.icon` draws it, and `.toast__icon` centres it inside a line box. */
+  --icon-size: 16px;
+
   --tracking-caps: 0.06em;
   /* Noto Sans SC has no optical size axis, so large sizes get their tightening
      here instead of from a display cut. */
@@ -208,7 +212,16 @@
   --rail-w: 216px;
   --content-max: 1000px;
   --z-pop: 30;
+  /* Between page content and the popovers: a sticky page header must cover the content that
+     scrolls under it, and must still lose to a tooltip or a toast. */
+  --z-sticky: 20;
   --z-toast: 40;
+
+  /* --- subtitle preview defaults (overridden per voice pack) ------------- */
+  --preview-name: #a48bff;
+  --preview-text: #f2f2f2;
+  --preview-ruby: #a3a3a3;
+  --preview-countdown: #8b6cef;
 }
 
 /* One override switches the whole app to static: every transition and animation

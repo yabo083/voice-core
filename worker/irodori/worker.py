@@ -98,6 +98,127 @@ def _argv_value(flag: str) -> str | None:
     return None
 
 
+# winnt.h: ProcessPowerThrottling from PROCESS_INFORMATION_CLASS,
+# PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED.
+# ControlMask names the policy we are speaking to; StateMask says what we want it set to.
+_PROCESS_POWER_THROTTLING = 4
+_THROTTLING_VERSION = 1
+_EXECUTION_SPEED = 0x1
+
+
+def _power_throttling_api():
+    """`(ctypes, kernel32, PROCESS_POWER_THROTTLING_STATE)`, fully typed.
+
+    Imported lazily so this module still loads where `ctypes.wintypes` does not exist, and
+    typed rather than left to ctypes' defaults because the default `restype` is `c_int`:
+    `GetCurrentProcess()` returns the pseudo-handle `(HANDLE)-1`, a 32-bit `c_int` truncates
+    it, and the call then fails with ERROR_INVALID_HANDLE. Measured that failure before
+    declaring the types, which is exactly why the state is read back and logged.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class _State(ctypes.Structure):
+        _fields_ = [
+            ("Version", wintypes.ULONG),
+            ("ControlMask", wintypes.ULONG),
+            ("StateMask", wintypes.ULONG),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetCurrentProcess.argtypes = []
+    signature = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD]
+    for name in ("SetProcessInformation", "GetProcessInformation"):
+        function = getattr(kernel32, name)
+        function.argtypes = signature
+        function.restype = wintypes.BOOL
+    return ctypes, kernel32, _State
+
+
+def _read_qos() -> str:
+    """The throttling policy in force for this process, read back from the OS.
+
+    Reported next to what we asked for, because a `SetProcessInformation` that fails on a
+    locked-down box must not be indistinguishable from one that worked.
+    """
+    try:
+        ctypes, kernel32, state_type = _power_throttling_api()
+        state = state_type(Version=_THROTTLING_VERSION)
+        ok = kernel32.GetProcessInformation(
+            kernel32.GetCurrentProcess(),
+            _PROCESS_POWER_THROTTLING,
+            ctypes.byref(state),
+            ctypes.sizeof(state),
+        )
+        if not ok:
+            return f"unreadable:{ctypes.get_last_error()}"
+    except (OSError, AttributeError, ValueError) as exc:
+        return f"unreadable:{_reason(exc)}"
+    if not state.ControlMask & _EXECUTION_SPEED:
+        # Nobody has stated a policy, so Windows' own heuristic decides - and for a
+        # windowless child of a console process that heuristic means EcoQoS.
+        return "windows-heuristic"
+    return "throttle-off" if not state.StateMask & _EXECUTION_SPEED else "throttle-on"
+
+
+def _decline_eco_qos() -> str:
+    """Tell Windows never to run this process at "efficiency" speed. Returns what we asked.
+
+    MEASURED, and it is the largest single win in the synthesis path: 4486 ms -> 1609 ms per
+    utterance, same text, same seed, 32 steps, same loaded model, median of three, with a
+    control phase that put the throttle back and reproduced the slow number. Priority class
+    does nothing for it (above-normal 1604 ms, high 1660 ms, i.e. the same as normal);
+    pinning to P-cores instead of asking gets the same 3x, which is what identifies the
+    mechanism as core placement rather than clock.
+
+    Why we are throttled at all: the sampler is a single-threaded dispatch loop - roughly
+    7200 ATen dispatches per Euler step, the card idling at 40% utilization and 46 W while
+    it waits on Python - and this process is a windowless child of a console process, which
+    is exactly what Windows' QoS heuristic calls background work. Read back before this
+    call, `ControlMask` is 0: nobody asked for the throttle, the OS inferred it. An E-core
+    at reduced clock is not Windows getting it wrong, it is Windows correctly serving a
+    policy we never stated. This states it.
+
+    It lives in the worker rather than in whatever spawned it so that it travels with the
+    process: a user running this script by hand gets the same behaviour the runtime gets.
+
+    The tradeoff, stated because a tradeoff nobody can see is a bug: declining the throttle
+    asks for performance cores and full clocks for the few seconds a human is waiting on
+    audio. That is also less total energy than three times as long at low clocks, but it is
+    still a choice, and `VC_ENGINE_ECOQOS=1` hands the choice back to Windows.
+    """
+    if os.environ.get("VC_ENGINE_ECOQOS") == "1":
+        return "windows-heuristic"
+    if sys.platform != "win32":
+        return "n/a"
+    try:
+        ctypes, kernel32, state_type = _power_throttling_api()
+        state = state_type(
+            Version=_THROTTLING_VERSION, ControlMask=_EXECUTION_SPEED, StateMask=0x0
+        )
+        ok = kernel32.SetProcessInformation(
+            kernel32.GetCurrentProcess(),
+            _PROCESS_POWER_THROTTLING,
+            ctypes.byref(state),
+            ctypes.sizeof(state),
+        )
+        if not ok:
+            return f"failed:{ctypes.get_last_error()}"
+    except (OSError, AttributeError, ValueError) as exc:
+        # An OS old enough to lack the call, or a build of Python without wintypes, must
+        # still boot: this is a performance policy, not a prerequisite.
+        return f"failed:{_reason(exc)}"
+    return "throttle-off"
+
+
+# Before the imports, not after: torch's own import is several seconds of single-threaded
+# CPU work and pays the same throttle the sampler does. `_QOS_STATE` is read back from the
+# OS afterwards, so the log says what happened rather than what was attempted.
+_QOS_ASKED = _decline_eco_qos()
+_QOS_STATE = _read_qos() if sys.platform == "win32" else "n/a"
+
+
 _PORT_ARG = _argv_value("--port")
 _ROOT_ARG = _argv_value("--root")
 if _ROOT_ARG is None:
@@ -212,6 +333,9 @@ def _import_engine() -> None:
             device=device_name,
             probe_error=probe_error,
             alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+            qos_asked=_QOS_ASKED,
+            qos=_QOS_STATE,
+            cuda_graphs=os.environ.get("VC_ENGINE_CUDA_GRAPHS", "1") != "0",
         )
     except BaseException as exc:
         _IMPORT_STATE["error"] = _reason(exc)
@@ -274,6 +398,8 @@ class SynthesizeBody(BaseModel):
     voicePack: VoicePackBody | None = None
     seed: int | None = 1234
     numSteps: int = 32
+    caption: str | None = None
+    cfgScaleCaption: float | None = None
 
 
 def _checkpoint() -> Path:
@@ -535,6 +661,15 @@ def _sampling_request(body: SynthesizeBody) -> SamplingRequest:
             kwargs = {"ref_wavs": paths}
         else:
             raise ValueError(f"unsupported voicePack kind: {pack.kind}")
+    # The expression channel, and only when there is something to put in it. The engine
+    # treats caption=None and caption="" identically - it encodes "" and zeroes the caption
+    # mask either way (inference_runtime.py:1107-1216) - so an utterance without expression
+    # builds exactly the request it always did, which is what keeps its audio bit-identical
+    # to the build before this channel was plumbed.
+    if body.caption:
+        kwargs["caption"] = body.caption
+    if body.cfgScaleCaption is not None:
+        kwargs["cfg_scale_caption"] = body.cfgScaleCaption
     return SamplingRequest(text=body.text, seed=body.seed, num_steps=body.numSteps, **kwargs)
 
 
@@ -652,6 +787,10 @@ def synthesize(body: SynthesizeBody) -> dict:
             "audio_ms": duration_ms,
             "steps": body.numSteps,
             "chars": len(body.text),
+            # Only when this utterance had one: the fields _stage drops are the fields whose
+            # value is None, so an ordinary line's log record keeps the shape it had.
+            "caption_chars": len(body.caption) if body.caption else None,
+            "cfg_scale_caption": body.cfgScaleCaption,
             "seed": result.used_seed,
             "vram_peak_alloc_mb": None if peak is None else peak[0],
             "vram_peak_reserved_mb": None if peak is None else peak[1],

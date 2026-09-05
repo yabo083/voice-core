@@ -282,6 +282,59 @@ def _summary(samples: list[dict], key: str) -> dict:
     }
 
 
+def cpu_load() -> float | None:
+    """System-wide CPU utilisation right now, or None when psutil is absent.
+
+    Recorded per speak because this workload is CPU-dispatch bound, not GPU bound: the
+    sampler issues ~7200 ATen dispatches per Euler step and the card waits on Python. A
+    sibling `cargo build` therefore competes with the thing being measured, and it does it
+    invisibly - `nvidia-smi` reads 3% while `sample_rf` triples. MEASURED: identical text,
+    identical seed, five samples, 1463 -> 1471 -> 2007 -> 3573 -> 4120 ms as a build ramped
+    up on the other cores. A latency number from this harness is uninterpretable without
+    knowing whether the box was busy, so the number travels with the sample.
+    """
+    try:
+        import psutil
+    except ImportError:
+        return None
+    # interval=None reads the delta since this process last asked, which is what makes it
+    # ~free to call between speaks rather than a blocking sample.
+    return round(float(psutil.cpu_percent(interval=None)), 1)
+
+
+_SPREAD_LIMIT = 0.20
+
+
+def _spread_warning(samples: list[dict], key: str) -> str | None:
+    """`(max - min) / p50` for one metric within one text, when it exceeds what a fixed
+    workload should do.
+
+    Per text, and that is the whole subtlety: three texts of different lengths do different
+    amounts of work, so pooling them measures the text set rather than the machine. Within
+    one text it is one workload run five times at the same seed on the same pack, so the
+    spread is the machine's noise and nothing else. Past 20% means the box was contended and
+    the p50 is not a measurement of the code but of what else was running. That belongs in
+    the output, not in a plot somebody misreads later.
+    """
+    worst: tuple[float, dict, str] | None = None
+    for text_id in sorted({row["textId"] for row in samples}):
+        stats = _summary([row for row in samples if row["textId"] == text_id], key)
+        if not stats["n"] or stats["n"] < 3 or not stats["p50"]:
+            continue
+        spread = (stats["max"] - stats["min"]) / stats["p50"]
+        if worst is None or spread > worst[0]:
+            worst = (spread, stats, text_id)
+    if worst is None or worst[0] <= _SPREAD_LIMIT:
+        return None
+    spread, stats, text_id = worst
+    return (
+        f"warning    {key} spread {spread * 100:.0f}% within {text_id} over "
+        f"{stats['n']} samples ({stats['min']:.0f}-{stats['max']:.0f} ms, p50 "
+        f"{stats['p50']:.0f}); one fixed workload should not do that. Something else had "
+        "the CPU or the GPU - do not compare this p50 against another run."
+    )
+
+
 def speaker_encoder():
     """Resemblyzer's GE2E encoder on CPU, or None when it is not installed.
 
@@ -471,11 +524,14 @@ def main() -> None:
             row["vramPeakAllocMb"] = worker.get("vram_peak_alloc_mb")
             row["vramPeakReservedMb"] = worker.get("vram_peak_reserved_mb")
             row["engineMs"] = worker.get("engine_ms")
+            # Read after the speak, so it covers the window the speak was actually in.
+            row["cpuPercent"] = cpu_load()
             rows.append(row)
             print(
                 f"  {phase[:1]}{run} {text_id}: total {row['totalMs']} ms   "
                 f"synth {row['synthMs']} ms   sample_rf {row.get('sample_rf_ms')} ms   "
-                f"audio {row['durationMs']} ms",
+                f"audio {row['durationMs']} ms"
+                + ("" if row["cpuPercent"] is None else f"   cpu {row['cpuPercent']:.0f}%"),
                 flush=True,
             )
 
@@ -524,6 +580,24 @@ def main() -> None:
             f"max {max(allocs):.0f} MiB   |   reserved p50 {percentile(peaks, 50):.0f} MiB   "
             f"max {max(peaks):.0f} MiB"
         )
+
+    loads = [row["cpuPercent"] for row in measured if row.get("cpuPercent") is not None]
+    if loads:
+        print(
+            f"cpu load   p50 {percentile(loads, 50):.0f}%   max {max(loads):.0f}%   "
+            "(system-wide, sampled per speak)"
+        )
+
+    # Printed last so it is the final thing on screen: a contended run's p50 is not a
+    # measurement of the code and must not be quoted as one. Checked on the total and on
+    # the sampler, because the sampler is where contention lands first.
+    checked = ["totalMs"] + [key for key in ("sample_rf_ms",) if key in stage_keys]
+    warnings = [_spread_warning(measured, key) for key in checked]
+    warnings = [line for line in warnings if line is not None]
+    if warnings:
+        print()
+        for line in warnings:
+            print(line)
 
     summary = {
         "label": args.label,

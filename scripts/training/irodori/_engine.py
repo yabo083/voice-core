@@ -34,8 +34,9 @@ import _layout  # noqa: E402
 # backend script never imports two modules to report one event.
 install_root = _layout.install_root
 utf8_stdout = _layout.utf8_stdout
-add_json_flag = _layout.add_json_flag
-json_mode = _layout.json_mode
+add_progress_flags = _layout.add_progress_flags
+progress_mode = _layout.progress_mode
+decline_eco_qos = _layout.decline_eco_qos
 json_enabled = _layout.json_enabled
 emit = _layout.emit
 guard = _layout.guard

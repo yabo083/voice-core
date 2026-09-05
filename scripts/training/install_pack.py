@@ -376,10 +376,9 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="Print the plan and the JSON entry, change nothing."
     )
-    _layout.add_json_flag(parser)
+    _layout.add_progress_flags(parser)
     args = parser.parse_args()
-    if args.json:
-        _layout.json_mode()
+    _layout.progress_mode(args, STAGE)
     _layout.guard(STAGE, lambda: install(args))
 
 

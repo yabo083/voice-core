@@ -11,6 +11,7 @@
 // panics have to go somewhere while the app is being worked on.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod asset;
 mod caption;
 mod config_edit;
 mod config_view;
@@ -76,19 +77,25 @@ fn main() {
             config_edit::register_pack,
             config_edit::remove_pack,
             config_edit::import_avatar,
-            config_edit::pack_manifest,
-            config_view::config_files,
+            asset::pack_avatar,
             config_view::pack_manifest_file,
             config_view::pack_effective,
+            config_view::settings_read,
+            config_view::settings_history,
+            config_view::pack_config,
+            config_view::speak_preview,
+            config_edit::settings_write,
+            config_edit::settings_restore,
+            config_edit::pack_config_write,
             supervise::start_stack,
             supervise::stop_stack,
             usage::resource_usage,
             shell::open_path,
-            training::training_preflight,
-            training::start_training,
-            training::cancel_training,
+            training::training_runs,
+            training::training_scratch,
+            training::training_log,
             training::install_trained_pack,
-            training::training_result,
+            training::training_discard,
         ])
         .build(tauri::generate_context!());
 

@@ -43,22 +43,17 @@ pub struct StreamRun {
     busy: bool,
     /// A cancelled run exits non-zero. That is not a failure to report as one.
     cancelled: bool,
-    /// What the run is for, when the caller has more than one thing it could be running:
-    /// the training screen has to know which voice the live job belongs to after the panel
-    /// has been restarted, and the event stream does not say.
-    label: Option<String>,
 }
 
 impl StreamRun {
     /// Take the slot, or report that it is taken. Refusing is the right answer: two runs
     /// into one set of directories is not something to queue.
-    pub fn claim(&mut self, label: Option<String>) -> bool {
+    pub fn claim(&mut self) -> bool {
         if self.busy {
             return false;
         }
         self.busy = true;
         self.cancelled = false;
-        self.label = label;
         true
     }
 
@@ -68,19 +63,6 @@ impl StreamRun {
         self.busy = false;
         self.pid = None;
         self.job = None;
-        self.label = None;
-    }
-
-    pub fn busy(&self) -> bool {
-        self.busy
-    }
-
-    pub fn cancelled(&self) -> bool {
-        self.cancelled
-    }
-
-    pub fn label(&self) -> Option<String> {
-        self.label.clone()
     }
 }
 

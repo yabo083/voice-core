@@ -1237,7 +1237,8 @@ if (-not $Json) {
   Write-Host "  Settings:      $(Join-Path $script:DataDir 'config.json')  (one file; comments allowed)"
   Write-Host "  Diagnose:      $(Join-Path $script:Root 'bin\voice-core.exe') doctor"
   Write-Host '  A voice pack:  docs\training-a-voice.md'
-  Write-Host '  For agents:    skills\voice-core\SKILL.md'
+  Write-Host '  For agents:    skills\voice-core-tts\SKILL.md (说话)'
+  Write-Host '                 skills\voice-core-voice-training\SKILL.md (训练音色)'
 }
 
 # Always 0: a failed stage is a reported event, not a crashed script. Only the usage

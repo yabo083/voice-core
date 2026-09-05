@@ -20,7 +20,7 @@ use crate::config::Config;
 use crate::engine::{EngineError, PackTarget, SynthOutput, SynthRequest, TtsEngine};
 use crate::error::{ApiError, ErrorCode, RecoveryKind};
 use crate::obs::{short_id, Bus, Event, Metrics, MetricsSnapshot, Reporter};
-use crate::packs::{Registry, VoicePack};
+use crate::packs::{DialogStyle, ExpressionPrefs, Registry, VoicePack};
 use crate::spool::{Spool, SpoolStats};
 use crate::supervise::{Worker, WorkerError, WorkerStatus};
 
@@ -113,6 +113,21 @@ pub struct SpeakInput {
     pub display_seconds: Option<f64>,
     #[serde(default)]
     pub timeout_ms: Option<u64>,
+    /// Per-call subtitle appearance, and the top tier of it: this beats the pack's
+    /// manifest, which beats `config.json`'s own `dialog` section, which beats the
+    /// presenter's built-ins. Every field optional. An unknown `reveal` or a value that is
+    /// not a colour is `invalid_request`, not a field the runtime quietly drops.
+    #[serde(default)]
+    pub dialog: Option<DialogStyle>,
+    /// Caption for the engine's expression channel: a style annotation the model reads
+    /// through a head separate from the words, so it steers delivery without being spoken.
+    /// Absent means the pack's own `expression.emotion`; an explicit `""` suppresses that
+    /// default for this one call.
+    #[serde(default)]
+    pub emotion: Option<String>,
+    /// Guidance strength for `emotion`. The engine's default is 3.0.
+    #[serde(default)]
+    pub cfg_scale_caption: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -173,12 +188,22 @@ pub struct PlayedInput {
     pub by: Option<String>,
 }
 
-/// A pack id resolved against the registry: what the engine is handed, and what the
-/// pack claims it can speak.
+/// A pack id resolved against the registry: what the engine is handed, what the pack
+/// claims it can speak, and the two sections it asks to be presented and spoken with.
 struct ResolvedPack {
     id: String,
     languages: Vec<String>,
     target: PackTarget,
+    dialog: Option<DialogStyle>,
+    expression: Option<ExpressionPrefs>,
+}
+
+/// One read of the registry, answering both questions a request has of it: the pack the
+/// caller named, and the app-wide dialog tier under it. One lock, one reload check, one
+/// instant - resolving them separately could observe two different `config.json`s.
+struct Resolved {
+    pack: Option<ResolvedPack>,
+    dialog: DialogStyle,
 }
 
 struct Cancel {
@@ -262,14 +287,17 @@ impl Service {
     }
 
     /// Resolve a pack id into the engine-facing target, or an error naming the
-    /// installed alternatives.
-    fn resolve_pack(&self, id: Option<&str>) -> Result<Option<ResolvedPack>, ApiError> {
-        let Some(id) = id else { return Ok(None) };
+    /// installed alternatives. The app-wide dialog tier comes back with it.
+    fn resolve(&self, id: Option<&str>) -> Result<Resolved, ApiError> {
         let mut packs = self
             .packs
             .lock()
             .map_err(|_| ApiError::new(ErrorCode::Internal, "voice pack registry poisoned"))?;
         packs.reload_if_changed();
+        let dialog = packs.dialog().clone();
+        let Some(id) = id else {
+            return Ok(Resolved { pack: None, dialog });
+        };
         let Some(pack) = packs.get(id) else {
             let known: Vec<&str> = packs.all().iter().map(|p| p.id.as_str()).collect();
             return Err(ApiError::new(
@@ -285,14 +313,19 @@ impl Service {
                 },
             ));
         };
-        Ok(Some(ResolvedPack {
-            id: pack.id.clone(),
-            languages: pack.languages.clone(),
-            target: PackTarget {
-                kind: pack.kind.as_wire(),
-                path: packs.resolve_path(pack),
-            },
-        }))
+        Ok(Resolved {
+            pack: Some(ResolvedPack {
+                id: pack.id.clone(),
+                languages: pack.languages.clone(),
+                target: PackTarget {
+                    kind: pack.kind.as_wire(),
+                    path: packs.resolve_path(pack),
+                },
+                dialog: pack.dialog.clone(),
+                expression: pack.expression.clone(),
+            }),
+            dialog,
+        })
     }
 
     /// The whole point of this module: one path, one set of semantics.
@@ -309,6 +342,9 @@ impl Service {
             num_steps,
             display_seconds,
             timeout_ms,
+            dialog,
+            emotion,
+            cfg_scale_caption,
         } = input;
 
         if text.trim().is_empty() {
@@ -333,10 +369,65 @@ impl Service {
             check_alignment(pairs, &spoken, display_text.as_deref())?;
         }
 
-        let pack = self.resolve_pack(requested_pack.as_deref())?;
+        // Appearance and expression are caller input too, so they are checked in the same
+        // breath as the rest of it rather than reaching a presenter's brush parser or the
+        // sampler. `displaySeconds` has been a top-level field since v1 and stays one: it
+        // is the same tier as `dialog.displaySeconds`, so it wins when a request carries
+        // both, and neither is silently dropped.
+        let mut call_dialog = dialog.unwrap_or_default();
+        call_dialog.display_seconds = display_seconds.or(call_dialog.display_seconds);
+        call_dialog.check().map_err(|why| {
+            invalid(
+                why,
+                "see \"Appearance: dialog\" in docs/api.md, which ships in the install; the message names the field",
+            )
+        })?;
+        let call_expression = ExpressionPrefs {
+            emotion,
+            cfg_scale_caption,
+        };
+        call_expression
+            .check()
+            .map_err(|why| invalid(why, "the message names the field and its accepted range"))?;
+
+        let Resolved {
+            pack,
+            dialog: config_dialog,
+        } = self.resolve(requested_pack.as_deref())?;
         if let (Some(language), Some(pack)) = (language.as_deref(), pack.as_ref()) {
             check_language(language, pack)?;
         }
+
+        // Per-call over pack over `config.json`. The presenter owns the tier below this
+        // one (its built-ins), which is why an absent field stays absent here instead of
+        // being filled in with a colour the runtime has no business choosing.
+        let mut dialog = call_dialog;
+        if let Some(style) = pack.as_ref().and_then(|pack| pack.dialog.as_ref()) {
+            dialog = dialog.or(style);
+        }
+        let dialog = dialog.or(&config_dialog);
+
+        // Same precedence for expression, with one difference that matters: an explicitly
+        // empty `emotion` is a suppression, not a gap, so it must NOT fall through to the
+        // pack's default. That is the only way to hear a pack plainly without editing it.
+        let pack_expression = pack.as_ref().and_then(|pack| pack.expression.as_ref());
+        let caption = match call_expression.emotion {
+            Some(explicit) => Some(explicit),
+            None => pack_expression.and_then(|prefs| prefs.emotion.clone()),
+        }
+        .filter(|caption| !caption.trim().is_empty());
+        let cfg_scale_caption = call_expression
+            .cfg_scale_caption
+            .or_else(|| pack_expression.and_then(|prefs| prefs.cfg_scale_caption));
+        // A guidance scale with no caption to guide is a caller bug the engine cannot see:
+        // it would answer 200 with audio that knob never touched.
+        if cfg_scale_caption.is_some() && caption.is_none() {
+            return Err(invalid(
+                "cfgScaleCaption was given with no emotion caption for it to act on".to_string(),
+                "send `emotion` as well, or give the pack an `expression.emotion` in its voicepack.json",
+            ));
+        }
+
         let voice_pack_id = pack.as_ref().map(|pack| pack.id.clone());
         let pack_target = pack.map(|pack| pack.target);
 
@@ -386,7 +477,9 @@ impl Service {
             gaps: script.gaps,
             display_text,
             ruby_pairs,
-            display_seconds,
+            dialog,
+            caption,
+            cfg_scale_caption,
             voice_pack_id: voice_pack_id.clone(),
             pack: pack_target,
             seed,
@@ -745,7 +838,12 @@ struct SynthJob {
     gaps: Vec<u32>,
     display_text: Option<String>,
     ruby_pairs: Option<Vec<RubyPair>>,
-    display_seconds: Option<f64>,
+    /// This utterance's appearance, already resolved through every tier the runtime owns.
+    dialog: DialogStyle,
+    /// Expression caption, already resolved (per-call over the pack's). Empty is `None`:
+    /// the engine treats an empty caption as no caption, so there is one representation.
+    caption: Option<String>,
+    cfg_scale_caption: Option<f64>,
     voice_pack_id: Option<String>,
     pack: Option<PackTarget>,
     seed: Option<u64>,
@@ -898,6 +996,15 @@ impl SynthJob {
             record["segments"] = self.segments.len().into();
             record["pauseMs"] = self.gaps.iter().sum::<u32>().into();
         }
+        // Same rule for expression: present only when this utterance actually had one, so
+        // "why did that line sound different" is answerable from the same file as its
+        // latency, and an ordinary line's record is byte-for-byte what it always was.
+        if let Some(caption) = self.caption.as_deref() {
+            record["caption"] = caption.into();
+            if let Some(scale) = self.cfg_scale_caption {
+                record["cfgScaleCaption"] = scale.into();
+            }
+        }
         self.metrics.record(record);
 
         self.bus.publish(Event::Speech {
@@ -911,7 +1018,7 @@ impl SynthJob {
             voice_pack_id: self.voice_pack_id.clone(),
             duration_ms: output.duration_ms,
             sample_rate: output.sample_rate,
-            display_seconds: self.display_seconds,
+            dialog: self.dialog.clone(),
         });
 
         Ok(SpeakOutput {
@@ -1016,6 +1123,10 @@ impl SynthJob {
                     pack: self.pack.clone(),
                     seed: self.seed,
                     num_steps: self.num_steps,
+                    // Every segment of a `[pause:N]`-split line carries it: the caption is
+                    // how the whole utterance is delivered, not a property of one piece.
+                    caption: self.caption.as_deref(),
+                    cfg_scale_caption: self.cfg_scale_caption,
                     out_path,
                 },
                 deadline,
@@ -1294,6 +1405,14 @@ fn mismatch(field: &str, source_name: &str, message: String) -> ApiError {
              that does not"
         ),
     )
+}
+
+/// A caller-bug rejection with both halves a caller needs: the message names the field and
+/// the value it did not like, the recovery names the fix. Used for the fields whose rules
+/// live in `packs.rs` (appearance, expression), so the rule and its error stay one thing.
+fn invalid(message: String, detail: &'static str) -> ApiError {
+    ApiError::new(ErrorCode::InvalidRequest, message)
+        .with_recovery(RecoveryKind::FixRequest, detail)
 }
 
 /// First `chars` characters, marked when there is more. Error messages quote the
@@ -1649,6 +1768,8 @@ mod tests {
                 kind: "lora-adapter",
                 path: String::new(),
             },
+            dialog: None,
+            expression: None,
         };
         check_language("ja-JP", &pack).unwrap();
         let err = check_language("zh-CN", &pack).unwrap_err();

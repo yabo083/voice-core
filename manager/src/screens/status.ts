@@ -1,4 +1,4 @@
-// Status: is it up, what is it holding, and how does a caller reach it.
+// Status: is it up, what is it holding, and where does this install live.
 //
 // The runtime being down is the normal state on first run, so `reachable: false`
 // renders as a calm fact with a Start button in the command bar. Two different
@@ -10,18 +10,19 @@
 // This screen is also where the deployment lives after it has been done once: the
 // 环境 card carries the four dependencies as chips and a 检查环境 button, which is the
 // only door back to the deploy page once its rail item retires.
+//
+// There is deliberately no API card here, and no paste-ready speak call: the endpoint, the
+// token and the call itself were a reference manual rendered into a window. An agent reads
+// skills\voice-core-tts\SKILL.md, or skills\voice-core-voice-training\SKILL.md when the job is
+// making a new voice, and both ship beside the binary; an integrator reads docs\api.md, which
+// ships too. So the 使用说明 card carries only the two sentences that hand an agent one of those
+// files, and the 环境 card carries the pair of directories, because opening a folder is not
+// something either document can do.
 
 import { el, fill } from "../dom";
 import { dirName, formatBytes, formatDuration, formatPercent } from "../format";
 import { icon, type IconName } from "../icons";
-import {
-  RUNTIME_BASE_URL,
-  ipcMessage,
-  startStack,
-  stopStack,
-  type Inventory,
-  type StackState,
-} from "../ipc";
+import { ipcMessage, startStack, stopStack, type Inventory, type StackState } from "../ipc";
 import { inventory, refreshStatus, stack, status, tick, usage } from "../state";
 import { toast } from "../toast";
 import {
@@ -37,9 +38,17 @@ import {
   type Tone,
 } from "../ui";
 
-/** The sentence the copy-paste snippets use. Japanese because that is what the only
- *  backend speaks; the caller is the one who translates. */
-const SPEAK_TEXT = "おかえりなさい、先生。";
+/** A directory a human opens by hand: the label, the path itself, and the button that
+ *  reveals it in Explorer. */
+function pathRow(label: string, path: string): HTMLElement {
+  return el(
+    "div",
+    { class: "wiring__path" },
+    el("span", { text: label }),
+    pathText(path, 60),
+    openButton(path),
+  );
+}
 
 function tile(label: string, value: string, sub?: string, tone: Tone = "idle"): HTMLElement {
   return el(
@@ -71,7 +80,10 @@ export function createStatusScreen(): StatusScreen {
       }),
     ],
   });
-  const wiring = panel({ title: "使用方式" });
+
+  // Two sentences and nothing else. The wall of prose this replaced was a document rendered
+  // into a window; a skill file is the document, and it already ships.
+  const guide = panel({ title: "使用说明", hint: "把其中一句粘贴给 agent，它自己去读技能文件。" });
 
   const cmdLeft = el("div", { class: "cmdbar__left" });
   const cmdRight = el("div", { class: "cmdbar__right" });
@@ -93,7 +105,7 @@ export function createStatusScreen(): StatusScreen {
       // 5 s poll to prove it would make a working button look dead.
       window.setTimeout(() => void refreshStatus(), 1200);
     } catch (err: unknown) {
-      toast(`${start ? "启动" : "停止"}失败：${ipcMessage(err)}`, "fail");
+      toast(`${start ? "启动" : "停止"}服务失败：${ipcMessage(err)}`, "fail");
     } finally {
       busy = false;
       renderControls();
@@ -159,25 +171,25 @@ export function createStatusScreen(): StatusScreen {
       el(
         "div",
         { class: "procs" },
-        procRow("runtime 服务", processes.runtime, "pulse"),
-        procRow("字幕弹窗", processes.presenter, "microphone-stage"),
+        procRow("运行时服务", processes.runtime, "pulse"),
+        procRow("字幕窗口", processes.presenter, "microphone-stage"),
         procRow("音色模型", processes.model_loaded, "waveform", ["已加载", "未加载"]),
       ),
       current.reachable && body !== null
         ? el("p", {
             class: "panel__meta",
-            text: `${body.name} ${body.runtimeVersion} · API v${body.apiVersion} · 已运行 ${formatDuration(body.uptimeMs)}`,
+            text: `${body.name} ${body.runtimeVersion} · API v${body.apiVersion} · 运行时间 ${formatDuration(body.uptimeMs)}`,
           })
         : null,
       // Only a real error is worth a block: "not listening" is already said by the
       // three rows above and by the rail.
       !current.reachable && current.error !== null && processes.runtime
-        ? note("fail", "运行时没有应答", el("p", { class: "note__detail", text: current.error }))
+        ? note("fail", "运行时无响应", el("p", { class: "note__detail", text: current.error }))
         : null,
       body !== null && body.worker.missing.length > 0
         ? note(
             "warn",
-            "有资源不在位",
+            "存在缺失依赖或资源",
             el(
               "ul",
               { class: "missing" },
@@ -207,10 +219,10 @@ export function createStatusScreen(): StatusScreen {
         el(
           "div",
           { class: "tiles" },
-          tile("runtime 服务", "已停止"),
-          tile("音色引擎", "未启动"),
-          tile("显存", "未占用"),
-          tile("内存", "-"),
+          tile("运行时服务", "已停止"),
+          tile("语音引擎", "未启动"),
+          tile("显存占用", "空闲"),
+          tile("内存占用", "-"),
           tile("音色包", "-"),
         ),
       );
@@ -223,7 +235,7 @@ export function createStatusScreen(): StatusScreen {
       : worker.modelLoaded
         ? "已加载"
         : worker.ready
-          ? "已启动，模型未加载"
+          ? "运行中（模型未加载）"
           : "启动中";
     const engineTone: Tone = !worker.running ? "idle" : worker.modelLoaded ? "ok" : "warn";
 
@@ -238,15 +250,15 @@ export function createStatusScreen(): StatusScreen {
     const vram =
       use !== null && use.engineGpuMib !== null
         ? `${(use.engineGpuMib / 1024).toFixed(2)} GiB`
-        : (card ?? (worker.modelLoaded ? "模型驻留中" : worker.running ? "已释放" : "未占用"));
+        : (card ?? (worker.modelLoaded ? "模型驻留中" : worker.running ? "已释放" : "空闲"));
     const vramSub =
       use !== null && use.engineGpuMib !== null
-        ? (card === null ? undefined : `整卡 ${card}`)
+        ? (card === null ? undefined : `显卡总计 ${card}`)
         : card === null
           ? undefined
           : worker.modelLoaded
-            ? "整卡占用；驱动不按进程细分"
-            : "整卡占用";
+            ? "显卡总占用（显卡驱动未提供进程粒度指标）"
+            : "显卡总占用";
 
     fill(
       metrics.body,
@@ -254,31 +266,31 @@ export function createStatusScreen(): StatusScreen {
         "div",
         { class: "tiles" },
         tile(
-          "runtime 服务",
-          `已运行 ${formatDuration(body.uptimeMs)}`,
+          "运行时服务",
+          `运行时间 ${formatDuration(body.uptimeMs)}`,
           `${body.name} ${body.runtimeVersion}`,
           "ok",
         ),
         tile(
-          "音色引擎",
+          "语音引擎",
           engineText,
-          worker.running ? `已运行 ${formatDuration(worker.uptimeMs)}` : undefined,
+          worker.running ? `运行时间 ${formatDuration(worker.uptimeMs)}` : undefined,
           engineTone,
         ),
-        tile("显存", vram, vramSub, worker.modelLoaded ? "warn" : "idle"),
+        tile("显存占用", vram, vramSub, worker.modelLoaded ? "warn" : "idle"),
         tile(
-          "内存",
+          "内存占用",
           mem === null ? "-" : `${(mem / 1024).toFixed(2)} GiB`,
-          use === null || !running ? undefined : `其中引擎 ${(use.rssEngineMib / 1024).toFixed(2)} GiB`,
+          use === null || !running ? undefined : `引擎占用 ${(use.rssEngineMib / 1024).toFixed(2)} GiB`,
         ),
         tile(
-          "空闲回收",
-          body.idleStopMs === 0 ? "已关闭" : formatDuration(body.idleStopMs),
+          "自动回收",
+          body.idleStopMs === 0 ? "未启用" : formatDuration(body.idleStopMs),
           `已空闲 ${formatDuration(worker.idleMs)}`,
         ),
         tile("音色包", `${body.voicePacks} 个`, undefined, body.voicePacks === 0 ? "fail" : "ok"),
-        tile("字幕订阅者", `${body.presenters} 个`),
-        tile("进行中的请求", `${body.inFlight} 个`),
+        tile("字幕客户端", `${body.presenters} 个`),
+        tile("并发请求", `${body.inFlight} 个`),
       ),
       el(
         "div",
@@ -286,7 +298,7 @@ export function createStatusScreen(): StatusScreen {
         el(
           "div",
           { class: "spool__head" },
-          el("p", { class: "spool__label", text: "音频暂存" }),
+          el("p", { class: "spool__label", text: "音频缓存池" }),
           el("span", {
             class: "spool__value",
             text: `${body.spool.entries} 个 · ${formatBytes(body.spool.bytes)} / ${formatBytes(body.spool.maxBytes)} · ${formatPercent(body.spool.bytes, body.spool.maxBytes)}`,
@@ -297,8 +309,12 @@ export function createStatusScreen(): StatusScreen {
     );
   }
 
-  /** The four dependencies as outcomes only. The detail, the paths and the re-run
-   *  live one click away behind 检查环境, which is the deploy page. */
+  /** The four dependencies as outcomes only. Their paths, the detail and the re-run live one
+   *  click away behind 检查环境, which is the deploy page.
+   *
+   *  The install's own two directories are the exception and stay here: they are what a
+   *  human reaches for when nothing is wrong - token, logs and config on one side, the
+   *  binaries and SKILL.md on the other - and no document can open a folder. */
   function renderEnv(inv: Inventory | null): void {
     if (inv === null) {
       fill(
@@ -320,6 +336,10 @@ export function createStatusScreen(): StatusScreen {
       ["microphone-stage", `音色包 ${inv.packs.length}`, inv.packs.length > 0],
     ];
 
+    // runtime_json is always <data dir>\runtime.json, whether the file exists or not,
+    // which makes it the only handle this window has on the install layout.
+    const dataDir = dirName(inv.runtime_json);
+
     fill(
       env.body,
       el(
@@ -331,100 +351,43 @@ export function createStatusScreen(): StatusScreen {
             { class: "procs__item" },
             icon(glyph, "procs__icon"),
             el("span", { class: "procs__label", text: label }),
-            ok ? chip("就绪", "ok", "check-circle") : chip("缺少", "warn", "warning"),
+            ok ? chip("就绪", "ok", "check-circle") : chip("缺失", "warn", "warning"),
           ),
         ),
+      ),
+      el(
+        "div",
+        { class: "wiring__paths" },
+        pathRow("数据目录", dataDir),
+        pathRow("安装目录", dirName(dataDir)),
       ),
     );
   }
 
-  function renderWiring(inv: Inventory | null): void {
-    if (inv === null) {
-      fill(
-        wiring.body,
-        el(
-          "div",
-          { class: "skeletons", "aria-hidden": "true" },
-          [1, 2, 3].map(() => el("div", { class: "skeleton" })),
-        ),
-      );
-      return;
-    }
-
-    // runtime_json is always <data dir>\runtime.json, whether the file exists or
-    // not, which makes it the only handle this window has on the install layout.
-    const dataDir = dirName(inv.runtime_json);
-    const installRoot = dirName(dataDir);
-    const tokenPath = `${dataDir}\\token.txt`;
-    const cliPath = `${installRoot}\\bin\\voice-core.exe`;
-
-    // Same reason the button sends one: a snippet without a voice is a snippet that
-    // fails on paste.
-    const voice = inv.packs[0]?.id ?? "<voice-pack-id>";
-    const snippet = [
-      `$t = (Get-Content -Raw '${tokenPath}').Trim()`,
-      `curl.exe -s -X POST ${RUNTIME_BASE_URL}/api/speak \``,
-      `  -H "Authorization: Bearer $t" -H "Content-Type: application/json" \``,
-      `  --data-raw '{"text":"${SPEAK_TEXT}","voicePackId":"${voice}"}'`,
-    ].join("\n");
-
-    // The handoff to somebody else's agent, in English because that is the language a
-    // model reasons in most reliably and this string is not read by the user. It
-    // teaches nothing itself - it points at the skill file that ships in the install
-    // tree, because a prompt goes stale and a file next to the binary does not. The
-    // three facts it does state are the ones an agent gets wrong on its own: prefer the
-    // CLI, HTTP is for building on the runtime, and a cold start is not a hang.
-    const prompt = [
-      "This machine has voice-core: local TTS that can make you speak out loud (synthesize + play + subtitle popup).",
-      `Read this first and follow it: ${installRoot}\\skills\\voice-core\\SKILL.md`,
-      `Default to the CLI: ${cliPath}`,
-      "Use the HTTP API only when building software on voice-core-runtime (event stream, concurrency, raw audio).",
-      "First utterance cold-starts in 20-60s; allow 120s before calling it a timeout.",
-    ].join("\n");
+  /** Both sentences name the skill first and the shipped file second: an agent that already
+   *  has the skill installed under %USERPROFILE%\.agents\skills only needs the name, and one
+   *  that does not can read the copy this install carries. Same file either way, which is why
+   *  one sentence covers both cases. */
+  function renderGuide(inv: Inventory | null): void {
+    // Static content, so there is nothing to draw before the layout is known - and the card
+    // itself is not mounted until then either.
+    if (inv === null) return;
+    const root = dirName(dirName(inv.runtime_json));
 
     fill(
-      wiring.body,
+      guide.body,
       copyRow({
-        label: "给 AI 的提示词",
-        value: prompt,
-        glyph: "book-open-text",
-        block: true,
-        what: "提示词",
-      }),
-      copyRow({ label: "端点地址", value: RUNTIME_BASE_URL, glyph: "pulse", what: "端点地址" }),
-      copyRow({ label: "令牌文件", value: tokenPath, glyph: "key", what: "令牌路径" }),
-      copyRow({
-        label: "speak 请求（PowerShell）",
-        value: snippet,
-        glyph: "terminal-window",
-        block: true,
-        what: "请求片段",
+        label: "日常出声",
+        value: `用 voice-core-tts 技能在这台机器上出声。没装这个技能就读 ${root}\\skills\\voice-core-tts\\SKILL.md，是同一份文件。`,
+        glyph: "microphone-stage",
+        what: "日常出声的说明",
       }),
       copyRow({
-        label: "命令行等价写法",
-        value: `${cliPath} speak --voice ${voice} --text "${SPEAK_TEXT}" --play auto`,
-        glyph: "waveform",
-        block: true,
-        what: "命令行写法",
+        label: "训练新音色",
+        value: `用 voice-core-voice-training 技能训练一个新音色包。没装这个技能就读 ${root}\\skills\\voice-core-voice-training\\SKILL.md，是同一份文件。`,
+        glyph: "magic-wand",
+        what: "训练新音色的说明",
       }),
-      el(
-        "div",
-        { class: "wiring__paths" },
-        el(
-          "div",
-          { class: "wiring__path" },
-          el("span", { text: "数据目录" }),
-          pathText(dataDir, 60),
-          openButton(dataDir),
-        ),
-        el(
-          "div",
-          { class: "wiring__path" },
-          el("span", { text: "安装目录" }),
-          pathText(installRoot, 60),
-          openButton(installRoot),
-        ),
-      ),
     );
   }
 
@@ -438,11 +401,11 @@ export function createStatusScreen(): StatusScreen {
         cards,
         emptyState({
           glyph: "download-simple",
-          title: "还没有部署",
+          title: "服务尚未部署",
           lines: [],
           actions: [
             button({
-              label: "开始部署",
+              label: "前往部署",
               kind: "primary",
               glyph: "download-simple",
               onClick: (ev: MouseEvent) => navigate("deploy", ev),
@@ -452,7 +415,7 @@ export function createStatusScreen(): StatusScreen {
       );
       return;
     }
-    fill(cards, service.root, metrics.root, env.root, wiring.root);
+    fill(cards, service.root, metrics.root, env.root, guide.root);
   }
 
   status.subscribe(() => {
@@ -471,7 +434,7 @@ export function createStatusScreen(): StatusScreen {
   });
   inventory.subscribe((inv) => {
     renderEnv(inv);
-    renderWiring(inv);
+    renderGuide(inv);
     renderShape();
     renderControls();
   });

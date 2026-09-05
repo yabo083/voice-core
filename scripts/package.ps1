@@ -11,7 +11,12 @@
 #                       worker/irodori/worker.py, engine/ (engine source tree)
 #   <out>/models/       huggingface/hub/... (weights)
 #   <out>/data/         token.txt, config.json (voicePacks seeded), voicepacks/, logs/, spool/
-#   <out>/skills/       voice-core/SKILL.md — the agent-facing contract
+#   <out>/skills/       voice-core-tts/SKILL.md (speaking) and
+#                       voice-core-voice-training/SKILL.md (training a pack) — the two
+#                       agent-facing contracts. The installer also places both under
+#                       %USERPROFILE%\.agents\skills\<name>\, where an agent finds them
+#                       without being handed a path.
+#   <out>/docs/         api.md — the HTTP contract, for somebody building on the runtime
 #   <out>/scripts/      bootstrap.ps1, training/ — provisioning and training kits
 #
 # The root holds exactly ONE executable, and the report at the bottom asserts it. That is the
@@ -58,7 +63,12 @@ param(
   [string]$EngineVenv = "",
 
   # Engine source root: the directory that contains webui\Irodori-TTS. Same rule as above,
-  # with VC_ENGINE_ROOT.
+  # with VC_ENGINE_ROOT. What ships in there is OUR FORK of the engine rather than pristine
+  # upstream - github.com/yabo083/Irodori-TTS on branch `voice-core`, taken from upstream
+  # Aratako/Irodori-TTS at 8224daf, still MIT and with upstream's LICENSE byte-identical.
+  # The branch carries the inference latency patches this release's numbers were measured
+  # with; FORK.md at its root lists them and docs/adr/0002-engine-fork.md records why we own
+  # it. A tree sitting on upstream `main` packages a working engine, just a slower one.
   [string]$EngineRoot = "",
 
   # HuggingFace cache to bundle with -IncludeModels. Same rule as the two above, with
@@ -89,7 +99,10 @@ $repo = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
 # An installed product is the usual source on a machine that has one: it owns
 # runtime\python and runtime\engine, which is exactly this pair. Hence env vars rather
-# than a guessed path - see docs/getting-started.md.
+# than a guessed path - see docs/getting-started.md. VC_ENGINE_ROOT must point at a tree
+# whose webui\Irodori-TTS is our fork on branch `voice-core` (github.com/yabo083/Irodori-TTS);
+# `git -C <root>\webui\Irodori-TTS branch --show-current` is how to check before a release
+# build, because upstream `main` packages an engine ~2.4x slower per utterance.
 if (-not $EngineVenv) { $EngineVenv = $env:VC_ENGINE_VENV }
 if (-not $EngineRoot) { $EngineRoot = $env:VC_ENGINE_ROOT }
 if ($IncludeEngine -and (-not $EngineVenv -or -not $EngineRoot)) {
@@ -233,6 +246,25 @@ Remedy:
   }
 }
 
+# A GUI built by plain `cargo build --release` looks fine and is useless: without the
+# `custom-protocol` feature that `tauri build` passes, `generate_context!` embeds no assets and
+# the window loads `devUrl` (http://localhost:1420) instead of the bundle, so the app comes up
+# blank on a machine with no dev server. It costs two people half an hour each to diagnose from
+# the symptom, and the two artefacts differ by half their size, so refuse the wrong one here.
+if ($guiExeResolved) {
+  $guiBytes = (Get-Item $guiExeResolved).Length
+  if ($guiBytes -lt 15MB) {
+    throw @"
+$guiExeResolved is $([math]::Round($guiBytes / 1MB, 1)) MB, which is too small to contain the
+embedded frontend (a correct build is ~21 MB). That happens when it was built with
+``cargo build --release`` instead of the tauri CLI, which also runs the Vite build and passes the
+custom-protocol feature. The window would come up blank.
+Remedy:
+  cd manager; .\node_modules\.bin\tauri build --no-bundle
+"@
+  }
+}
+
 if ($SkipGui) {
   Warn "-SkipGui: this tree gets NO VoiceCore.exe at its root."
   Warn "  Nothing in it starts the runtime or the subtitle presenter, the installer will create"
@@ -256,14 +288,34 @@ Copy-Item $clientExe (Join-Path $outRoot 'bin')
 Copy-Tree $presenterDir (Join-Path $outRoot 'bin\presenter')
 Copy-Item (Join-Path $repo 'worker\irodori\worker.py') (Join-Path $outRoot 'runtime\worker\irodori')
 
-# The agent-facing contract travels WITH the install: an agent that finds the tree has to
-# be able to learn the surface from it, without the development repo.
+# The agent-facing contracts travel WITH the install: an agent that finds the tree has to
+# be able to learn the surface from it, without the development repo. Two skills, because a
+# daily "say this line" call has no business dragging the whole training pipeline into
+# somebody's context: voice-core-tts speaks, voice-core-voice-training makes a new pack.
 Copy-Tree (Join-Path $repo 'skills') (Join-Path $outRoot 'skills')
 
-# NO docs. The markdown under docs/ is our development documentation: it stays on the
-# machine it is written on, out of the repo and out of the artefact. What an install has to
-# be self-explanatory about is covered by `skills/voice-core/SKILL.md` (for agents) and
-# README.txt (for a human), both of which are written to stand alone.
+# Asserted rather than assumed: these two paths are what the installer's [Files] section
+# copies into %USERPROFILE%\.agents\skills\, and what the 状态 screen's 使用说明 card tells an
+# agent to read. A tree missing one of them is a broken product, not a lighter package.
+foreach ($skill in 'voice-core-tts', 'voice-core-voice-training') {
+  $shipped = Join-Path $outRoot "skills\$skill\SKILL.md"
+  if (-not (Test-Path $shipped)) { throw "skills\$skill\SKILL.md missing from the package tree" }
+}
+
+# ONE doc, and only that one. The rest of the markdown under docs/ is our development
+# documentation: it stays on the machine it is written on, out of the repo (.gitignore keeps
+# it there) and out of the artefact. api.md is the exception because it is a published
+# interface rather than a note to ourselves - the HTTP contract somebody building on the
+# runtime reads - so it ships, and it is the ONLY thing docs/ contributes to the tree. The
+# other files an install is self-explanatory through are `skills\voice-core-tts\SKILL.md` and
+# `skills\voice-core-voice-training\SKILL.md` (for agents) and README.txt (for a human).
+$apiDoc = Join-Path $repo 'docs\api.md'
+if (Test-Path $apiDoc) {
+  New-Item -ItemType Directory -Force -Path (Join-Path $outRoot 'docs') | Out-Null
+  Copy-Item $apiDoc (Join-Path $outRoot 'docs\api.md')
+} else {
+  Warn "docs\api.md not found in repo; the package will ship without the HTTP contract"
+}
 
 # Provisioning and training scripts: bootstrap wizard and voice training kit.
 $bootstrapScript = Join-Path $repo 'scripts\bootstrap.ps1'
@@ -384,6 +436,18 @@ if ($IncludeEngine) {
     Warn "pyvenv.cfg home is missing ($baseHome); the bundled venv will not run until repaired"
   }
 
+  # The engine's `.git` TRAVELS ON PURPOSE. Copy-Tree is robocopy /E with no exclusions, so
+  # webui\Irodori-TTS\.git lands in the package - 597 KB of a 3.19 MB engine tree, measured,
+  # against a ~148 MB artefact. Keep it: what we ship there is our fork (see the -EngineRoot
+  # comment above), and FORK.md promises an installed machine two things that only exist if
+  # the repository is present. `git -C runtime\engine\webui\Irodori-TTS log --oneline` answers
+  # "which engine do I actually have" definitively, and `git checkout origin/main -- .` gets a
+  # user back to pristine upstream with no network fetch - which is how you find out whether
+  # the fork caused a bug. A documented recovery path that only works on a developer's box is
+  # not a recovery path. So this is not an oversight to clean up later: deleting it to save
+  # 597 KB silently deletes the recovery path FORK.md documents. Note the licence does not
+  # depend on any of this - upstream's LICENSE and our FORK.md are plain files in the tree, so
+  # a package with .git stripped would still be compliant. It would just be less recoverable.
   Step "engine source ($(Format-Size (Measure-Tree (Join-Path $EngineRoot 'webui'))))"
   Copy-Tree (Join-Path $EngineRoot 'webui') (Join-Path $outRoot 'runtime\engine\webui')
 }
@@ -426,7 +490,9 @@ bin\presenter\ 是 VoiceCore.exe 拉起的字幕进程，不要直接双击。
 配置有两处：全局在 data\config.json（对话框、快捷键、装了哪些音色包），
 每个音色包自己带 voicepack.json（名字、角色、头像、字幕样式）；同字段包内的优先。
 日志在 data\logs\。
-AI agent 接入与接口规范：skills\voice-core\SKILL.md
+让 AI agent 出声：skills\voice-core-tts\SKILL.md
+训练新的音色包：skills\voice-core-voice-training\SKILL.md
+二次开发的 HTTP 接口：docs\api.md
 '@
 
 # -- report --------------------------------------------------------------------

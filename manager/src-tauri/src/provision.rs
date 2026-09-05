@@ -38,7 +38,7 @@ pub async fn provision(app: AppHandle, opts: ProvisionOpts) -> Result<(), String
                 host.root.display()
             )
         })?;
-        if !jsonstream::lock(&host.provision).claim(None) {
+        if !jsonstream::lock(&host.provision).claim() {
             return Err("a provision run is already in progress".to_string());
         }
         script

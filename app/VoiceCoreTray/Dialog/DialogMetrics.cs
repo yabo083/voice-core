@@ -45,6 +45,9 @@ internal sealed class DialogMetrics(string logDir)
 
     /// <summary>Clip length from the WAV header, ms. 0 when the line had no audio.</summary>
     public double AudioMs;
+    /// <summary>Which reveal preset ran. A voice pack decides this per line, so a log line
+    /// that does not name it cannot explain what was seen on screen.</summary>
+    public RevealStyle RevealMode;
     /// <summary>Reveal budget handed to the typewriter, ms.</summary>
     public double RevealBudgetMs;
     /// <summary>First revealed character, ms after the line went up.</summary>
@@ -125,6 +128,8 @@ internal sealed class DialogMetrics(string logDir)
             line.Append(CultureInfo.InvariantCulture, $",\"replaysSkipped\":{ReplaysSkipped}");
             line.Append(CultureInfo.InvariantCulture, $",\"maxTickGapMs\":{MaxTickGapMs:0.##}");
             line.Append(CultureInfo.InvariantCulture, $",\"audioMs\":{AudioMs:0}");
+            line.Append(CultureInfo.InvariantCulture,
+                $",\"reveal\":\"{RevealMode.ToString().ToLowerInvariant()}\"");
             line.Append(CultureInfo.InvariantCulture, $",\"revealBudgetMs\":{RevealBudgetMs:0}");
             line.Append(CultureInfo.InvariantCulture, $",\"firstRevealMs\":{FirstRevealMs:0}");
             line.Append(CultureInfo.InvariantCulture, $",\"revealDoneMs\":{RevealDoneMs:0}");
@@ -143,6 +148,7 @@ internal sealed class DialogMetrics(string logDir)
         ReplayFetches = ReplayCacheHits = ReplaysSkipped = 0;
         MeasureMs = ResizeMs = MaxTickGapMs = 0;
         AudioMs = RevealBudgetMs = FirstRevealMs = RevealDoneMs = AudioDoneMs = QueuedMs = 0;
+        RevealMode = RevealStyle.Typewriter;
         QueueDepth = QueueDropped = 0;
         Truncated = false;
         _clock.Restart();

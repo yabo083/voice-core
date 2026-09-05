@@ -154,6 +154,10 @@ pub struct VoicePack {
     /// Inference preferences the pack asks for. Forwarded, never interpreted here.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub synthesis: Option<SynthesisPrefs>,
+    /// Default expression the pack asks for: what this character sounds like when the
+    /// caller says nothing. Forwarded, never interpreted here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expression: Option<ExpressionPrefs>,
     /// Absolute path of the manifest that contributed, when there was one. Frontends
     /// show it; nothing depends on it.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,14 +191,17 @@ struct Entry {
     dialog: Option<DialogStyle>,
     #[serde(default)]
     synthesis: Option<SynthesisPrefs>,
+    #[serde(default)]
+    expression: Option<ExpressionPrefs>,
 }
 
 /// Subtitle appearance a pack asks for. Every field optional: an absent one means
 /// "whatever the dialog already does", which is what makes a partial manifest useful.
 ///
-/// Carried through to frontends rather than interpreted here - the runtime has no
-/// opinion about colour.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// The runtime still has no opinion about colour - it forwards these - but it does
+/// VALIDATE them, because the alternative is a typo in a hand-edited manifest reaching a
+/// brush parser inside the presenter's event handler, where there is nothing to catch it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DialogStyle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -211,6 +218,122 @@ pub struct DialogStyle {
     pub display_seconds: Option<f64>,
 }
 
+/// The reveal animations the presenter actually implements
+/// (`app/VoiceCoreTray/Dialog/AppConfig.cs`, `enum RevealStyle`, consumed by
+/// `DialogWindow.Reveal`). The spec used to claim `instant | per-char`, which named
+/// nothing that exists in any build; this list is the truth, and validating against it
+/// here is what turns a typo into a message instead of a silent fallback to typewriter.
+pub const REVEALS: [&str; 3] = ["typewriter", "sweep", "fade"];
+
+/// Upper bound on a dwell. Ten minutes of caption is already absurd, so past it the
+/// value is a mistake with a recognisable shape: milliseconds typed into a seconds field.
+const MAX_DISPLAY_SECONDS: f64 = 600.0;
+
+/// `#rgb`, `#rrggbb` or `#aarrggbb`. Deliberately not a named-colour table: the
+/// presenter parses these into ARGB and a name it does not know would be a colour that
+/// validates here and disappears there.
+fn is_hex_color(value: &str) -> bool {
+    let Some(body) = value.strip_prefix('#') else {
+        return false;
+    };
+    matches!(body.len(), 3 | 6 | 8) && body.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+fn check_color(field: &str, value: Option<&String>) -> Result<(), String> {
+    match value {
+        Some(value) if !is_hex_color(value) => Err(format!(
+            "dialog.{field} '{value}' is not a colour: write #rgb, #rrggbb or #aarrggbb"
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn check_reveal(value: Option<&String>) -> Result<(), String> {
+    match value {
+        Some(value) if !REVEALS.contains(&value.as_str()) => Err(format!(
+            "dialog.reveal '{value}' is not a reveal mode: one of {}",
+            REVEALS.join(", ")
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn check_display_seconds(value: Option<f64>) -> Result<(), String> {
+    match value {
+        Some(value) if !(value > 0.0 && value <= MAX_DISPLAY_SECONDS) => Err(format!(
+            "dialog.displaySeconds {value} is out of range: greater than 0 and at most {MAX_DISPLAY_SECONDS}"
+        )),
+        _ => Ok(()),
+    }
+}
+
+impl DialogStyle {
+    /// Nothing was asked for, so every tier below this one answers.
+    pub fn is_empty(&self) -> bool {
+        self.name_color.is_none()
+            && self.text_color.is_none()
+            && self.ruby_color.is_none()
+            && self.countdown_color.is_none()
+            && self.reveal.is_none()
+            && self.display_seconds.is_none()
+    }
+
+    /// One tier over another, field by field: `self` wins where it spoke.
+    ///
+    /// This is `Option::or` six times, and it is the ONLY place the runtime layers
+    /// dialog tiers - per-call over pack over `config.json` - so the precedence exists
+    /// once instead of once per consumer.
+    pub fn or(self, fallback: &DialogStyle) -> DialogStyle {
+        DialogStyle {
+            name_color: self.name_color.or_else(|| fallback.name_color.clone()),
+            text_color: self.text_color.or_else(|| fallback.text_color.clone()),
+            ruby_color: self.ruby_color.or_else(|| fallback.ruby_color.clone()),
+            countdown_color: self
+                .countdown_color
+                .or_else(|| fallback.countdown_color.clone()),
+            reveal: self.reveal.or_else(|| fallback.reveal.clone()),
+            display_seconds: self.display_seconds.or(fallback.display_seconds),
+        }
+    }
+
+    /// The first thing wrong with it, named, or `Ok`. For a value that came from a
+    /// CALLER: it gets refused, because a request the runtime silently reinterpreted is
+    /// the bug this project keeps deleting.
+    pub fn check(&self) -> Result<(), String> {
+        check_color("nameColor", self.name_color.as_ref())?;
+        check_color("textColor", self.text_color.as_ref())?;
+        check_color("rubyColor", self.ruby_color.as_ref())?;
+        check_color("countdownColor", self.countdown_color.as_ref())?;
+        check_reveal(self.reveal.as_ref())?;
+        check_display_seconds(self.display_seconds)
+    }
+
+    /// Drop whatever does not pass, saying so once per field. For a value that came from
+    /// a FILE: a mistyped colour must not cost the pack its reveal mode, and refusing the
+    /// pack outright would make one bad line look like an uninstalled voice.
+    fn sanitize(&mut self, whose: &str) {
+        for (field, slot) in [
+            ("nameColor", &mut self.name_color),
+            ("textColor", &mut self.text_color),
+            ("rubyColor", &mut self.ruby_color),
+            ("countdownColor", &mut self.countdown_color),
+        ] {
+            if let Err(why) = check_color(field, slot.as_ref()) {
+                eprintln!("{whose}: {why}; ignoring that field");
+                *slot = None;
+            }
+        }
+        if let Err(why) = check_reveal(self.reveal.as_ref()) {
+            eprintln!("{whose}: {why}; ignoring that field");
+            self.reveal = None;
+        }
+        if let Err(why) = check_display_seconds(self.display_seconds) {
+            eprintln!("{whose}: {why}; ignoring that field");
+            self.display_seconds = None;
+        }
+    }
+}
+
 /// Inference parameters a pack prefers. Same rule as `DialogStyle`: absent means the
 /// program default, and the runtime only forwards what it was given.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -222,6 +345,67 @@ pub struct SynthesisPrefs {
     pub seed: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+}
+
+/// How a pack wants to be spoken: the engine's caption channel, which is a separate
+/// conditioning head from the text (`use_caption_condition` in the v4.1-Small
+/// checkpoint), and how hard to steer with it.
+///
+/// This is what lets a voice be "this character speaks softly" without every caller
+/// repeating it. Same rule as the other two sections: absent means the engine default.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionPrefs {
+    /// Caption text. Free prose the model was trained to read as style, plus the
+    /// checkpoint's 45 emoji annotations (see `skills/voice-core-tts/SKILL.md`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emotion: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg_scale_caption: Option<f64>,
+}
+
+/// Inclusive bound on `cfgScaleCaption`. The engine's own default is 3.0 and every CFG
+/// scale it takes is single-digit; 0 turns caption guidance off, and past 10 the sampler
+/// produces artefacts rather than more emotion. Out of range is refused, never clamped:
+/// a clamp is a request the caller never made, answered as if they had.
+const CFG_SCALE_CAPTION_RANGE: std::ops::RangeInclusive<f64> = 0.0..=10.0;
+
+/// Longest caption accepted. The checkpoint's own budget is 512 TOKENS
+/// (`max_caption_len` in its config), and this field is a style annotation of a few
+/// words - so a value this long is already a mistake, and refusing it here is how a
+/// pasted paragraph fails loudly instead of being truncated inside the tokenizer.
+const MAX_EMOTION_CHARS: usize = 512;
+
+impl ExpressionPrefs {
+    pub fn is_empty(&self) -> bool {
+        self.emotion.is_none() && self.cfg_scale_caption.is_none()
+    }
+
+    pub fn check(&self) -> Result<(), String> {
+        if let Some(emotion) = self.emotion.as_deref() {
+            let chars = emotion.chars().count();
+            if chars > MAX_EMOTION_CHARS {
+                return Err(format!(
+                    "expression.emotion is {chars} characters, over the {MAX_EMOTION_CHARS} this engine's caption channel accepts"
+                ));
+            }
+        }
+        match self.cfg_scale_caption {
+            Some(scale) if !CFG_SCALE_CAPTION_RANGE.contains(&scale) => Err(format!(
+                "expression.cfgScaleCaption {scale} is out of range: {}..={}",
+                CFG_SCALE_CAPTION_RANGE.start(),
+                CFG_SCALE_CAPTION_RANGE.end()
+            )),
+            _ => Ok(()),
+        }
+    }
+
+    fn sanitize(&mut self, whose: &str) {
+        if let Err(why) = self.check() {
+            eprintln!("{whose}: {why}; ignoring that section");
+            *self = Self::default();
+        }
+    }
 }
 
 /// The newest `schema` this build understands. A manifest declaring more is read for
@@ -257,6 +441,8 @@ pub struct Manifest {
     pub dialog: Option<DialogStyle>,
     #[serde(default)]
     pub synthesis: Option<SynthesisPrefs>,
+    #[serde(default)]
+    pub expression: Option<ExpressionPrefs>,
 }
 
 impl Manifest {
@@ -313,12 +499,21 @@ impl Manifest {
 struct PackSection {
     #[serde(default)]
     voice_packs: Vec<Entry>,
+    /// The app-wide subtitle appearance: the tier under every pack. The tray owns the
+    /// rest of this section (`annotationAbove` is a layout choice no pack overrides), and
+    /// serde drops what it does not know, so reading it here takes only the fields a pack
+    /// could also have asked for.
+    #[serde(default)]
+    dialog: Option<DialogStyle>,
 }
 
 pub struct Registry {
     file: PathBuf,
     data_dir: PathBuf,
     packs: Vec<VoicePack>,
+    /// `config.json`'s own `dialog` section, validated: the tier below every pack, and
+    /// what makes the panel's settings page honest without a second file.
+    dialog: DialogStyle,
     /// mtime of the bytes currently loaded. Only ever set from a mtime sampled BEFORE a
     /// successful parse, so it can be older than the file on disk but never newer.
     loaded_from: Option<SystemTime>,
@@ -345,6 +540,20 @@ fn stamps(packs: &[VoicePack]) -> Vec<(PathBuf, Option<SystemTime>)> {
         .collect()
 }
 
+/// Which file to name when a merged value has to be reported as wrong: the one the merge
+/// took it from, which is the only file editing can fix it in.
+fn blame(
+    sources: &BTreeMap<String, Source>,
+    key: &str,
+    manifest: Option<&str>,
+    config: &Path,
+) -> String {
+    match (sources.get(key), manifest) {
+        (Some(Source::Pack), Some(path)) => path.to_string(),
+        _ => native(config),
+    }
+}
+
 impl Registry {
     pub fn load(file: PathBuf, data_dir: PathBuf) -> Self {
         let mut registry = Self {
@@ -352,6 +561,7 @@ impl Registry {
             data_dir,
             packs: Vec::new(),
             loaded_from: None,
+            dialog: DialogStyle::default(),
             manifests: Vec::new(),
             complained_about: None,
         };
@@ -404,6 +614,9 @@ impl Registry {
                         .into_iter()
                         .map(|entry| self.hydrate(entry))
                         .collect();
+                    let mut dialog = section.dialog.unwrap_or_default();
+                    dialog.sanitize(&native(&self.file));
+                    self.dialog = dialog;
                     self.manifests = stamps(&hydrated);
                     self.packs = hydrated;
                     self.loaded_from = mtime;
@@ -427,6 +640,7 @@ impl Registry {
             // hiccup into "install a voice pack" on the next speak.
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 self.packs.clear();
+                self.dialog = DialogStyle::default();
                 self.loaded_from = None;
             }
             Err(err) => {
@@ -443,6 +657,13 @@ impl Registry {
 
     pub fn all(&self) -> &[VoicePack] {
         &self.packs
+    }
+
+    /// The app-wide dialog tier, under every pack and over the presenter's built-ins.
+    /// Reloaded with the rest of the file, so editing `config.json` by hand or from the
+    /// panel changes the next utterance's appearance without restarting anything.
+    pub fn dialog(&self) -> &DialogStyle {
+        &self.dialog
     }
 
     pub fn get(&self, id: &str) -> Option<&VoicePack> {
@@ -491,8 +712,33 @@ impl Registry {
             pick(&mut sources, "languages", m.languages, entry.languages).unwrap_or_default();
         let engine = pick(&mut sources, "engine", m.engine, entry.engine).unwrap_or_default();
         let character = pick(&mut sources, "character", m.character, entry.character);
-        let dialog = pick(&mut sources, "dialog", m.dialog, entry.dialog);
+        // Validated after the pick, and the complaint names the file that actually lost
+        // the field: sending someone to `config.json` for a line they wrote in
+        // `voicepack.json` is worse than saying nothing at all. A section left empty by
+        // that scrub reverts to `derived`, for the same reason `avatar` does below - the
+        // panel must never point at a value the runtime threw away.
+        let mut dialog = pick(&mut sources, "dialog", m.dialog, entry.dialog);
+        if let Some(style) = dialog.as_mut() {
+            style.sanitize(&blame(&sources, "dialog", manifest_path.as_deref(), &self.file));
+            if style.is_empty() {
+                dialog = None;
+                sources.insert("dialog".to_string(), Source::Derived);
+            }
+        }
         let synthesis = pick(&mut sources, "synthesis", m.synthesis, entry.synthesis);
+        let mut expression = pick(&mut sources, "expression", m.expression, entry.expression);
+        if let Some(prefs) = expression.as_mut() {
+            prefs.sanitize(&blame(
+                &sources,
+                "expression",
+                manifest_path.as_deref(),
+                &self.file,
+            ));
+            if prefs.is_empty() {
+                expression = None;
+                sources.insert("expression".to_string(), Source::Derived);
+            }
+        }
         // Where a pack lives is the one thing the registry is authoritative about, so
         // there is nothing to pick between: an entry without a path never deserialized.
         sources.insert("path".to_string(), Source::Config);
@@ -533,6 +779,7 @@ impl Registry {
             avatar: avatar.map(|(shown, _)| shown),
             dialog,
             synthesis,
+            expression,
             manifest: manifest_path,
             sources,
         }
@@ -541,7 +788,7 @@ impl Registry {
 
 #[cfg(test)]
 mod tests {
-    use super::{PackKind, Registry, Source};
+    use super::{DialogStyle, ExpressionPrefs, PackKind, Registry, Source};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
 
@@ -562,7 +809,7 @@ mod tests {
     /// The expected provenance map, spelled one line per field. The array length is fixed
     /// on purpose: a field that quietly stopped being recorded would render as a blank row
     /// in the settings screen, and here it is a compile error instead.
-    fn expect_sources(pairs: [(&str, Source); 9]) -> BTreeMap<String, Source> {
+    fn expect_sources(pairs: [(&str, Source); 10]) -> BTreeMap<String, Source> {
         pairs.into_iter().map(|(key, source)| (key.to_string(), source)).collect()
     }
 
@@ -602,13 +849,14 @@ mod tests {
         );
         // Nobody stated a kind; the payload on disk decides.
         assert_eq!(pack.kind, PackKind::LoraAdapter);
-        // Four fields the pack decided, two the entry did, three no file mentioned.
+        // Four fields the pack decided, two the entry did, four no file mentioned.
         assert_eq!(
             pack.sources,
             expect_sources([
                 ("avatar", Source::Pack),
                 ("character", Source::Pack),
                 ("dialog", Source::Derived),
+                ("expression", Source::Derived),
                 ("engine", Source::Config),
                 ("kind", Source::Derived),
                 ("languages", Source::Pack),
@@ -682,7 +930,7 @@ mod tests {
         // `config`, and nothing at all comes from a pack that wrote no manifest.
         assert_eq!(
             serde_json::to_string(&pack.sources).unwrap(),
-            r#"{"avatar":"derived","character":"derived","dialog":"derived","engine":"derived","kind":"derived","languages":"derived","name":"config","path":"config","synthesis":"derived"}"#
+            r#"{"avatar":"derived","character":"derived","dialog":"derived","engine":"derived","expression":"derived","kind":"derived","languages":"derived","name":"config","path":"config","synthesis":"derived"}"#
         );
 
         std::fs::remove_dir_all(&dir).unwrap();
@@ -718,6 +966,7 @@ mod tests {
                 ("avatar", Source::Derived),
                 ("character", Source::Pack),
                 ("dialog", Source::Derived),
+                ("expression", Source::Derived),
                 ("engine", Source::Derived),
                 ("kind", Source::Derived),
                 ("languages", Source::Derived),
@@ -726,6 +975,170 @@ mod tests {
                 ("synthesis", Source::Derived),
             ])
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dialog_tiers_layer_without_losing_a_field() {
+        let call = DialogStyle {
+            reveal: Some("fade".into()),
+            ..DialogStyle::default()
+        };
+        let pack = DialogStyle {
+            reveal: Some("sweep".into()),
+            name_color: Some("#ff0000".into()),
+            ..DialogStyle::default()
+        };
+        let config = DialogStyle {
+            name_color: Some("#00ff00".into()),
+            text_color: Some("#0000ff".into()),
+            display_seconds: Some(9.0),
+            ..DialogStyle::default()
+        };
+
+        let merged = call.or(&pack).or(&config);
+
+        // Each field is decided by the highest tier that spoke about THAT field, which is
+        // the whole point: a pack stating one colour must not blank the rest of the theme.
+        assert_eq!(merged.reveal.as_deref(), Some("fade"));
+        assert_eq!(merged.name_color.as_deref(), Some("#ff0000"));
+        assert_eq!(merged.text_color.as_deref(), Some("#0000ff"));
+        assert_eq!(merged.display_seconds, Some(9.0));
+        // Nothing claimed it, so it stays absent for the presenter's built-in to answer.
+        assert_eq!(merged.ruby_color, None);
+        assert!(!merged.is_empty());
+        assert!(DialogStyle::default().is_empty());
+    }
+
+    #[test]
+    fn a_reveal_mode_the_presenter_cannot_play_is_named_not_guessed() {
+        let style = DialogStyle {
+            reveal: Some("instant".into()),
+            ..DialogStyle::default()
+        };
+        let why = style.check().unwrap_err();
+        // `instant` is what the old spec claimed; the message has to say what IS playable,
+        // because silently falling back to typewriter is the bug this replaced.
+        assert!(why.contains("instant"), "{why}");
+        assert!(why.contains("typewriter, sweep, fade"), "{why}");
+
+        for good in super::REVEALS {
+            DialogStyle {
+                reveal: Some(good.into()),
+                ..DialogStyle::default()
+            }
+            .check()
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn colours_and_dwells_are_checked_by_shape() {
+        for good in ["#fff", "#a48bff", "#D98B6CEF"] {
+            DialogStyle {
+                name_color: Some(good.into()),
+                ..DialogStyle::default()
+            }
+            .check()
+            .unwrap();
+        }
+        for bad in ["a48bff", "#a48bf", "violet", "#gggggg"] {
+            let why = DialogStyle {
+                text_color: Some(bad.into()),
+                ..DialogStyle::default()
+            }
+            .check()
+            .unwrap_err();
+            assert!(why.contains("textColor"), "{bad}: {why}");
+        }
+        // Zero would be a caption that is gone before it is read, and 6000 is milliseconds
+        // typed into a seconds field.
+        for bad in [0.0, -1.0, 6000.0] {
+            DialogStyle {
+                display_seconds: Some(bad),
+                ..DialogStyle::default()
+            }
+            .check()
+            .unwrap_err();
+        }
+    }
+
+    #[test]
+    fn an_out_of_range_caption_scale_is_refused_rather_than_clamped() {
+        for bad in [-0.5, 10.5] {
+            let why = ExpressionPrefs {
+                emotion: Some("😭".into()),
+                cfg_scale_caption: Some(bad),
+            }
+            .check()
+            .unwrap_err();
+            assert!(why.contains("cfgScaleCaption"), "{why}");
+            assert!(why.contains("0..=10"), "{why}");
+        }
+        // The engine's own default and both ends of the range are legal.
+        for good in [0.0, 3.0, 10.0] {
+            ExpressionPrefs {
+                emotion: None,
+                cfg_scale_caption: Some(good),
+            }
+            .check()
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn expression_merges_like_every_other_section() {
+        let dir = scratch("expression-merge");
+        write(
+            &dir.join("config.json"),
+            r#"{ "voicePacks": [
+                 { "id": "p", "path": "voicepacks/p",
+                   "expression": { "emotion": "seeded", "cfgScaleCaption": 1.0 } }
+               ] }"#,
+        );
+        write(
+            &dir.join("voicepacks/p/voicepack.json"),
+            r#"{ "schema": 1, "expression": { "emotion": "🫶🫶 優しく" } }"#,
+        );
+
+        let registry = Registry::load(dir.join("config.json"), dir.clone());
+        let pack = &registry.all()[0];
+
+        // The whole section is one field to the merge, exactly like `dialog` and
+        // `synthesis`: the pack wrote one, so the pack's is the effective one and the
+        // entry's `cfgScaleCaption` does not leak into it.
+        let expression = pack.expression.as_ref().unwrap();
+        assert_eq!(expression.emotion.as_deref(), Some("🫶🫶 優しく"));
+        assert_eq!(expression.cfg_scale_caption, None);
+        assert_eq!(pack.sources.get("expression"), Some(&Source::Pack));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn one_bad_colour_costs_only_that_field() {
+        let dir = scratch("dialog-typo");
+        write(
+            &dir.join("config.json"),
+            r#"{ "dialog": { "reveal": "sweep", "nameColor": "puce" },
+                 "voicePacks": [{ "id": "p", "path": "voicepacks/p" }] }"#,
+        );
+        write(
+            &dir.join("voicepacks/p/voicepack.json"),
+            // `r##` because the body contains `"#`, which would close an `r#` literal.
+            r##"{ "schema": 1, "dialog": { "reveal": "nope", "textColor": "#f2f2f2" } }"##,
+        );
+
+        let registry = Registry::load(dir.join("config.json"), dir.clone());
+
+        // A mistyped value is dropped and complained about; the rest of the section
+        // survives, because refusing the pack over one line would look like an uninstall.
+        let dialog = registry.all()[0].dialog.as_ref().unwrap();
+        assert_eq!(dialog.reveal, None);
+        assert_eq!(dialog.text_color.as_deref(), Some("#f2f2f2"));
+        assert_eq!(registry.dialog().reveal.as_deref(), Some("sweep"));
+        assert_eq!(registry.dialog().name_color, None);
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

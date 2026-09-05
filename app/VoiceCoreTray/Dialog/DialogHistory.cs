@@ -1,3 +1,5 @@
+using VoiceCoreTray.Services;
+
 namespace VoiceCoreTray.Dialog;
 
 /// <summary>
@@ -12,7 +14,8 @@ namespace VoiceCoreTray.Dialog;
 public sealed class HistoryEntry
 {
     public HistoryEntry(string audioId, string displayText, string? sourceText,
-        string? character, string? avatarPath, IReadOnlyList<(string Base, string Ruby)>? rubyPairs)
+        string? character, string? avatarPath, IReadOnlyList<(string Base, string Ruby)>? rubyPairs,
+        DialogStyle? dialog)
     {
         AudioId = audioId;
         DisplayText = displayText;
@@ -20,6 +23,7 @@ public sealed class HistoryEntry
         Character = character;
         AvatarPath = avatarPath;
         RubyPairs = rubyPairs;
+        Dialog = dialog;
         Stamp = DateTime.Now.ToString("HH:mm:ss");
     }
 
@@ -32,6 +36,9 @@ public sealed class HistoryEntry
     /// <summary>The caller's alignment, kept so a backtracked line is laid out exactly the
     /// way it was when it was spoken.</summary>
     public IReadOnlyList<(string Base, string Ruby)>? RubyPairs { get; }
+    /// <summary>How this line looked when it was said, so walking back to it re-themes the
+    /// box to the pack that spoke it instead of dressing it as the newest speaker.</summary>
+    public DialogStyle? Dialog { get; }
 }
 
 /// <summary>
@@ -49,10 +56,11 @@ public sealed class DialogHistory
     public IReadOnlyList<HistoryEntry> Entries => _entries;
 
     public HistoryEntry Add(string audioId, string displayText, string? sourceText,
-        string? character, string? avatarPath, IReadOnlyList<(string Base, string Ruby)>? rubyPairs)
+        string? character, string? avatarPath, IReadOnlyList<(string Base, string Ruby)>? rubyPairs,
+        DialogStyle? dialog)
     {
         var entry = new HistoryEntry(audioId, displayText, sourceText, character, avatarPath,
-            rubyPairs);
+            rubyPairs, dialog);
         _entries.Insert(0, entry);
         if (_entries.Count > DialogTheme.HistoryCapacity)
         {

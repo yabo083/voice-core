@@ -71,7 +71,12 @@ pub enum Event {
         voice_pack_id: Option<String>,
         duration_ms: u64,
         sample_rate: u32,
-        display_seconds: Option<f64>,
+        /// How this line should look, already resolved: per-call over the pack's manifest
+        /// over `config.json`'s own `dialog` section (`src/packs.rs`). Always present,
+        /// possibly empty - an empty object means nothing was asked for anywhere, so the
+        /// presenter uses its built-ins. `displaySeconds` lives in here, which is why
+        /// there is no longer a field of that name beside it: one place per fact.
+        dialog: crate::packs::DialogStyle,
     },
     /// Playback closure, reported *in* by whoever played the audio. The runtime never
     /// calls a frontend back, so this is the only way a caller learns that an

@@ -38,6 +38,11 @@
 ; 7. Prerequisite:
 ;    - VoiceCore.exe is a WebView2 host. A machine without the Evergreen Runtime is told so,
 ;      with the download link, instead of being handed a blank window.
+; 8. Agent skills:
+;    - The two SKILL.md files ship inside the tree (skills\) AND at
+;      %USERPROFILE%\.agents\skills\<name>\SKILL.md, which is where an agent with memory looks
+;      for a skill without being handed a path. Ours overwrite on upgrade and are removed on
+;      uninstall; the [Files] section states why.
 ; ==============================================================================
 
 #if Ver < EncodeVer(6, 3, 0)
@@ -157,10 +162,53 @@ Name: "{app}\models"; Flags: uninsneveruninstall
 Source: "{#SourceTree}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs; \
   Excludes: "\data\*,\runtime\python\*,\runtime\python-base\*,\runtime\engine\*,\models\*"
 
+; The two agent-facing skills, a SECOND copy of files already inside {app}\skills\, placed where
+; an agent finds them without being told a path: %USERPROFILE%\.agents\skills\<name>\SKILL.md.
+;
+; Upgrade overwrites (ignoreversion): this file documents THIS build's CLI flags, error codes and
+; paths, so a hand-edited copy left in place is a document that lies about the binary beside it.
+; It is our versioned interface description rather than user data, and a user who wants a variant
+; of it can keep that under a name of their own in the same directory, where nothing overwrites it.
+; Uninstall deletes it (no uninsneveruninstall) for the same reason: since every upgrade replaces
+; the file, we never promised to preserve edits to it, and a skill outliving the product tells an
+; agent to run a binary that is gone. [UninstallDelete] then clears the two directories if they
+; are empty, which covers the case where the user had already created one by hand: a directory
+; Setup itself created is removed by the uninstaller automatically, one that was already there is
+; not. Either way `.agents\skills\` survives as long as any other skill is in it.
+;
+; {%USERPROFILE} is the environment variable, not a shell folder: Inno 6 has no {userprofile}
+; constant and ISCC rejects it outright. It is the profile of the user running Setup, which is the
+; right answer in the default per-user mode; an admin who overrides to per-machine gets the global
+; copy in the admin's own profile - no Inno constant can do better - and {app}\skills\ still
+; serves every user on the machine.
+Source: "{#SourceTree}\skills\voice-core-tts\SKILL.md"; \
+  DestDir: "{%USERPROFILE}\.agents\skills\voice-core-tts"; Flags: ignoreversion
+Source: "{#SourceTree}\skills\voice-core-voice-training\SKILL.md"; \
+  DestDir: "{%USERPROFILE}\.agents\skills\voice-core-voice-training"; Flags: ignoreversion
+
+[InstallDelete]
+; Shortcuts earlier versions created, deleted on every install.
+;
+; Dropping an entry from [Icons] does NOT remove the file from a machine that already has it:
+; the previous uninstall log is replaced, so 1.1.0's three shortcuts survived every upgrade and
+; were still in the Start Menu after installing 1.4.0 over 1.3.0 - measured on this machine.
+; One of them was worse than clutter: 托盘控制台 points at bin\app\VoiceCoreTray.exe, a path
+; that no longer exists (the presenter lives in bin\presenter\ and is renamed), so clicking it
+; produced a Windows error. The other two open bootstrap.ps1 in a PowerShell window, which is
+; the provisioning path the 部署 screen replaced.
+;
+; Named literally rather than by wildcard: a wildcard over {group} would also delete a shortcut
+; a user made themselves.
+Type: files; Name: "{group}\{#AppName} 初始化向导 (Bootstrap).lnk"
+Type: files; Name: "{group}\{#AppName} 环境诊断 (Check Only).lnk"
+Type: files; Name: "{group}\{#AppName} 托盘控制台.lnk"
+Type: files; Name: "{autodesktop}\{#AppName} 托盘控制台.lnk"
+
 [Icons]
 ; EXACTLY ONE application shortcut. bin\presenter\ is spawned by {#AppExeName} and bin\voice-core.exe
-; is an agent's tool; a shortcut to either would invite a user to start the stack twice, and the
-; two bootstrap shortcuts 1.1.0 shipped are gone because provisioning moved into the app.
+; is an agent's tool; a shortcut to either would invite a user to start the stack twice. The three
+; shortcuts 1.1.0 shipped are removed by [InstallDelete] above rather than merely absent here -
+; absent from [Icons] only means "not created", never "taken off the machine".
 Name: "{group}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; Check: GuiPresent
 Name: "{group}\卸载 {#AppName}"; Filename: "{uninstallexe}"
 
@@ -183,6 +231,13 @@ Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; \
 ; runtime that was started by the CLI and has no parent to stop it.
 Filename: "{app}\bin\voice-core.exe"; Parameters: "stop"; WorkingDir: "{app}"; \
   Flags: runhidden skipifdoesntexist; RunOnceId: "VoiceCoreStopRuntime"
+
+[UninstallDelete]
+; The two global SKILL.md files are removed by the uninstaller itself - they are [Files] entries
+; without uninsneveruninstall. These two lines only clear the directories they lived in, and only
+; when nothing else is inside them.
+Type: dirifempty; Name: "{%USERPROFILE}\.agents\skills\voice-core-tts"
+Type: dirifempty; Name: "{%USERPROFILE}\.agents\skills\voice-core-voice-training"
 
 [Code]
 const

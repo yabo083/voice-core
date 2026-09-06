@@ -51,10 +51,14 @@ GROUP_SUFFIX = re.compile(r"_t\d+$")
 # This step's name in the progress protocol (`scripts/training/_layout.py`).
 STAGE = "score"
 
-#: `lora_checkpoint_best_val_loss_0002000_0.843894` -> step 2000, val loss 0.843894. The trainer
-#: puts both in the directory name, which is the only place a scorer can read them from: this
-#: stage never sees the training log.
-VALIDATED = re.compile(r"best_val_loss_(?P<step>\d+)_(?P<loss>[\d.]+)")
+#: `lora_checkpoint_best_val_loss_0002000_0.843894` -> step 2000, val loss 0.843894, and the same
+#: for `lora_checkpoint_val_loss_*`. The trainer puts both numbers in the directory name, which is
+#: the only place a scorer can read them from: this stage never sees the training log.
+#:
+#: Two prefixes because `run_training.py` leaves `best` on the lowest-loss checkpoint only and
+#: renames the other leaderboard members to `checkpoint_val_loss_*`. Both are validation-selected
+#: and both belong on this side of the tie-break; only the name differs.
+VALIDATED = re.compile(r"val_loss_(?P<step>\d+)_(?P<loss>[\d.]+)")
 #: `lora_checkpoint_0002000` - a PERIODIC checkpoint. No validation stands behind it.
 PERIODIC = re.compile(r"checkpoint_(?P<step>\d+)$")
 

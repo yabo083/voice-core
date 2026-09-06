@@ -41,7 +41,10 @@ runtime 的 HTTP 在 `http://127.0.0.1:8760`，鉴权是 `Authorization: Bearer 
   一条片段就够、不用训练（§5）；Speaker Inversion 那条路已经停做。
 - LoRA 要音频 + **与音频同语言**的逐条转写，约 60–70 条 / 总时长 ~15 分钟够用。中文转写配日语音频会让
   adapter 学到生成时不成立的文本域映射（踩过：当前引擎的文本编码器读日语）。
-- 选 checkpoint 看 val loss，不要拿最后一步（本例 1000 步优于 2000 步）。
+- 选 checkpoint 看 val loss，不要拿最后一步（本例 1000 步优于 2000 步）。`checkpoint_best_val_loss_*`
+  **只会有一个**，就是 val loss 最低的那个；其余候选叫 `checkpoint_val_loss_*`。名字可以直接信。
+- 开训前把数据集那一步的质量报告读完。削波、响度、底噪、首尾静音、真实带宽都在里面，**这是花掉一小时之前
+  唯一便宜的发现问题的机会**。削波常常是母带自带的、重新下载修不掉；要不要筛掉是用户的决定，默认一条不筛。
 - 验收看相似度分布的下限，不看均值（本例均值 0.771 / p10 0.703）。§4 是这两条的具体读法。
 
 两条硬约束，动手前先读：
@@ -95,8 +98,11 @@ $S  = "E:\NewToolBox\voice-core\data\logs\training-$ID.status.json"
 ```
 
 - `--config lora` 取的是 `$T\irodori\lora.yaml`（batch 16 / 2000 步 / lr 1e-4 / 每 500 步存点、
-  另外留 5 个 val loss 最好的）。**不要改那个模板**，它的注释是每个值的唯一说明；要改参数就在命令末尾
-  加 `--` 再透传给上游训练器，例如 `-- --max-steps 1000 --batch-size 8`。
+  另外留 3 个 val loss 最好的）。**不要改那个模板**，它的注释是每个值的唯一说明；要改参数就在命令末尾
+  加 `--` 再透传给上游训练器，例如 `-- --max-steps 1000 --batch-size 8`。改步数是安全的：warmup 与
+  stable 会按模板的 5% / 75% 比例跟着缩放，学习率衰减照常发生，流水线会把推导出的三个数打出来。
+- 三个质量筛选开关默认全关，要用就加在 `prepare_dataset.py` 后面：`--drop-clipped`、`--min-snr <dB>`、
+  `--min-bandwidth <Hz>`。**先看不带开关的报告，再决定值**——某个语料 163 条里 77 条削波，无脑开等于砍掉一半。
 - **第 6 步（安装）是用户的决定，不要自己挑检查点**——面板的「训练成果」表就是为这个决定存在的。
   给出候选（§4）、等用户点名再执行。包的显示名默认等于 id，要别的名字就带 `--name "显示名"`
   （还可带 `--character`、`--avatar`），它们写进包自己的 `voicepack.json`（§5）。
@@ -141,7 +147,10 @@ Get-Content -Wait -Tail 20 'E:\NewToolBox\voice-core\data\logs\training-my-voice
 
 ## 4. 选检查点与验收
 
-`$D\lora` 里 `checkpoint_best_val_loss_<步数>_<val loss>\` 的目录名本身带验证损失，先取最低的几个作候选。
+`$D\lora` 里目录名自带验证损失，且名字可以直接信：**`checkpoint_best_val_loss_*` 只有一个**，就是 val loss
+最低的那个；同一轮里其他被留下的候选是 `checkpoint_val_loss_<步数>_<val loss>`，也都经过验证，只是不是最低。
+周期性存点 `checkpoint_<步数>` 和 `checkpoint_final` 没有验证背书。候选打平时（权重字节相同就会出现）依次比：
+验证选中过的优先、val loss 更低、步数更早。
 第 4 步会给每个检查点各生成一组固定种子的试听样本（组名 `lora_<检查点目录名>`），第 5 步把它们和参考语料
 比出相似度，写到 `$D\score\<音色包 id>.json`：
 

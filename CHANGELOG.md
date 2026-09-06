@@ -8,6 +8,21 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.4.2] - 2026-09-06
+
+### Fixed
+
+- **`checkpoint_best_val_loss_*` now means what it says: exactly one of them, the lowest.**
+  Upstream keeps a top-N leaderboard and names every member `best`, which is true of the set and
+  false of each member - while `checkpoint_best_n` exceeds the number of validations its eviction
+  gate never engages, so a run whose loss went 0.804 -> 0.843 -> 0.839 -> 0.844 left four
+  directories all called best. 1.4.1 fixed the *reporting* and told readers the name did not count;
+  that put the burden on whoever reads the directory. The leaderboard is worth keeping - validation
+  loss does not decide which checkpoint ships, the similarity score does - so the other members are
+  renamed to `checkpoint_val_loss_<step>_<loss>` after the trainer exits. Same stem, so the scorer
+  reads step and loss out of either name, and both stay on the validated side of its tie-break.
+  Periodic checkpoints and `checkpoint_final` are untouched.
+
 ## [1.4.1] - 2026-09-06
 
 Voice training, audited and repaired. Every item here was found by measuring the pipeline against

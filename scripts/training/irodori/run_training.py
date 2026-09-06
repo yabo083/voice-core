@@ -286,12 +286,14 @@ def relay(seen: dict):
             # `valid step=` line that produced it scrolled past before this run was watched.
             if loss != "?":
                 seen["val"] = loss
-            # Upstream writes one `checkpoint_best_val_loss_<step>_<loss>` per VALIDATION, not
-            # per improvement: a run whose val loss goes 0.804 -> 0.843 -> 0.839 -> 0.844 ends
-            # with four such directories, and `checkpoint_best_n` keeps them all. So the name
-            # means "a validation happened here", and the last one is not the best one - it is
-            # merely the last. Keeping only the minimum is the difference between this pipeline
-            # naming the checkpoint worth installing and naming whichever one happened last.
+            # Upstream keeps a top-N leaderboard, not the single best: it saves whenever the new
+            # loss beats the WORST of the N it is holding, or whenever it holds fewer than N
+            # (`train.py:386-393`). So while `checkpoint_best_n` exceeds the number of
+            # validations the gate never engages and every validation is saved - a run whose loss
+            # goes 0.804 -> 0.843 -> 0.839 -> 0.844 keeps all four under a name that says `best`.
+            # The leaderboard is wanted (val loss does not decide; §score does, on similarity), so
+            # the fix is honest naming, not fewer candidates: `finalize_checkpoint_names` below
+            # leaves `best` only on the minimum.
             try:
                 value = float(loss)
             except ValueError:
@@ -421,6 +423,37 @@ def corpus_warnings(manifest: Path) -> list[str]:
     return lines
 
 
+#: Upstream's leaderboard prefix. Every member is named `best`, including the ones that are not.
+LEADERBOARD_PREFIX = "checkpoint_best_val_loss_"
+#: What a leaderboard member that did not win is renamed to. Same stem, so `evaluate_similarity`'s
+#: `val_loss_<step>_<loss>` parse still reads step and loss out of either name.
+CANDIDATE_PREFIX = "checkpoint_val_loss_"
+
+
+def finalize_checkpoint_names(output_dir: Path, winner: str) -> list[str]:
+    """Leave `best` on the minimum only, and rename the rest to `checkpoint_val_loss_*`.
+
+    Upstream keeps the N lowest validation losses and names all of them `best`, which is true of
+    the set and false of each member. Keeping the set is right - validation loss does not decide
+    which checkpoint ships, the similarity score does - so this renames instead of deleting: after
+    it runs, one directory says `best` and it is the one with the lowest loss.
+
+    Safe only after the trainer exits: upstream finds its own leaderboard by globbing that prefix,
+    for pruning during the run and for nothing afterwards. This wrapper does not support resume,
+    so nothing reads it again. Returns the names it renamed.
+    """
+    renamed: list[str] = []
+    for path in sorted(output_dir.glob(f"{LEADERBOARD_PREFIX}*")):
+        if path.name == winner:
+            continue
+        target = path.with_name(CANDIDATE_PREFIX + path.name[len(LEADERBOARD_PREFIX) :])
+        if target.exists():
+            continue
+        path.rename(target)
+        renamed.append(target.name)
+    return renamed
+
+
 def launch(args: argparse.Namespace) -> None:
     engine = _engine.resolve_engine(args)
     engine.require_tree()
@@ -534,7 +567,8 @@ def launch(args: argparse.Namespace) -> None:
         )
         return
     loss, name = best
-    tail = "" if name == seen["checkpoint"] else f"; {seen['checkpoint']} was written later and is worse"
+    demoted = finalize_checkpoint_names(output_dir, name)
+    tail = f"; {len(demoted)} other candidate(s) renamed to {CANDIDATE_PREFIX}*" if demoted else ""
     _engine.emit(
         STAGE,
         "ok",

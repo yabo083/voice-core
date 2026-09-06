@@ -1,6 +1,6 @@
 [package]
 name = "voice-core-manager"
-version = "1.4.1"
+version = "1.4.2"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "VoiceCore desktop shell: the one launcher, owning the tray, the runtime and the subtitle presenter."

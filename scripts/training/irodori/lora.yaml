@@ -105,24 +105,42 @@ train:
   # loss is correspondingly noisy - see the warning under `valid_every`. Do not set this to 0:
   # no val loss means no best-checkpoint selection, which is the whole selection mechanism.
   valid_ratio: 0.05
-  # 2000 / 500 = FOUR validations for the whole run. Published recipes validate every 200-500
-  # steps, so the cadence is within the normal range, but four points is a coarse grid to find a
-  # minimum on - and the numbers those four points produce are not as comparable as they look:
-  # the trainer re-draws the noise, the flow-matching timesteps AND the reference-audio
-  # concatenation at every validation, so each call measures a different problem on the same 8
-  # clips. On this project's own run the four came out 0.804 / 0.843 / 0.839 / 0.844, a spread of
-  # 0.0395, while the same loss at twice the sample count has a standard deviation of 0.041.
-  # Read that as: the ORDER of those four numbers is not established. Treat val loss as a coarse
-  # filter and let step 5's similarity scores and your own ears make the final call.
-  valid_every: 500
-  # Keeps the N best-by-val-loss adapters as `checkpoint_best_val_loss_<step>_<loss>/`.
+  # DERIVED, not used as written: `run_training.py` computes the cadence from the corpus and passes
+  # `--valid-every`/`--save-every`, because a step count cannot be right for two corpus sizes at
+  # once - at batch 16, 100 steps is 9 epochs of 163 rows and 1.6 epochs of 1000. It validates and
+  # saves every 5-8 epochs, taking the widest interval that still leaves more validations than both
+  # `early_stopping_patience` and `checkpoint_best_n` need. Measured examples: 69 rows -> every 40
+  # steps, 163 -> 88, 400 -> 200. The value below is the fallback when the row count is unknown, and
+  # passing either flag after `--` turns the derivation off entirely.
   #
-  # MUST stay below the number of validations (max_steps / valid_every), or the pruning gate
-  # never fires and every validation is written as a "best" - which is exactly what happened at
-  # 5 with four validations: four directories all named `best_val_loss`, three of them worse
-  # than the first, and any tool that ordered that directory by name or mtime picked the worst
-  # one. At 3 the name means what it says.
+  # Resolution matters, which is why the interval is epochs and not a round number: at 500 steps a
+  # real run measured 500 -> 0.762481, 1000 -> 0.782561, 1500 -> 0.802053, 2000 -> 0.812336, i.e.
+  # monotonically worse from the first point, so the optimum sat at or before step 500 and the grid
+  # had no resolution there. The best checkpoint of that run was simply the earliest one it saved.
+  #
+  # Affordable because the held-out split is tiny: 5% of 163 rows is 8 clips, and one validation on
+  # 8 clips is far below the ~740 ms a training step already costs. Validation is also
+  # deterministic (fixed seed, in-process loader), so two runs agree to 1.75e-4 and successive
+  # points are comparable - which they were not when each call re-drew its own noise, timesteps
+  # and reference concatenation.
+  #
+  # `save_every` MUST stay a multiple of this. A periodic save then always lands on a step that was
+  # just validated, which is what lets `run_training.py` stamp that loss onto the periodic
+  # checkpoint's name instead of leaving it looking unvalidated. The derivation sets them equal.
+  valid_every: 100
+  # Keeps the N best-by-val-loss adapters as `checkpoint_best_val_loss_<step>_<loss>/`, of which
+  # `run_training.py` leaves exactly one named `best` - the lowest - and renames the rest to
+  # `checkpoint_val_loss_*`.
+  #
+  # MUST stay below the number of validations, or the eviction gate never fires and every
+  # validation is written as a "best". That is what happened at 5 with four validations: four
+  # directories all named `best_val_loss`, three of them worse than the first. The derived cadence
+  # now guarantees more than `max(this, early_stopping_patience)` validations, so this cannot
+  # silently break again - but keep it small anyway, because every surviving candidate costs a full
+  # sample-generation pass in stage 4 and a scoring pass in stage 5.
   checkpoint_best_n: 3
+  # Derived alongside `valid_every` and set equal to it, so every periodic save lands on a
+  # validated step. This value is the fallback: 500 is a multiple of the 100 above.
   save_every: 500
   log_every: 100
 

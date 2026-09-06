@@ -23,8 +23,10 @@ that costs you the whole model load before failing.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -48,6 +50,9 @@ SAVED = re.compile(
 )
 # `checkpoint_best_val_loss_0000500_0.906366` -> 500.
 CKPT_STEP = re.compile(r"_(\d{4,})_")
+#: `checkpoint_0002000` -> 2000. A periodic save, whose name upstream leaves lossless even
+#: though a validation ran at that exact step.
+PERIODIC_STEP = re.compile(r"^checkpoint_(?P<step>\d+)$")
 
 # Windows spawns a fresh interpreter per DataLoader worker and each one re-imports torch:
 # ~700 MB resident, and persistent workers keep it for the whole run. Measured on a 32 GB
@@ -135,16 +140,15 @@ def summarise(train_cfg: dict, rows: int, output_dir: Path) -> list[str]:
         f"  training      {mode}",
         f"  batch/steps   batch_size {batch}, max_steps {steps}",
     ]
-    if batch and rows:
-        lines.append(
-            f"  epoch         ~{max(1, rows // max(1, batch))} step(s) per epoch over {rows} rows"
-        )
+    # Steps per epoch is stated by `cadence_for`, which needs the same number and rounds it UP -
+    # a partial batch still has to be trained through. This used to print a floored copy of it:
+    # 81 rows at batch 16 read as 5 here and 6 there, in the same block.
     if valid_ratio > 0:
         held = max(1, int(rows * valid_ratio))
-        lines.append(
-            f"  validation    valid_ratio {valid_ratio} -> ~{held} held-out row(s), every "
-            f"{train_cfg.get('valid_every')} steps"
-        )
+        # The interval is deliberately not stated here: `cadence_for` derives it from the corpus and
+        # prints the value that will actually be used. Printing `train_cfg['valid_every']` too meant
+        # two different numbers in the same block, the config's and the effective one.
+        lines.append(f"  validation    valid_ratio {valid_ratio} -> ~{held} held-out row(s)")
     else:
         lines.append(
             "  validation    valid_ratio 0 - no val loss, so no best-checkpoint selection"
@@ -244,6 +248,12 @@ def relay(seen: dict):
         bar = _engine.parse_bar(text)
         if bar is not None:
             seen["total"] = bar["total"]
+            if seen["arm"] is not None and seen["stop"] is None:
+                # A training step after the validation boundary means every save at that boundary
+                # finished. Safe to ask for termination now; `stream_upstream` does it.
+                seen["stop"] = seen["arm"]
+                print(f"  early stop    {seen['arm']}; stopping at step {bar['done']}")
+                _engine.emit(STAGE, "log", f"early stop: {seen['arm']} (step {bar['done']})")
             loss = LOSS.search(text)
             loss = None if loss is None else loss["loss"]
             if (bar["done"], loss) == seen["bar"]:
@@ -264,10 +274,39 @@ def relay(seen: dict):
         valid = VALID.match(text)
         if valid is not None:
             seen["val"] = valid["loss"]
+            # Every validation, keyed by step. `finalize_checkpoint_names` needs this to stamp the
+            # loss onto a periodic checkpoint: `save_every` is a multiple of `valid_every`, so a
+            # periodic save always lands on a step that was just validated, and the number exists
+            # even though upstream leaves it out of that directory's name.
+            seen["history"][int(valid["step"])] = valid["loss"]
+            # Patience is counted here and not on the `saved` line: a validation that does not
+            # improve produces no checkpoint and therefore no `saved` line, which is exactly the
+            # event this has to count.
+            try:
+                value = float(valid["loss"])
+            except ValueError:
+                value = None
+            note = ""
+            if value is not None:
+                if seen["floor"] is None or value < seen["floor"]:
+                    seen["floor"] = value
+                    seen["stale"] = 0
+                else:
+                    seen["stale"] += 1
+                    note = f"   no improvement on {seen['floor']:.6f} ({seen['stale']}/{EARLY_STOP_PATIENCE})"
+                    if seen["stale"] >= EARLY_STOP_PATIENCE:
+                        # Arm, do not fire. Upstream is mid-boundary here: the leaderboard save and
+                        # the periodic save both still have to happen at this step, and terminating
+                        # between them would leave a half-written directory. The next training
+                        # progress line proves the boundary is finished.
+                        seen["arm"] = (
+                            f"{EARLY_STOP_PATIENCE} validations without improving on "
+                            f"{seen['floor']:.6f}"
+                        )
             _engine.emit(
                 STAGE,
                 "progress",
-                f"validation at step {valid['step']}: val loss {valid['loss']}",
+                f"validation at step {valid['step']}: val loss {valid['loss']}{note}",
                 done=int(valid["step"]),
                 total=seen["total"],
             )
@@ -380,6 +419,85 @@ def schedule_for(train_cfg: dict, passthrough: list[str]) -> list[str]:
     ]
 
 
+#: Validate and save once every 5-8 epochs, whichever end of that window the run can afford. The
+#: window is the caller's: a cadence measured in epochs travels across corpus sizes, where a fixed
+#: step count does not - 100 steps is 9 epochs on 163 rows and 1.6 on 1000.
+EPOCHS_PER_VALIDATION = (8, 7, 6, 5)
+#: Consecutive validations without a new minimum before the run is stopped.
+EARLY_STOP_PATIENCE = 5
+
+
+def cadence_for(train_cfg: dict, passthrough: list[str], rows: int) -> list[str]:
+    """Derive `--valid-every` and `--save-every` from the corpus, in epochs rather than steps.
+
+    A step count cannot be right for two corpus sizes at once: at batch 16, 100 steps is 9 epochs
+    of 163 rows and 1.6 epochs of 1000. Both knobs that depend on this cadence are counted in
+    validations, so the cadence has to be expressed in something that scales with the data.
+
+    Picks the LONGEST interval in `EPOCHS_PER_VALIDATION` that still leaves enough validations for
+    the two mechanisms downstream of it to work:
+
+    * early stopping needs more than `EARLY_STOP_PATIENCE` of them, or it can never fire;
+    * the leaderboard's eviction gate needs more than `checkpoint_best_n`, or every validation is
+      written as a "best" - the failure this pipeline already shipped once.
+
+    Longest rather than shortest because a validation on a 5% split is a handful of clips and
+    therefore noisy; fewer, wider-spaced points are more comparable. If even the shortest interval
+    cannot reach the floor, the cadence is clamped to hit it and that is said out loud, because a
+    cadence which silently disables both mechanisms is worse than a coarse one.
+
+    Passing either flag yourself turns all of this off - that is the escape hatch.
+    """
+    override = flag_value(passthrough, "--valid-every") or flag_value(passthrough, "--save-every")
+    if override:
+        # Still say what will happen. Nothing else in this block states the interval, and silence
+        # here reads as "the config value applies" when the caller's flag is what applies.
+        print(f"  cadence       caller set it to {override}; no derivation from corpus size")
+        return []
+    steps = flag_value(passthrough, "--max-steps") or train_cfg.get("max_steps")
+    batch = flag_value(passthrough, "--batch-size") or train_cfg.get("batch_size")
+    accum = flag_value(passthrough, "--gradient-accumulation-steps") or train_cfg.get(
+        "gradient_accumulation_steps"
+    )
+    try:
+        total = int(steps or 0)
+        effective = int(batch or 0) * max(1, int(accum or 1))
+    except ValueError:
+        return []
+    if rows <= 0 or total <= 0 or effective <= 0:
+        return []
+    best_n = int(train_cfg.get("checkpoint_best_n") or 0)
+    floor = max(EARLY_STOP_PATIENCE, best_n) + 1
+    # Round up: a partial epoch still has to be trained through before the epoch is over.
+    per_epoch = -(-rows // effective)
+    clamped = False
+    for epochs in EPOCHS_PER_VALIDATION:
+        cadence = per_epoch * epochs
+        if total // cadence >= floor:
+            break
+    else:
+        epochs = EPOCHS_PER_VALIDATION[-1]
+        cadence = max(1, total // floor)
+        clamped = True
+    detail = (
+        f"clamped to {floor} validations (even {epochs} epochs was too wide)"
+        if clamped
+        else f"{epochs} epoch(s)"
+    )
+    print(
+        f"  cadence       {rows} row(s) / batch {effective} = {per_epoch} step(s) per epoch -> "
+        f"validate and save every {cadence} step(s) ({detail}), "
+        f"{total // cadence} validation(s) in {total} steps"
+    )
+    _engine.emit(
+        STAGE,
+        "log",
+        f"cadence derived from {rows} rows: every {cadence} steps ({detail}), "
+        f"{total // cadence} validations, early-stop patience {EARLY_STOP_PATIENCE}",
+    )
+    return ["--valid-every", str(cadence), "--save-every", str(cadence)]
+
+
 def corpus_warnings(manifest: Path) -> list[str]:
     """What step 1 found wrong with the audio, said out loud before an hour is spent on it.
 
@@ -430,17 +548,40 @@ LEADERBOARD_PREFIX = "checkpoint_best_val_loss_"
 CANDIDATE_PREFIX = "checkpoint_val_loss_"
 
 
-def finalize_checkpoint_names(output_dir: Path, winner: str) -> list[str]:
-    """Leave `best` on the minimum only, and rename the rest to `checkpoint_val_loss_*`.
+def _tree_fingerprint(path: Path) -> str:
+    """Content hash of a checkpoint tree, for proving two of them are the same weights."""
+    digest = hashlib.sha256()
+    for item in sorted(p for p in path.rglob("*") if p.is_file()):
+        digest.update(item.relative_to(path).as_posix().encode())
+        digest.update(item.stat().st_size.to_bytes(8, "little"))
+        with item.open("rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                digest.update(block)
+    return digest.hexdigest()
 
-    Upstream keeps the N lowest validation losses and names all of them `best`, which is true of
-    the set and false of each member. Keeping the set is right - validation loss does not decide
-    which checkpoint ships, the similarity score does - so this renames instead of deleting: after
-    it runs, one directory says `best` and it is the one with the lowest loss.
 
-    Safe only after the trainer exits: upstream finds its own leaderboard by globbing that prefix,
-    for pruning during the run and for nothing afterwards. This wrapper does not support resume,
-    so nothing reads it again. Returns the names it renamed.
+def finalize_checkpoint_names(
+    output_dir: Path, winner: str, history: dict[int, str]
+) -> tuple[list[str], list[str]]:
+    """Make every checkpoint name carry what is known about it, and drop exact duplicates.
+
+    Three things upstream leaves on the floor, all of them information it already had:
+
+    1. It keeps the N lowest validation losses and names all of them `best`, which is true of the
+       set and false of each member. Keeping the set is right - validation loss does not decide
+       which checkpoint ships, the similarity score does - so the members that did not win are
+       renamed rather than deleted, and one directory says `best`.
+    2. A periodic save lands on a step that was just validated (`save_every` is a multiple of
+       `valid_every`), but its name carries no loss, so it reads as "no validation behind this"
+       when there is one. `history` supplies the number.
+    3. The periodic save at `max_steps`, `checkpoint_final`, and a leaderboard member at the same
+       step are the SAME WEIGHTS under three names. Scoring all three spends the sample-generation
+       and similarity stages three times to produce one number - measured once at mean 0.8013,
+       p10 0.7864, identical to six decimals. Duplicates are collapsed, keeping the most
+       informative name, and only after `_tree_fingerprint` proves the contents match.
+
+    Safe only after the trainer exits: upstream globs the leaderboard prefix to prune during the
+    run and never afterwards, and this wrapper has no resume path. Returns (renamed, dropped).
     """
     renamed: list[str] = []
     for path in sorted(output_dir.glob(f"{LEADERBOARD_PREFIX}*")):
@@ -451,7 +592,43 @@ def finalize_checkpoint_names(output_dir: Path, winner: str) -> list[str]:
             continue
         path.rename(target)
         renamed.append(target.name)
-    return renamed
+
+    # Stamp the validated loss onto periodic saves. `checkpoint_final` is deliberately left alone:
+    # its name states what it is, and if it duplicates a validated tree the pass below removes it.
+    for path in sorted(output_dir.glob("checkpoint_*")):
+        step_match = PERIODIC_STEP.match(path.name)
+        if step_match is None:
+            continue
+        loss = history.get(int(step_match["step"]))
+        if loss is None:
+            continue
+        target = path.with_name(f"{CANDIDATE_PREFIX}{step_match['step']}_{loss}")
+        if target.exists():
+            continue
+        path.rename(target)
+        renamed.append(target.name)
+
+    # Collapse byte-identical trees. Named-by-loss beats `checkpoint_final` beats a bare step, and
+    # `best` beats everything, so sorting by that rank keeps the name a reader learns most from.
+    def rank(path: Path) -> tuple[int, str]:
+        name = path.name
+        if name.startswith(LEADERBOARD_PREFIX):
+            return (0, name)
+        if name.startswith(CANDIDATE_PREFIX):
+            return (1, name)
+        return (2, name) if name == "checkpoint_final" else (3, name)
+
+    dropped: list[str] = []
+    keepers: dict[str, Path] = {}
+    for path in sorted((p for p in output_dir.glob("checkpoint_*") if p.is_dir()), key=rank):
+        fingerprint = _tree_fingerprint(path)
+        kept = keepers.get(fingerprint)
+        if kept is None:
+            keepers[fingerprint] = path
+            continue
+        shutil.rmtree(path)
+        dropped.append(f"{path.name} (same weights as {kept.name})")
+    return renamed, dropped
 
 
 def launch(args: argparse.Namespace) -> None:
@@ -487,7 +664,6 @@ def launch(args: argparse.Namespace) -> None:
     ]
 
     train_cfg = load_train_section(config)
-    argv += schedule_for(train_cfg, args.passthrough)
     print(engine.describe())
     print(f"  trainer       {engine.upstream / UPSTREAM}")
     print(f"  config        {config}")
@@ -501,6 +677,10 @@ def launch(args: argparse.Namespace) -> None:
         print(line)
     for line in summarise(train_cfg, rows, output_dir):
         print(line)
+    # Both derive argv the caller did not type, and both print what they derived, so they belong
+    # inside this block rather than above it.
+    argv += schedule_for(train_cfg, args.passthrough)
+    argv += cadence_for(train_cfg, args.passthrough, rows)
     print("command:")
     print("  " + engine.command_line(UPSTREAM, argv))
 
@@ -535,9 +715,18 @@ def launch(args: argparse.Namespace) -> None:
     # `bar` is the dedupe key for tqdm redraws; `best` is the (val loss, name) MINIMUM across
     # every validation, which is what the `ok` event reports - not `checkpoint`, which is only
     # the last one written. See the `saved` branch in `relay` for why those differ.
-    seen = {"total": steps, "done": -1, "bar": None, "checkpoint": None, "val": None, "best": None}
-    status = engine.stream_upstream(UPSTREAM, argv, on_line=relay(seen))
-    if status != 0:
+    seen = {
+        "total": steps, "done": -1, "bar": None, "checkpoint": None,
+        "val": None, "best": None, "history": {},
+        # Early stopping: `floor` is the lowest val loss seen, `stale` the consecutive validations
+        # since it moved, `arm` the reason once patience is spent, `stop` the same reason once a
+        # later training step proves the save boundary closed.
+        "floor": None, "stale": 0, "arm": None, "stop": None,
+    }
+    status = engine.stream_upstream(
+        UPSTREAM, argv, on_line=relay(seen), should_stop=lambda: seen["stop"]
+    )
+    if status != 0 and seen["stop"] is None:
         raise SystemExit(
             f"{UPSTREAM} exited {status}\n"
             "  its own traceback is in this step's log; a CUDA out-of-memory here means "
@@ -567,12 +756,19 @@ def launch(args: argparse.Namespace) -> None:
         )
         return
     loss, name = best
-    demoted = finalize_checkpoint_names(output_dir, name)
-    tail = f"; {len(demoted)} other candidate(s) renamed to {CANDIDATE_PREFIX}*" if demoted else ""
+    renamed, dropped = finalize_checkpoint_names(output_dir, name, seen["history"])
+    head = f"{seen['done']} step(s) done"
+    if seen["stop"] is not None:
+        # A stopped run reached its answer earlier, which is a result and not a failure. Say why,
+        # so nobody reads a 600-step run against a 2000-step budget as a crash.
+        head = f"stopped early at step {seen['done']} of {seen['total']} - {seen['stop']}"
+    tail = f"; {len(renamed)} other checkpoint(s) named by val loss" if renamed else ""
+    if dropped:
+        tail += f"; {len(dropped)} duplicate(s) dropped ({', '.join(dropped)})"
     _engine.emit(
         STAGE,
         "ok",
-        f"{seen['done']} step(s) done; lowest val loss {loss:.6f} at {name}{tail}",
+        f"{head}; lowest val loss {loss:.6f} at {name}{tail}",
         done=seen["done"],
         total=seen["total"],
         checkpoint=name,

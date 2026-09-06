@@ -296,7 +296,7 @@ class Engine:
                 stderr=subprocess.STDOUT,
             ).returncode
 
-    def stream_upstream(self, script: str, argv: list[str], *, on_line) -> int:
+    def stream_upstream(self, script: str, argv: list[str], *, on_line, should_stop=None) -> int:
         """The same run, with every output line handed to `on_line` as it appears.
 
         Three details are what make this show a two-hour run's progress instead of
@@ -309,6 +309,12 @@ class Engine:
           `\\r` and no newline, so `readline` would block until the next real line - one
           every hundred steps here, which is minutes of nothing followed by a burst.
         * a line ends at `\\r` OR `\\n`, so each bar refresh is a line of its own.
+
+        `should_stop`, when given, is consulted after every line: return a truthy reason and the
+        child is terminated. It exists for early stopping, which upstream has no notion of, and it
+        is the caller's job to only ask at a moment when the child is not mid-write - this end
+        cannot tell. A terminated child still reports a nonzero exit code, so the caller must
+        remember that it asked.
         """
         process = subprocess.Popen(  # noqa: S603 - argv is built above, never a shell string
             self._upstream_command(script, argv),
@@ -320,6 +326,7 @@ class Engine:
             bufsize=0,
         )
         pending = b""
+        stopping = False
         with process:
             fd = process.stdout.fileno()
             while True:
@@ -344,6 +351,11 @@ class Engine:
                         break
                     line, pending = pending[:cut], pending[cut + 1 :]
                     on_line(line.decode("utf-8", "replace"))
+                    if not stopping and should_stop is not None and should_stop():
+                        # Terminate once. The remaining buffered lines still go to `on_line`,
+                        # because they were already produced and the caller's summary reads them.
+                        stopping = True
+                        process.terminate()
                 if len(pending) > 1 << 16:
                     # A producer that emits neither separator must not grow this forever.
                     on_line(pending.decode("utf-8", "replace"))

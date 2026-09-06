@@ -8,6 +8,38 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.5.0] - 2026-09-06
+
+Training schedules itself from the corpus instead of from constants, and stops when it stops
+improving. A fixed step count cannot be right for two corpus sizes at once: at batch 16, 100 steps
+is 9 epochs of 163 rows and 1.6 epochs of 1000.
+
+### Added
+
+- **Validation and save cadence derived from the dataset.** `run_training.py` computes steps per
+  epoch from the manifest row count and the effective batch (rounding up), then validates and saves
+  every 5-8 epochs - the widest interval that still leaves more validations than both
+  `early_stopping_patience` and `checkpoint_best_n` require. Measured: 69 rows -> every 40 steps,
+  163 -> 88, 400 -> 200, 800 -> 300 (stepped down to 6 epochs). If even 5 epochs is too wide the
+  cadence is clamped to reach the floor and says so, because a cadence that silently disables both
+  mechanisms is worse than a coarse one. Passing `--valid-every` or `--save-every` turns the whole
+  derivation off.
+- **Early stopping, patience 5.** Five consecutive validations without a new minimum end the run.
+  Counted on validation lines rather than checkpoint saves, because a validation that does not
+  improve writes no checkpoint and is exactly the event being counted. The stop is armed at the
+  validation and fired at the next training step, so the leaderboard and periodic saves at that
+  boundary complete first rather than being interrupted mid-write. A stopped run reports the step it
+  stopped at and why, and is a success, not a failure - `max_steps` is a budget ceiling now, not an
+  expected duration.
+
+### Changed
+
+- `checkpoint_best_n` 5 -> 3. Every surviving candidate costs a full sample-generation pass in
+  stage 4 and a scoring pass in stage 5.
+- `stream_upstream` takes an optional `should_stop`, which is how early stopping reaches a trainer
+  that has no notion of it. A terminated child still exits nonzero, so the caller checks whether it
+  was the one who asked before reporting a failure.
+
 ## [1.4.2] - 2026-09-06
 
 ### Fixed

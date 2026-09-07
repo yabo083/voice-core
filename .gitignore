@@ -63,3 +63,4 @@ token.txt
 # documentation, and nothing in the shipped tree reads them.
 /.gemini-designer/
 /UI/
+.vscode/settings.json

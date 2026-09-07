@@ -2172,6 +2172,24 @@ select.input {
   color: var(--ink-faint);
 }
 
+/* In-message emphasis spans, from train.ts's keyword tokenizer. Class wins over the line
+   tone on purpose: a "失败" in an otherwise neutral line is the thing to look at, and an
+   ERROR line already carries its colour from the line rule above. */
+.console__em--fail {
+  color: var(--st-fail);
+  font-weight: 600;
+}
+
+.console__em--warn {
+  color: var(--st-warn);
+  font-weight: 600;
+}
+
+/* Metrics stay ink over a neutral emphasis so a healthy run is not a wall of state colour. */
+.console__em--metric {
+  color: var(--accent-text);
+}
+
 /* Sticky follow-tail badge/affordance at bottom of console */
 .console__tail {
   position: absolute;

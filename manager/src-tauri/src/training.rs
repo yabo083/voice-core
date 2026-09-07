@@ -24,13 +24,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Manager};
 
-use crate::contract::{Checkpoint, EVENT_TRAIN, InstallRequest};
+use crate::contract::{Checkpoint, InstallRequest, EVENT_TRAIN};
 use crate::host::Host;
 use crate::jsonstream::{self, Spec};
 use crate::layout;
 
 /// The record of which checkpoints of a run became packs, inside that run's scratch
-/// directory. Named once, read by `at_risk` and written by `record_installed`.
+/// directory. Named once, read by `at_risk` and `checkpoints`, written by `record_installed`.
 const INSTALLED: &str = "installed.txt";
 
 /// The installer, and the one child process this file still starts.
@@ -355,18 +355,26 @@ fn record_installed(checkpoint: &Path) {
     let _ = std::fs::write(&record, format!("{existing}{name}\n"));
 }
 
+/// The names an `installed.txt` carries, trimmed, blanks dropped. A missing
+/// record is the empty answer rather than an error: before the first install
+/// the file simply does not exist, and both readers must still answer.
+fn installed_names(record: &Path) -> Vec<String> {
+    std::fs::read_to_string(record)
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 /// The checkpoints in `lora/` that no pack has been installed from.
 ///
 /// Conservative by construction: one installed by hand, or registered through the 音色
 /// screen, is not in the record and still counts. Asking too often costs a tick of a box;
 /// asking too rarely costs the run.
 fn at_risk(lora: &Path, record: &Path) -> Vec<String> {
-    let noted = std::fs::read_to_string(record).unwrap_or_default();
-    let installed: Vec<&str> = noted
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .collect();
+    let installed = installed_names(record);
     let Ok(entries) = std::fs::read_dir(lora) else {
         return Vec::new();
     };
@@ -374,7 +382,7 @@ fn at_risk(lora: &Path, record: &Path) -> Vec<String> {
         .flatten()
         .filter(|entry| entry.path().join("adapter_config.json").is_file())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !installed.contains(&name.as_str()))
+        .filter(|name| !installed.contains(name))
         .collect()
 }
 
@@ -656,7 +664,12 @@ impl Paths {
     /// else is a run this panel cannot measure, which is why the paths are named in one
     /// place and given out rather than described.
     fn new(host: &Host, pack_id: &str) -> Self {
-        let dir = host.data_dir.join("cache").join("train").join(pack_id);
+        Self::under(host.data_dir.join("cache").join("train").join(pack_id))
+    }
+
+    /// The same layout under any root, which is how the tests build a run somewhere
+    /// they can scratch.
+    fn under(dir: PathBuf) -> Self {
         Self {
             dataset: dir.join("dataset.jsonl"),
             qa: dir.join("dataset.jsonl.qa.json"),
@@ -694,6 +707,9 @@ impl Paths {
 
 fn checkpoints(paths: &Paths, pack_id: &str) -> Vec<Checkpoint> {
     let scores = read_scores(&paths.score.join(format!("{pack_id}.json")));
+    // The install record is the only place the fact exists, so the table reads
+    // it back on every listing rather than being told what to claim.
+    let installed = installed_names(&paths.installed);
     let Ok(entries) = std::fs::read_dir(&paths.lora) else {
         return Vec::new();
     };
@@ -711,6 +727,7 @@ fn checkpoints(paths: &Paths, pack_id: &str) -> Vec<Checkpoint> {
         // `generate_samples.py` names a condition `lora_<adapter directory>`, which is what
         // ties a score back to the checkpoint it came from.
         let scored = scores.iter().find(|(group, _, _)| *group == format!("lora_{name}"));
+        let was_installed = installed.contains(&name);
         items.push(Checkpoint {
             name,
             path: text(&path),
@@ -719,6 +736,7 @@ fn checkpoints(paths: &Paths, pack_id: &str) -> Vec<Checkpoint> {
             lower_bound: scored.map(|(_, lower, _)| *lower),
             mean: scored.map(|(_, _, mean)| *mean),
             best: false,
+            installed: was_installed,
         });
     }
 
@@ -882,6 +900,64 @@ mod tests {
         assert!(at_risk(&lora, &record).is_empty(), "both are packs now");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The checkpoint table reads the install record back, so the panel can tell
+    /// an already-installed checkpoint from one still waiting. The `best` mark is
+    /// asserted alongside because it lives on the same rows and a future field
+    /// must not push either of the two facts out of the shape.
+    #[test]
+    fn a_checkpoint_tells_whether_a_pack_was_installed_from_it() {
+        let dir = std::env::temp_dir().join("voice-core-training-installed");
+        let _ = std::fs::remove_dir_all(&dir);
+        let paths = Paths::under(dir);
+        let best = "checkpoint_best_val_loss_0001000_0.885155";
+        for name in [best, "checkpoint_best_val_loss_0000500_0.906366"] {
+            std::fs::create_dir_all(paths.lora.join(name)).expect("a temp checkpoint");
+            std::fs::write(paths.lora.join(name).join("adapter_config.json"), "{}")
+                .expect("its config");
+        }
+
+        // No record yet: the first listing must not claim anything as installed,
+        // and the lowest val loss is still the pre-selected one.
+        let listed = checkpoints(&paths, "smoke");
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[0].name, best);
+        assert!(listed[0].best);
+        assert_eq!(
+            listed.iter().filter(|row| row.installed).count(),
+            0,
+            "without a record nothing reads as installed"
+        );
+
+        // A record naming one of them, written the way `record_installed` writes it:
+        // one name per line, and this file carries trailing whitespace and a blank
+        // line because a human may have looked at it with an editor in between.
+        std::fs::write(&paths.installed, format!("{best}  \n\n")).expect("the record");
+        let listed = checkpoints(&paths, "smoke");
+        assert_eq!(
+            listed
+                .iter()
+                .filter(|row| row.installed)
+                .map(|row| row.name.as_str())
+                .collect::<Vec<_>>(),
+            vec![best],
+            "exactly the named checkpoint reads as installed"
+        );
+
+        // A record naming something else changes nothing: a name that matches no
+        // checkpoint is a stale line, not a fact about these two.
+        std::fs::write(
+            &paths.installed,
+            "checkpoint_best_val_loss_0009999_9.999999\n",
+        )
+        .expect("a stale record");
+        assert!(
+            !checkpoints(&paths, "smoke").iter().any(|row| row.installed),
+            "a record of another run's names does not install these"
+        );
+
+        let _ = std::fs::remove_dir_all(&paths.dir);
     }
 
     /// A status file as `_layout.py` writes one, mid-run: the schema the two sides share,

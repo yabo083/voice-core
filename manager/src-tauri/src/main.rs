@@ -27,6 +27,7 @@ mod shell;
 mod supervise;
 mod training;
 mod usage;
+mod watch;
 
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -52,6 +53,7 @@ fn main() {
             app.manage(Host::new());
             build_tray(app.handle())?;
             supervise::watch(app.handle().clone());
+            watch::start(app.handle().clone());
             // Before the first paint, so the caption is never briefly the system's.
             if let Some(window) = app.get_webview_window("main") {
                 caption::paint(&window);

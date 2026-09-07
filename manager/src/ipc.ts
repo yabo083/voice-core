@@ -188,6 +188,11 @@ export const onBootstrapEvent = (fn: (e: BootstrapEvent) => void): Promise<Unlis
 export const onStackState = (fn: (s: StackState) => void): Promise<UnlistenFn> =>
   listen<StackState>("stack://state", (e) => fn(e.payload));
 
+/** The host pushes once per config.json write, whoever wrote it - the panel's own
+ *  settings screen, the runtime, or a hand edit. `path` is the file that changed. */
+export const onConfigChanged = (fn: (p: { path: string }) => void): Promise<UnlistenFn> =>
+  listen<{ path: string }>("config://changed", (e) => fn(e.payload));
+
 // --- 配置 screen: the two config files, read-only ---------------------------------------
 
 /** One configuration file as the host read it.
@@ -287,6 +292,9 @@ export interface TrainingCheckpoint {
   lower_bound: number | null;
   mean: number | null;
   best: boolean;
+  /** Read back from installed.txt beside the checkpoint: which of the candidates the
+   *  scratch tree holds are already registered packs. */
+  installed: boolean;
 }
 
 export interface ScratchEntry {

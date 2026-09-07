@@ -131,6 +131,49 @@ const LOG_CAP = 2000;
  *  measured only when a stage changes, because walking `latents\` is thousands of stats. */
 const POLL_MS = 2000;
 
+/** Words worth reading in a wall of process output. The console repaints everything the six
+ *  steps print, so the eye needs three fixed landing points: what went wrong, what is about
+ *  to go wrong, and the numbers that say how far along it is. One compiled regex over the
+ *  message with named groups keeps the pass single and the classes declarative. The Chinese
+ *  words stand outside `\b`, which JS measures against ASCII word characters only — around
+ *  失败 it would demand a Latin letter on one side and never match after a space. */
+const EMPHASIS =
+  /(?<fail>\b(?:ERROR|Error|FAILED)\b|\berror:|失败)|(?<warn>\b(?:WARN|Warning)\b|警告)|(?<metric>\bloss [0-9]+(?:\.[0-9]+)?|\bstep \d+(?:\/\d+)?|\bETA [0-9:]+)/g;
+
+/** Message fragments between emphasis matches, with the class the match earns. Plain runs
+ *  carry `cls: null` and render as a bare text node, so a line without highlights costs
+ *  exactly one text node — the same DOM the un-tokenized version built. */
+interface Segment {
+  text: string;
+  cls: string | null;
+}
+
+/** Split a log message into plain and emphasised runs.
+ *
+ *  Safety comes from construction, not from escaping: every run becomes a text node or a
+ *  span built through `el`, so the message never reaches the HTML parser — the same rule
+ *  the rest of the app follows by going through textContent. `matchAll` cannot loop on a
+ *  zero-width match, and a named group the class map below does not know fails typecheck
+ *  rather than failing silently. */
+function tokenize(message: string): Segment[] {
+  const segments: Segment[] = [];
+  let cursor = 0;
+  for (const match of message.matchAll(EMPHASIS)) {
+    const groups = match.groups ?? {};
+    const cls =
+      groups.fail !== undefined
+        ? "console__em--fail"
+        : groups.warn !== undefined
+          ? "console__em--warn"
+          : "console__em--metric";
+    if (match.index > cursor) segments.push({ text: message.slice(cursor, match.index), cls: null });
+    segments.push({ text: match[0], cls });
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < message.length) segments.push({ text: message.slice(cursor), cls: null });
+  return segments;
+}
+
 /** What each file of a run is for. Keyed by the name on disk because that is what the backend
  *  reports — it measures files, it does not name them in Chinese. */
 const ARTEFACT: Record<string, string> = {
@@ -177,6 +220,10 @@ export function createTrainingScreen(): TrainingScreen {
   let installing = false;
   let autoScroll = true;
   let ticker = 0;
+  /** Log lines parsed but not yet on screen; flushed as one fragment by `flushLog`. */
+  const logQueue: HTMLElement[] = [];
+  /** The flush timer, or 0 when nothing is queued. */
+  let logTimer = 0;
 
   function current(): TrainingRun | null {
     return runs.find((run) => run.pack_id === selected) ?? null;
@@ -322,17 +369,48 @@ export function createTrainingScreen(): TrainingScreen {
   const bar = el("progress", { class: "bar", max: "1", value: "0" });
   const barText = el("span", { class: "stage__bartext" });
   const progressWrap = el("div", { class: "stage__progress", hidden: true }, bar, barText);
-  const logLines = el("ol", {
-    class: "console",
-    role: "log",
-    // Deliberately not a live region: the train stage scrolls faster than speech, and
-    // announcing it would bury the stage transitions that matter.
-    "aria-live": "off",
-    tabindex: "0",
-    onscroll: () => {
-      autoScroll = logLines.scrollHeight - logLines.clientHeight - logLines.scrollTop < 24;
+
+  // The console is a frame with the scroll inside it, which is the shape app.css already
+  // names: `.console` holds the border and pins the follow badge, `.console__stream` is the
+  // part that actually scrolls, so the badge survives at the corner instead of scrolling
+  // away with the text. Scroll geometry is read off the stream for the same reason.
+  const logStream = el("ol", { class: "console__stream" });
+  const followChip = el(
+    "button",
+    {
+      class: "console__tail",
+      type: "button",
+      hidden: true,
+      onclick: () => followLog(),
     },
-  });
+    icon("arrow-down", "chip__icon"),
+    el("span", { text: "跟随" }),
+  );
+  const logLines = el(
+    "div",
+    {
+      class: "console",
+      role: "log",
+      // Deliberately not a live region: the train stage scrolls faster than speech, and
+      // announcing it would bury the stage transitions that matter.
+      "aria-live": "off",
+      tabindex: "0",
+    },
+    logStream,
+    followChip,
+  );
+
+  /** Put the console back on the tail and retire the badge.
+   *
+   *  The badge stays only for the moment after `followLog` clears `hidden` — one frame in
+   *  which the click's own re-render could decide otherwise — so `.is-active` is a no-op
+   *  there and earns its keep nowhere else: showing the badge while already following would
+   *  be a button that answers a question nobody asked. */
+  function followLog(): void {
+    autoScroll = true;
+    logStream.scrollTop = logStream.scrollHeight;
+    followChip.hidden = true;
+  }
 
   fill(
     progress.body,
@@ -401,7 +479,12 @@ export function createTrainingScreen(): TrainingScreen {
    *
    *  `progress` is skipped on purpose: a 2000-step run emits thousands of them and the live
    *  strip above already shows the latest. What is left is the stage boundaries and the
-   *  sentences a step chose to say, which is what a console is for. */
+   *  sentences a step chose to say, which is what a console is for.
+   *
+   *  Parsing happens now; painting happens in `flushLog`. The train stage writes in bursts —
+   *  a burst is the whole tqdm refresh — and appending each line separately pays one forced
+   *  reflow per line for `scrollHeight`, which during a burst is hundreds of layouts for one
+   *  visible frame. */
   function appendLog(line: string): void {
     let event: { stage?: string; event?: string; message?: string };
     try {
@@ -413,19 +496,65 @@ export function createTrainingScreen(): TrainingScreen {
     }
     const kind = event.event ?? "log";
     if (kind === "progress") return;
-    logLines.appendChild(
+    const message = event.message ?? "";
+    logQueue.push(
       el(
         "li",
         { class: `console__line console__line--${kind}` },
         el("code", { class: "console__stage", dir: "ltr", text: event.stage ?? "" }),
-        el("span", { class: "console__text", text: event.message ?? "" }),
+        el(
+          "span",
+          { class: "console__text" },
+          ...tokenize(message).map((segment) =>
+            segment.cls === null
+              ? document.createTextNode(segment.text)
+              : el("span", { class: segment.cls, text: segment.text }),
+          ),
+        ),
       ),
     );
-    while (logLines.childElementCount > LOG_CAP && logLines.firstChild !== null) {
-      logLines.removeChild(logLines.firstChild);
-    }
-    if (autoScroll) logLines.scrollTop = logLines.scrollHeight;
+    if (logTimer === 0) logTimer = window.setTimeout(flushLog, 100);
   }
+
+  /** Drain the queue into the stream as one fragment, trim, and scroll once.
+   *
+   *  The timer wins over a rAF here because the input itself is asynchronous — lines arrive
+   *  from IPC between frames, so a rAF flush could only republish what the previous frame
+   *  already had, adding a frame of latency and no coalescing the timer does not already
+   *  give. Trimming happens on the DOM after the batch, so a burst past LOG_CAP costs one
+   *  removal loop per flush, not per line. */
+  function flushLog(): void {
+    logTimer = 0;
+    if (logQueue.length === 0) return;
+    const batch = logQueue.splice(0);
+    logStream.append(...batch);
+    while (logStream.childElementCount > LOG_CAP && logStream.firstChild !== null) {
+      logStream.removeChild(logStream.firstChild);
+    }
+    if (autoScroll) logStream.scrollTop = logStream.scrollHeight;
+    else followChip.hidden = false;
+  }
+
+  /** Empty the stream and everything still waiting to enter it. Every "the run the console
+   *  was showing is gone" path goes through this, so a truncated transcript can never be
+   *  followed by lines parsed from the run before it. */
+  function clearLog(): void {
+    window.clearTimeout(logTimer);
+    logTimer = 0;
+    logQueue.length = 0;
+    fill(logStream);
+  }
+
+  /** Following is the default and the stream says when it was left: a scroll upward means
+   *  the user is reading, and re-pinning under their eyes would be the console fighting
+   *  them. The same threshold decides when they have read their way back down, which is
+   *  also how the badge retires itself. */
+  logStream.addEventListener("scroll", () => {
+    const atBottom = logStream.scrollHeight - logStream.clientHeight - logStream.scrollTop < 24;
+    if (atBottom === autoScroll) return;
+    autoScroll = atBottom;
+    followChip.hidden = atBottom;
+  });
 
   // ---------------------------------------------------------------------------- 成果
   const results = panel({
@@ -480,7 +609,14 @@ export function createTrainingScreen(): TrainingScreen {
               renderResults();
             },
           },
-          el("span", { class: "table__cell", dir: "ltr", text: item.name }),
+          el(
+            "span",
+            { class: "table__cell" },
+            el("span", { dir: "ltr", text: item.name }),
+            // Derived, not stored: installed.txt on the scratch tree is the state; a chip
+            // that paraphrases it would just be a second copy to keep in sync.
+            item.installed ? chip("已安装", "ok", "check") : null,
+          ),
           el("span", { class: "table__cell", text: item.step === null ? "—" : String(item.step) }),
           el("span", {
             class: "table__cell",
@@ -628,16 +764,18 @@ export function createTrainingScreen(): TrainingScreen {
       }),
     );
     const reason = installBlocker();
+    const chosenItem = tree?.checkpoints.find((item) => item.path === chosen) ?? null;
+    const label = chosenItem?.installed === true ? "重新安装" : "安装为音色包";
     fill(
       cmdRight,
       reason === null
         ? button({
-            label: "安装为音色包",
+            label,
             kind: "primary",
             glyph: "check",
             onClick: () => void install(),
           })
-        : blockedButton({ label: "安装为音色包", glyph: "check" }, reason),
+        : blockedButton({ label, glyph: "check" }, reason),
     );
   }
 
@@ -654,7 +792,7 @@ export function createTrainingScreen(): TrainingScreen {
       selected = runs[0]?.pack_id ?? null;
       treeKey = "";
       logOffset = 0;
-      fill(logLines);
+      clearLog();
     }
     renderRuns();
     renderWizard();
@@ -690,7 +828,8 @@ export function createTrainingScreen(): TrainingScreen {
     logOffset = 0;
     discardRefusal = null;
     autoScroll = true;
-    fill(logLines);
+    followChip.hidden = true;
+    clearLog();
     renderRuns();
     renderWizard();
     renderMetrics();
@@ -718,7 +857,7 @@ export function createTrainingScreen(): TrainingScreen {
     }
     // The transcript shrank: the first stage of a new run truncated it, so the console is
     // showing a run that no longer exists.
-    if (tailed.offset < logOffset) fill(logLines);
+    if (tailed.offset < logOffset) clearLog();
     logOffset = tailed.offset;
     for (const line of tailed.lines) appendLog(line);
   }
@@ -730,6 +869,10 @@ export function createTrainingScreen(): TrainingScreen {
     renderControls();
     try {
       await installTrainedPack({ checkpoint: chosen, pack_id: run.pack_id });
+      // The read-back, kept even though config://changed now also fires on this write: an
+      // event push exists to tell this panel about changes it did not cause, and confirming
+      // one's own action by listening for one's own side effect would be observing the
+      // notification instead of the result.
       await refreshVoices();
       toast(`音色包 ${run.pack_id} 已安装，将在下次服务加载时生效`, "ok");
     } catch (err: unknown) {
@@ -761,8 +904,12 @@ export function createTrainingScreen(): TrainingScreen {
     await poll();
   }
 
+  /** The running stage's elapsed time moving is not news while the window is hidden: the
+   *  redraw lands in a buffer nobody can see, so the ticker observes the same visibility
+   *  rule the poll does and restarts on the next show. */
   function startTicker(): void {
-    if (ticker === 0) ticker = window.setInterval(renderWizard, 250);
+    if (ticker !== 0 || document.visibilityState !== "visible") return;
+    ticker = window.setInterval(renderWizard, 250);
   }
 
   function stopTicker(): void {
@@ -770,6 +917,11 @@ export function createTrainingScreen(): TrainingScreen {
     window.clearInterval(ticker);
     ticker = 0;
   }
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") startTicker();
+    else stopTicker();
+  });
 
   const root = el(
     "div",
@@ -796,7 +948,20 @@ export function createTrainingScreen(): TrainingScreen {
   renderFiles();
   renderControls();
   void poll();
-  window.setInterval(() => void poll(), POLL_MS);
+
+  // The poll and the ticker follow the same rule as state.ts::startStatusPolling: a window
+  // closed to the tray has no reader, and the files on disk keep no appointment — a hidden
+  // window skips its beats, and coming back catches up immediately instead of waiting out
+  // the interval. The screen is built at boot and stays mounted while hidden, so without
+  // this gate every navigation away from 训练 would keep two file reads running forever.
+  window.setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    void poll();
+  }, POLL_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState !== "visible") return;
+    void poll();
+  });
 
   return Object.assign(root, { commandBar });
 }

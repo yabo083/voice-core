@@ -8,6 +8,41 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [Unreleased]
+
+The panel's observability items from `ROADMAP.md`: the training console reads like a log
+instead of like DOM churn, an installed checkpoint says so, and config.json changes made
+outside the panel arrive as events instead of as staleness.
+
+### Added
+
+- **The panel watches `config.json`.** A 1 s mtime poll in the host (`watch.rs`, the
+  supervisor's own probe pattern) emits `config://changed` on every transition, whoever
+  wrote the file - an agent registering packs from a shell included. The panel debounces
+  the events into one refresh of the voices and inventory stores per quiet 500 ms, so a
+  registration burst costs one re-read, not one per write. Only config.json is watched:
+  every registration fact the panel shows comes from its `voicePacks` array, and a pack's
+  own manifest is read fresh whenever the screen that shows it opens.
+- **Checkpoint table marks installed packs.** `installed.txt` beside the scratch tree has
+  been written by every install since 1.2.0 and read back by nothing; `checkpoints()` now
+  reads it, the serialized `Checkpoint` carries `installed`, and the table shows an
+  已安装 chip with the primary button renaming itself to 重新安装 for the selected one.
+  The mark is derived at listing time, not stored - the file remains the only copy of the
+  fact.
+
+### Changed
+
+- **The training console batches, highlights, and follows.** Log lines parse as they
+  arrive and paint as one 100 ms flush, so a tqdm burst pays one reflow instead of one
+  per line; the scroll geometry reads off a dedicated `.console__stream`, which is the
+  structure `app.css` had already styled and the screen had never adopted. Messages get
+  three emphasis tokens (error words, warnings, `loss`/`step`/`ETA` metrics) through a
+  single-pass tokenizer that builds text nodes and spans - never innerHTML. Scrolling up
+  detaches the tail and shows a 跟随 badge; scrolling back to the bottom re-engages it.
+- **The panel polls only while visible.** The 训练 screen's 2 s file poll and its 250 ms
+  ticker ran through tray-hidden windows; both now follow `state.ts`'s visibility rule
+  and catch up on the next show.
+
 ## [1.5.0] - 2026-09-06
 
 Training schedules itself from the corpus instead of from constants, and stops when it stops

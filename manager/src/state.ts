@@ -1,4 +1,4 @@
-// Shared state. Three screens read the same four facts, so they are fetched once
+// Shared state. Three screens read the same five facts, so they are fetched once
 // here rather than once per screen: two of them (status, stack) change on a timer
 // or an event, and duplicating that would mean two pollers disagreeing about
 // whether the runtime is up.
@@ -7,6 +7,7 @@ import {
   detect,
   ipcMessage,
   listVoices,
+  onConfigChanged,
   resourceUsage,
   runtimeStatus,
   type Inventory,
@@ -126,5 +127,29 @@ export function startStatusPolling(): void {
     if (document.visibilityState !== "visible") return;
     void refreshStatus();
     void refreshUsage();
+  });
+}
+
+/** External config.json changes reach the stores here, once.
+ *
+ *  The event carries only a path, so the answer to "what changed" is a re-read of the two
+ *  stores that each hold half the picture: `voices` reads config.json itself (and the
+ *  runtime when it is up), while `inventory` carries the pack list the deploy screen's
+ *  badge and rail count derive from.
+ *
+ *  Writes arrive in bursts — registering a pack touches config.json more than once, and an
+ *  agent installing one writes it repeatedly — so events are debounced into one refresh
+ *  per quiet 500 ms rather than one per event. Writes this panel made do not come through
+ *  here: their screens re-read after their own command resolves, which is observing the
+ *  result rather than eavesdropping on the notification. */
+export function startConfigWatcher(): void {
+  let timer = 0;
+  void onConfigChanged(() => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => {
+      timer = 0;
+      void refreshVoices();
+      void refreshInventory();
+    }, 500);
   });
 }

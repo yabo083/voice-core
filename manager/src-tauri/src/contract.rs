@@ -18,6 +18,20 @@ pub const EVENT_STACK: &str = "stack://state";
 /// `bootstrap://event` plus an optional `checkpoint`, which the train and score
 /// stages use to name the artefact a line is about.
 pub const EVENT_TRAIN: &str = "train://event";
+/// `data/config.json` changed under a hand this process does not own — an
+/// agent's pack registration or removal included. The payload is
+/// [`ConfigChange`], and the panel is expected to re-read rather than to trust
+/// the knock as a description of what moved.
+pub const EVENT_CONFIG: &str = "config://changed";
+
+/// The payload of `EVENT_CONFIG`: the absolute path of the file whose mtime
+/// moved. A path rather than the contents, because the panel reads the file
+/// through the commands it already has — this event is a knock, not the
+/// delivery.
+#[derive(Clone, Debug, Serialize)]
+pub struct ConfigChange {
+    pub path: String,
+}
 
 /// A voice pack, as both `config.json`'s `voicePacks` array and
 /// `GET /api/voices` spell it.
@@ -151,4 +165,11 @@ pub struct Checkpoint {
     /// Pre-selected. The lowest validation loss, which is what the trainer's own
     /// best-checkpoint selection means.
     pub best: bool,
+    /// Whether a pack has been installed from this checkpoint, out of the run's
+    /// `installed.txt`. That file is the only place the fact exists — the
+    /// installer records no provenance — so it is read back on every listing
+    /// rather than remembered, which is what keeps the screen offering to
+    /// install a checkpoint that is already a voice.
+    #[serde(default)]
+    pub installed: bool,
 }

@@ -22,7 +22,15 @@
 import { el, fill } from "./dom";
 import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, type Inventory } from "./ipc";
-import { inventory, refreshInventory, stack, startStatusPolling, status } from "./state";
+import {
+  inventory,
+  refreshInventory,
+  stack,
+  startConfigWatcher,
+  startStatusPolling,
+  status,
+  voices,
+} from "./state";
 import { toast } from "./toast";
 import { navigate } from "./ui";
 import { createDeployScreen, type DeployScreen } from "./screens/deploy";
@@ -165,8 +173,10 @@ function mount(app: HTMLElement): void {
     );
 
     // Badges only exist when they carry information: a rail that always shows three
-    // counters trains people to stop reading it.
-    const packCount = inv?.packs.length ?? 0;
+    // counters trains people to stop reading it. The voices count reads the voices store
+    // rather than the inventory's pack list - voices is the store that re-reads config.json
+    // (and the runtime) when packs change, so it is the one whose count moves at all.
+    const packCount = voices.value?.length ?? 0;
     badges.voices.textContent = packCount > 0 ? String(packCount) : "";
     badges.status.textContent = current.reachable ? "运行中" : "";
 
@@ -214,6 +224,9 @@ function mount(app: HTMLElement): void {
   status.subscribe(renderRail);
   stack.subscribe(renderRail);
   inventory.subscribe(renderRail);
+  // Store keeps a listener set, so one render function reading three stores is three
+  // subscriptions, not three renders fighting over one badge.
+  voices.subscribe(renderRail);
 
   document.addEventListener("app:navigate", (ev: Event) => {
     const { to, focus } = (ev as CustomEvent<{ to: ScreenId; focus: boolean }>).detail;
@@ -262,6 +275,7 @@ async function boot(): Promise<void> {
 
   mount(app);
   startStatusPolling();
+  startConfigWatcher();
 }
 
 void boot();

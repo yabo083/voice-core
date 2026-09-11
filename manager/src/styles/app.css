@@ -3289,24 +3289,39 @@ select.input:focus-visible,
   }
 }
 
-/* Hotkey capture: the field plus a record button; while listening, the field glows
-   and the cancel hint sits right of it. */
+/* Hotkey capture: the whole field is the control. Idle it reads as the chord; while
+   listening it says so and takes the accent, and any click elsewhere (blur) cancels. */
 .capture {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-
-.capture .input {
-  width: 14ch;
-}
-
-.capture .input.is-capturing {
-  border-color: var(--accent);
-}
-
-.form__capture-hint {
-  color: var(--ink-faint);
-  font-size: var(--fs-sm);
+  max-width: 24ch;
+  justify-content: center;
+  text-align: center;
+  cursor: pointer;
   white-space: nowrap;
+}
+
+.capture.is-capturing {
+  border-color: var(--accent);
+  color: var(--ink-faint);
+}
+
+/* Language switch: one blurred crossfade instead of a visible rebuild. The mask fades
+   in over the old window before the reload and the next boot fades the same mask away
+   (i18n.ts owns the timing; this only owns the look). */
+.lang-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  background: var(--bg-inset);
+  backdrop-filter: blur(10px);
+  opacity: 0;
+  pointer-events: all;
+  transition: opacity 260ms var(--ease);
+}
+
+.lang-mask.is-shown {
+  opacity: 0.92;
+}
+
+.lang-mask.is-fading {
+  opacity: 0;
 }

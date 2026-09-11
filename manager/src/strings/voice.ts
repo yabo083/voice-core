@@ -13,8 +13,6 @@ export const voiceZh = {
   synthesis: "合成参数",
   expression: "情绪控制",
   audition: "语音试听",
-  raw: "源配置文件",
-  reload: "重新载入",
   openPackDir: "在文件资源管理器中打开音色包目录",
 
   provPackHint: "当前属性由音色包内的 voicepack.json 定义。",
@@ -82,10 +80,6 @@ export const voiceZh = {
   auditionNoPresenter:
     "音频合成完成；当前未检测到活跃的字幕客户端，未触发本地播放。启动字幕端后重试即可收听。",
 
-  unknownTitle: "检测到当前版本未识别的配置字段",
-  unknownBody: (keys: string) =>
-    `${keys}。保存配置时将精准修改对应项，其余未识别字段保持原样保留。`,
-
   loadFailed: (detail: string) => `加载音色包配置失败：${detail}`,
   notFound: "音色包未找到",
   notFoundBody: (id: string) => `注册表中未找到音色包 ID：${id}。`,
@@ -104,8 +98,6 @@ export const voiceEn: typeof voiceZh = {
   synthesis: "Synthesis",
   expression: "Emotion",
   audition: "Audition",
-  raw: "Source manifest",
-  reload: "Reload",
   openPackDir: "Open the voice-pack folder in File Explorer",
   provPackHint: "This field is defined by the pack's own voicepack.json.",
   provConfigHint:
@@ -167,9 +159,6 @@ export const voiceEn: typeof voiceZh = {
   auditionCold: " (including model cold start)",
   auditionNoPresenter:
     "Synthesis finished; no active subtitle client was detected, so nothing played locally. Start the subtitle end and try again to hear it.",
-  unknownTitle: "Config fields this version does not recognise",
-  unknownBody: (keys) =>
-    `${keys}. Saving edits exactly the fields it knows; every unrecognised field is preserved as-is.`,
   loadFailed: (detail) => `Loading the voice pack's config failed: ${detail}`,
   notFound: "Voice pack not found",
   notFoundBody: (id) => `No voice pack with the ID ${id} is in the registry.`,

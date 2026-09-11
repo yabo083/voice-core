@@ -27,6 +27,7 @@ import {
   hotkey as hotkeyRow,
   number,
   segmented,
+  select,
   toggle,
 } from "../form";
 import { currentLang, languages, setLang, t, type Lang } from "../i18n";
@@ -398,7 +399,7 @@ export function createSettingsScreen(): HTMLElement {
     fill(
       language.body,
       form(
-        segmented({
+        select({
           key: "set-language",
           label: t.settings.language,
           hint: t.settings.languageHint,
@@ -606,10 +607,10 @@ export function createSettingsScreen(): HTMLElement {
         el("h1", { class: "screen__title", tabindex: "-1", text: t.settings.title }),
       ),
     ),
+    language.root,
     dialog.root,
     keys.root,
     service.root,
-    language.root,
     history.root,
   );
 }

@@ -11,9 +11,7 @@
 // Two properties this page has to keep, both of them invisible when they work:
 //
 //   - A field this build has never heard of survives a save. The write is a byte-span
-//     splice of one leaf, so the rest of the file is never even parsed on the way through -
-//     and the keys this build does not know are listed at the bottom, because a promise
-//     nobody can see is not one.
+//     splice of one leaf, so the rest of the file is never even parsed on the way through.
 //   - Where a value comes from stays visible. `GET /api/voices` reports, per field, which
 //     file won it; a control whose value is currently decided by the registry or by a
 //     built-in says so, because editing it here moves that decision into the pack.
@@ -34,7 +32,6 @@ import {
   group,
   number,
   provenance,
-  rawFile,
   segmented,
   tags,
   text,
@@ -44,8 +41,6 @@ import {
   importAvatar,
   ipcMessage,
   packEffective,
-  packManifestFile,
-  type ConfigFile,
   type EffectivePack,
   type Pack,
   type PackKind,
@@ -173,7 +168,6 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
   let config: PackConfig | null = null;
   let effective: EffectivePack | null = null;
   let globals: Settings | null = null;
-  let manifest: ConfigFile | null = null;
 
   const title = el("h2", { class: "detail__title", tabindex: "-1", text: shownName(pack) });
   const subtitle = el("code", { class: "detail__subtitle", dir: "ltr", text: pack.id });
@@ -221,20 +215,6 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
   const synthesis = panel({ title: t.voice.synthesis });
   const expression = panel({ title: t.voice.expression });
   const audition = panel({ title: t.voice.audition });
-  // Kept, unlike the settings screen's: a manifest can hold keys this build's form does not
-  // render, and seeing them is the whole point.
-  const raw = panel({
-    title: t.voice.raw,
-    actions: [
-      button({
-        label: t.voice.reload,
-        glyph: "arrow-clockwise",
-        small: true,
-        kind: "quiet",
-        onClick: () => void load(),
-      }),
-    ],
-  });
 
   fill(
     actions,
@@ -271,8 +251,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
   }
 
   /** One edit, then the pieces a write makes stale: the mock, the merged view and its
-   *  provenance, the raw file, the list behind this page (a name change shows up there), and
-   *  the title above. */
+   *  provenance, and the list behind this page (a name change shows up there). */
   async function apply(edit: PackEdit): Promise<void> {
     config = await packConfigWrite(pack.id, edit);
     title.textContent = shownName(config.effective);
@@ -282,13 +261,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
   }
 
   async function refreshSide(): Promise<void> {
-    const [merged, shown] = await Promise.all([
-      packEffective(pack.id).catch(() => null),
-      packManifestFile(pack.id).catch(() => null),
-    ]);
-    effective = merged;
-    manifest = shown;
-    renderRaw();
+    effective = await packEffective(pack.id).catch(() => null);
   }
 
   /** Why a control is inert, or undefined when it is not. */
@@ -662,47 +635,22 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
     );
   }
 
-  function renderRaw(): void {
-    const shown = manifest;
-    const current = config;
-    const open = (() => {
-      const head = raw.body.querySelector<HTMLElement>("#pack-manifest-raw");
-      return head !== null && !head.hidden;
-    })();
-    fill(
-      raw.body,
-      shown === null ? null : rawFile(shown, "pack-manifest-raw", open),
-      current === null || current.unknown.length === 0
-        ? null
-        : note(
-            "info",
-            t.voice.unknownTitle,
-            el("p", {
-              text: t.voice.unknownBody(current.unknown.join("、")),
-            }),
-          ),
-    );
-  }
-
   function renderAll(): void {
     renderIdentity();
     renderStyle();
     renderSynthesis();
     renderExpression();
-    renderRaw();
   }
 
   async function load(): Promise<void> {
     try {
-      const [own, merged, shown, global] = await Promise.all([
+      const [own, merged, global] = await Promise.all([
         packConfig(pack.id),
         packEffective(pack.id).catch(() => null),
-        packManifestFile(pack.id).catch(() => null),
         settingsRead().catch(() => null),
       ]);
       config = own;
       effective = merged;
-      manifest = shown;
       globals = global;
     } catch (err: unknown) {
       toast(t.voice.loadFailed(ipcMessage(err)), "fail");
@@ -722,7 +670,6 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
     synthesis.root,
     expression.root,
     audition.root,
-    raw.root,
   );
   renderAll();
   renderAudition();

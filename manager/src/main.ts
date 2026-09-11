@@ -20,7 +20,7 @@
 // where the back arrow goes.
 
 import { el, fill } from "./dom";
-import { t } from "./i18n";
+import { settleLanguageTransition, t } from "./i18n";
 import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, type Inventory } from "./ipc";
 import {
@@ -264,6 +264,10 @@ function mount(app: HTMLElement): void {
 async function boot(): Promise<void> {
   const app = document.querySelector<HTMLElement>("#app");
   if (app === null) return;
+
+  // Before anything renders: a language switch reloads under a blurred mask, and this
+  // window may be the reload - so it comes back in behind the same mask it left behind.
+  settleLanguageTransition();
 
   window.addEventListener("unhandledrejection", (ev: PromiseRejectionEvent) => {
     toast(ipcMessage(ev.reason), "fail");

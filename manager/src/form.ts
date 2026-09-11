@@ -683,56 +683,55 @@ function chordKey(ev: KeyboardEvent): string | null {
   return key.length === 1 ? key.toUpperCase() : key;
 }
 
-/** A hotkey row: the value as text (hand-typed, as before), plus a capture button that
- *  listens for the next chord and writes it - the interaction every game rebinding a key
- *  uses, because "type Ctrl+Alt+D into a field" asks for characters nobody thinks of as
- *  text. Validation is unchanged: the chord goes through `feedback.commit`, so a
- *  modifier-less capture is refused by the same rule a typed value is. */
+/** A hotkey row: the whole field is the capture control, the way a game rebinds a key.
+ *
+ *  Click it and it listens for the next chord - no separate button to find, no characters
+ *  to type. Esc or clicking away cancels; a chord goes through `feedback.commit`, so the
+ *  same modifier rule a typed value faced refuses a modifier-less capture. The field is
+ *  read-only display plus a gesture, which is why it is a button and not an input. */
 export function hotkey(spec: HotkeyRow): HTMLElement {
-  const input = el("input", {
-    class: "input input--mono",
-    type: "text",
-    value: spec.value,
-    placeholder: spec.placeholder,
-    spellcheck: "false",
-    disabled: spec.disabled !== undefined,
-  });
-  const capture = button({
-    label: t.common.capture,
-    small: true,
-    kind: "quiet",
-    disabled: spec.disabled !== undefined,
-    onClick: () => (capturing ? stop() : start()),
-  });
-  const hint = el("span", { class: "form__capture-hint", "aria-hidden": "true" });
-  const control = el("div", { class: "capture" }, input, capture, hint);
+  let value = spec.value;
+
+  const display = el("span", { class: "capture__value", text: value });
+  const control = el(
+    "button",
+    {
+      class: "input input--mono capture",
+      type: "button",
+      disabled: spec.disabled !== undefined,
+      "aria-label": spec.label,
+      onclick: () => start(),
+      onblur: () => stop(),
+    },
+    display,
+  );
   const { root, feedback } = scaffold(spec, control);
   control.removeAttribute("id");
-  input.id = `f-${spec.key}`;
 
   let capturing = false;
+
+  function paint(): void {
+    display.textContent = capturing ? t.common.capturing : value === "" ? (spec.placeholder ?? "") : value;
+    control.classList.toggle("is-capturing", capturing);
+  }
 
   function stop(): void {
     if (!capturing) return;
     capturing = false;
     window.removeEventListener("keydown", onKey, true);
-    capture.textContent = t.common.capture;
-    hint.textContent = "";
-    input.classList.remove("is-capturing");
+    paint();
   }
 
   function start(): void {
     if (capturing || spec.disabled !== undefined) return;
     capturing = true;
-    capture.textContent = t.common.capturing;
-    hint.textContent = t.common.captureCancel;
-    input.classList.add("is-capturing");
+    paint();
+    // Capture phase on `window`, so the chord lands here before it reaches any other
+    // control or the webview's own shortcuts; a captured chord must not also toggle
+    // something else while the user is holding it.
     window.addEventListener("keydown", onKey, true);
   }
 
-  /** Capture phase on `window`, so the chord lands here before it reaches any other
-   *  control or the webview's own shortcuts; a captured chord must not also toggle
-   *  something else while the user is holding it. */
   function onKey(ev: KeyboardEvent): void {
     ev.preventDefault();
     ev.stopPropagation();
@@ -749,13 +748,12 @@ export function hotkey(spec: HotkeyRow): HTMLElement {
       ev.metaKey ? "Win" : null,
       key,
     ].filter((part): part is string => part !== null);
-    input.value = parts.join("+");
+    value = parts.join("+");
     stop();
-    feedback.commit(input.value, true);
+    feedback.commit(value, true);
   }
 
-  input.addEventListener("input", () => feedback.commit(input.value, false));
-  input.addEventListener("blur", () => feedback.commit(input.value, true));
+  paint();
   return root;
 }
 

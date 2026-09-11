@@ -16,15 +16,25 @@ change to the public contract and is independent of the release version below
   screens and the shared widget vocabulary moved into per-domain dictionaries
   (`strings/*.ts`), with Chinese as the source of truth and the English object typed
   against it — a key present in one language and missing in the other is a compile error,
-  not a leak at runtime. A 语言 picker at the top of Settings switches immediately; the
+  not a leak at runtime. A 语言 dropdown at the top of Settings switches immediately; the
   choice is panel-local (localStorage), the backend holds no language state, and a change
-  reloads the window, which is the complete migration because every screen is derived from
-  backend state on boot.
-- **Hotkeys are captured, not typed.** The two hotkey fields in Settings gained a 捕获
-  button: press it, press the combination, the field fills itself — the rebinding
+  reloads the window behind a blurred crossfade mask, so the rebuild of every screen
+  reads as one transition instead of a visible re-layout.
+- **Hotkeys are captured, not typed.** The hotkey field in Settings is the capture
+  control: click it, press the combination, the field fills itself — the rebinding
   interaction every game uses, because "type Ctrl+Alt+D into a field" asks for characters
-  nobody thinks of as text. Hand typing still works; the chord goes through the same
-  validation a typed value does, and Esc cancels mid-capture.
+  nobody thinks of as text. Esc or clicking away cancels; the chord passes the same
+  validation a typed value would, and the field is sized to show a full chord.
+
+### Removed
+
+- **The pack page's 源配置文件 panel.** It was a source-level view of `voicepack.json`
+  wrapped in an expander inside a panel, which is two layers of chrome around a file the
+  form above it already edits; an agent reads the same file from the pack's folder, and a
+  user who wants bytes on screen has the path row and one click into an editor. The
+  unknown-keys notice lived only in this panel and goes with it — the write path still
+  splices one leaf and leaves every key it does not know untouched, so the promise holds
+  even though the viewer is gone.
 - **The status screen's usage card names the deploy skill.** Three copy rows now: everyday
   speech, training a voice, and deploying or repairing the environment — the third skill
   shipped in 1.6.0 but the one card that tells an agent what exists never mentioned it.

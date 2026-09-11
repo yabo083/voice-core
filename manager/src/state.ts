@@ -16,6 +16,7 @@ import {
   type Status,
   type Usage,
 } from "./ipc";
+import { t } from "./i18n";
 import { toast } from "./toast";
 
 class Store<T> {
@@ -61,7 +62,7 @@ export async function refreshInventory(): Promise<void> {
   try {
     inventory.set(await detect());
   } catch (err: unknown) {
-    toast(`环境检测失败：${ipcMessage(err)}`, "fail");
+    toast(t.common.detectFailed(ipcMessage(err)), "fail");
   }
 }
 
@@ -69,7 +70,7 @@ export async function refreshVoices(): Promise<void> {
   try {
     voices.set(await listVoices());
   } catch (err: unknown) {
-    toast(`加载音色包列表失败：${ipcMessage(err)}`, "fail");
+    toast(t.common.loadPacksFailed(ipcMessage(err)), "fail");
   }
 }
 

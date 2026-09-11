@@ -20,6 +20,7 @@
 // something either document can do.
 
 import { el, fill } from "../dom";
+import { t } from "../i18n";
 import { dirName, formatBytes, formatDuration, formatPercent } from "../format";
 import { icon, type IconName } from "../icons";
 import { ipcMessage, startStack, stopStack, type Inventory, type StackState } from "../ipc";
@@ -67,13 +68,13 @@ export interface StatusScreen extends HTMLElement {
 export function createStatusScreen(): StatusScreen {
   let busy = false;
 
-  const service = panel({ title: "服务" });
-  const metrics = panel({ title: "运行指标" });
+  const service = panel({ title: t.status.service });
+  const metrics = panel({ title: t.status.metrics });
   const env = panel({
-    title: "环境",
+    title: t.status.env,
     actions: [
       button({
-        label: "检查环境",
+        label: t.status.checkEnv,
         kind: "quiet",
         glyph: "arrow-clockwise",
         onClick: (ev: MouseEvent) => navigate("deploy", ev),
@@ -83,7 +84,7 @@ export function createStatusScreen(): StatusScreen {
 
   // Two sentences and nothing else. The wall of prose this replaced was a document rendered
   // into a window; a skill file is the document, and it already ships.
-  const guide = panel({ title: "使用说明", hint: "把其中一句粘贴给 agent，它自己去读技能文件。" });
+  const guide = panel({ title: t.status.guide, hint: t.status.guideHint });
 
   const cmdLeft = el("div", { class: "cmdbar__left" });
   const cmdRight = el("div", { class: "cmdbar__right" });
@@ -105,7 +106,7 @@ export function createStatusScreen(): StatusScreen {
       // 5 s poll to prove it would make a working button look dead.
       window.setTimeout(() => void refreshStatus(), 1200);
     } catch (err: unknown) {
-      toast(`${start ? "启动" : "停止"}服务失败：${ipcMessage(err)}`, "fail");
+      toast(t.status.toggleFailed(start ? t.status.start : t.status.stop, ipcMessage(err)), "fail");
     } finally {
       busy = false;
       renderControls();
@@ -128,14 +129,14 @@ export function createStatusScreen(): StatusScreen {
         ? null
         : up
           ? button({
-              label: "停止服务",
+              label: t.status.stopService,
               kind: "danger",
               glyph: "stop",
               disabled: busy,
               onClick: () => void toggleStack(false),
             })
           : button({
-              label: "启动服务",
+              label: t.status.startService,
               kind: "primary",
               glyph: "play",
               disabled: busy,
@@ -150,7 +151,7 @@ export function createStatusScreen(): StatusScreen {
     label: string,
     up: boolean,
     glyph: IconName,
-    words: [string, string] = ["运行中", "已停止"],
+    words: [string, string] = [t.status.running, t.status.stopped],
   ): HTMLElement {
     return el(
       "div",
@@ -168,28 +169,31 @@ export function createStatusScreen(): StatusScreen {
 
     fill(
       service.body,
-      el(
-        "div",
-        { class: "procs" },
-        procRow("运行时服务", processes.runtime, "pulse"),
-        procRow("字幕窗口", processes.presenter, "microphone-stage"),
-        procRow("音色模型", processes.model_loaded, "waveform", ["已加载", "未加载"]),
-      ),
-      current.reachable && body !== null
-        ? el("p", {
-            class: "panel__meta",
-            text: `${body.name} ${body.runtimeVersion} · API v${body.apiVersion} · 运行时间 ${formatDuration(body.uptimeMs)}`,
-          })
-        : null,
-      // Only a real error is worth a block: "not listening" is already said by the
-      // three rows above and by the rail.
-      !current.reachable && current.error !== null && processes.runtime
-        ? note("fail", "运行时无响应", el("p", { class: "note__detail", text: current.error }))
-        : null,
-      body !== null && body.worker.missing.length > 0
-        ? note(
-            "warn",
-            "存在缺失依赖或资源",
+        el(
+          "div",
+          { class: "procs" },
+          procRow(t.status.runtimeRow, processes.runtime, "pulse"),
+          procRow(t.status.presenterRow, processes.presenter, "microphone-stage"),
+          procRow(t.status.modelRow, processes.model_loaded, "waveform", [
+            t.status.loaded,
+            t.status.notLoaded,
+          ]),
+        ),
+        current.reachable && body !== null
+          ? el("p", {
+              class: "panel__meta",
+              text: `${body.name} ${body.runtimeVersion} · API v${body.apiVersion} · ${t.status.uptime(formatDuration(body.uptimeMs))}`,
+            })
+          : null,
+        // Only a real error is worth a block: "not listening" is already said by the
+        // three rows above and by the rail.
+        !current.reachable && current.error !== null && processes.runtime
+          ? note("fail", t.status.unreachable, el("p", { class: "note__detail", text: current.error }))
+          : null,
+        body !== null && body.worker.missing.length > 0
+          ? note(
+              "warn",
+              t.status.missingTitle,
             el(
               "ul",
               { class: "missing" },
@@ -219,11 +223,11 @@ export function createStatusScreen(): StatusScreen {
         el(
           "div",
           { class: "tiles" },
-          tile("运行时服务", "已停止"),
-          tile("语音引擎", "未启动"),
-          tile("显存占用", "空闲"),
-          tile("内存占用", "-"),
-          tile("音色包", "-"),
+          tile(t.status.runtimeTile, t.status.engineStopped),
+          tile(t.status.engineTile, t.status.engineStopped),
+          tile(t.status.vramTile, t.status.engineIdle),
+          tile(t.status.memTile, "-"),
+          tile(t.status.packsTile, "-"),
         ),
       );
       return;
@@ -231,12 +235,12 @@ export function createStatusScreen(): StatusScreen {
 
     const worker = body.worker;
     const engineText = !worker.running
-      ? "未启动"
+      ? t.status.engineStopped
       : worker.modelLoaded
-        ? "已加载"
+        ? t.status.loaded
         : worker.ready
-          ? "运行中（模型未加载）"
-          : "启动中";
+          ? t.status.engineRunningNoModel
+          : t.status.engineStarting;
     const engineTone: Tone = !worker.running ? "idle" : worker.modelLoaded ? "ok" : "warn";
 
     // The card's own usage is the number that is always available. Per-process VRAM is
@@ -250,15 +254,20 @@ export function createStatusScreen(): StatusScreen {
     const vram =
       use !== null && use.engineGpuMib !== null
         ? `${(use.engineGpuMib / 1024).toFixed(2)} GiB`
-        : (card ?? (worker.modelLoaded ? "模型驻留中" : worker.running ? "已释放" : "空闲"));
+        : (card ??
+          (worker.modelLoaded
+            ? t.status.modelResident
+            : worker.running
+              ? t.status.vramReleased
+              : t.status.engineIdle));
     const vramSub =
       use !== null && use.engineGpuMib !== null
-        ? (card === null ? undefined : `显卡总计 ${card}`)
+        ? (card === null ? undefined : t.status.vramTotal(card))
         : card === null
           ? undefined
           : worker.modelLoaded
-            ? "显卡总占用（显卡驱动未提供进程粒度指标）"
-            : "显卡总占用";
+            ? t.status.vramTotalNoPerProcess
+            : t.status.vramTotalLabel;
 
     fill(
       metrics.body,
@@ -266,31 +275,38 @@ export function createStatusScreen(): StatusScreen {
         "div",
         { class: "tiles" },
         tile(
-          "运行时服务",
-          `运行时间 ${formatDuration(body.uptimeMs)}`,
+          t.status.runtimeTile,
+          t.status.uptime(formatDuration(body.uptimeMs)),
           `${body.name} ${body.runtimeVersion}`,
           "ok",
         ),
         tile(
-          "语音引擎",
+          t.status.engineTile,
           engineText,
-          worker.running ? `运行时间 ${formatDuration(worker.uptimeMs)}` : undefined,
+          worker.running ? t.status.uptime(formatDuration(worker.uptimeMs)) : undefined,
           engineTone,
         ),
-        tile("显存占用", vram, vramSub, worker.modelLoaded ? "warn" : "idle"),
+        tile(t.status.vramTile, vram, vramSub, worker.modelLoaded ? "warn" : "idle"),
         tile(
-          "内存占用",
+          t.status.memTile,
           mem === null ? "-" : `${(mem / 1024).toFixed(2)} GiB`,
-          use === null || !running ? undefined : `引擎占用 ${(use.rssEngineMib / 1024).toFixed(2)} GiB`,
+          use === null || !running
+            ? undefined
+            : t.status.engineShare(`${(use.rssEngineMib / 1024).toFixed(2)} GiB`),
         ),
         tile(
-          "自动回收",
-          body.idleStopMs === 0 ? "未启用" : formatDuration(body.idleStopMs),
-          `已空闲 ${formatDuration(worker.idleMs)}`,
+          t.status.recycleTile,
+          body.idleStopMs === 0 ? t.status.recycleOff : formatDuration(body.idleStopMs),
+          t.status.idleFor(formatDuration(worker.idleMs)),
         ),
-        tile("音色包", `${body.voicePacks} 个`, undefined, body.voicePacks === 0 ? "fail" : "ok"),
-        tile("字幕客户端", `${body.presenters} 个`),
-        tile("并发请求", `${body.inFlight} 个`),
+        tile(
+          t.status.packsTile,
+          t.status.count(body.voicePacks),
+          undefined,
+          body.voicePacks === 0 ? "fail" : "ok",
+        ),
+        tile(t.status.presentersTile, t.status.count(body.presenters)),
+        tile(t.status.inflightTile, t.status.count(body.inFlight)),
       ),
       el(
         "div",
@@ -298,10 +314,10 @@ export function createStatusScreen(): StatusScreen {
         el(
           "div",
           { class: "spool__head" },
-          el("p", { class: "spool__label", text: "音频缓存池" }),
+          el("p", { class: "spool__label", text: t.status.spoolLabel }),
           el("span", {
             class: "spool__value",
-            text: `${body.spool.entries} 个 · ${formatBytes(body.spool.bytes)} / ${formatBytes(body.spool.maxBytes)} · ${formatPercent(body.spool.bytes, body.spool.maxBytes)}`,
+            text: `${t.status.count(body.spool.entries)} · ${formatBytes(body.spool.bytes)} / ${formatBytes(body.spool.maxBytes)} · ${formatPercent(body.spool.bytes, body.spool.maxBytes)}`,
           }),
         ),
         el("progress", { class: "bar", max: String(body.spool.maxBytes), value: String(body.spool.bytes) }),
@@ -330,10 +346,10 @@ export function createStatusScreen(): StatusScreen {
 
     const models = inv.models.filter((model) => model.present).length;
     const rows: [IconName, string, boolean][] = [
-      ["folder-open", "引擎源码", inv.engine_root !== null],
-      ["cpu", "Python 与 CUDA", inv.engine_python !== null && inv.python_ok],
-      ["database", `模型权重 ${models} / ${inv.models.length}`, models === inv.models.length],
-      ["microphone-stage", `音色包 ${inv.packs.length}`, inv.packs.length > 0],
+      ["folder-open", t.status.engineSource, inv.engine_root !== null],
+      ["cpu", t.status.pythonCuda, inv.engine_python !== null && inv.python_ok],
+      ["database", t.status.weights(models, inv.models.length), models === inv.models.length],
+      ["microphone-stage", t.status.packs(inv.packs.length), inv.packs.length > 0],
     ];
 
     // runtime_json is always <data dir>\runtime.json, whether the file exists or not,
@@ -351,20 +367,20 @@ export function createStatusScreen(): StatusScreen {
             { class: "procs__item" },
             icon(glyph, "procs__icon"),
             el("span", { class: "procs__label", text: label }),
-            ok ? chip("就绪", "ok", "check-circle") : chip("缺失", "warn", "warning"),
+            ok ? chip(t.status.ready, "ok", "check-circle") : chip(t.status.missing, "warn", "warning"),
           ),
         ),
       ),
       el(
         "div",
         { class: "wiring__paths" },
-        pathRow("数据目录", dataDir),
-        pathRow("安装目录", dirName(dataDir)),
+        pathRow(t.status.dataDir, dataDir),
+        pathRow(t.status.installDir, dirName(dataDir)),
       ),
     );
   }
 
-  /** Both sentences name the skill first and the shipped file second: an agent that already
+  /** Each sentence names the skill first and the shipped file second: an agent that already
    *  has the skill installed under %USERPROFILE%\.agents\skills only needs the name, and one
    *  that does not can read the copy this install carries. Same file either way, which is why
    *  one sentence covers both cases. */
@@ -377,16 +393,22 @@ export function createStatusScreen(): StatusScreen {
     fill(
       guide.body,
       copyRow({
-        label: "日常出声",
-        value: `用 voice-core-tts 技能在这台机器上出声。没装这个技能就读 ${root}\\skills\\voice-core-tts\\SKILL.md，是同一份文件。`,
+        label: t.status.guideSpeakLabel,
+        value: t.status.guideSpeak(root),
         glyph: "microphone-stage",
-        what: "日常出声的说明",
+        what: t.status.guideSpeakWhat,
       }),
       copyRow({
-        label: "训练新音色",
-        value: `用 voice-core-voice-training 技能训练一个新音色包。没装这个技能就读 ${root}\\skills\\voice-core-voice-training\\SKILL.md，是同一份文件。`,
+        label: t.status.guideTrainLabel,
+        value: t.status.guideTrain(root),
         glyph: "magic-wand",
-        what: "训练新音色的说明",
+        what: t.status.guideTrainWhat,
+      }),
+      copyRow({
+        label: t.status.guideDeployLabel,
+        value: t.status.guideDeploy(root),
+        glyph: "download-simple",
+        what: t.status.guideDeployWhat,
       }),
     );
   }
@@ -401,11 +423,11 @@ export function createStatusScreen(): StatusScreen {
         cards,
         emptyState({
           glyph: "download-simple",
-          title: "服务尚未部署",
+          title: t.status.notDeployed,
           lines: [],
           actions: [
             button({
-              label: "前往部署",
+              label: t.status.goDeploy,
               kind: "primary",
               glyph: "download-simple",
               onClick: (ev: MouseEvent) => navigate("deploy", ev),
@@ -451,7 +473,7 @@ export function createStatusScreen(): StatusScreen {
       el(
         "div",
         { class: "screen__titles" },
-        el("h1", { class: "screen__title", tabindex: "-1", text: "状态" }),
+        el("h1", { class: "screen__title", tabindex: "-1", text: t.status.title }),
       ),
     ),
     cards,

@@ -15,6 +15,7 @@
 
 import { el, fill } from "../dom";
 import { baseName, slugify } from "../format";
+import { t } from "../i18n";
 import {
   ipcMessage,
   importAvatar,
@@ -29,13 +30,18 @@ import {
 import { refreshInventory, refreshVoices, voices } from "../state";
 import { toast } from "../toast";
 import { button, chip, emptyState, field, navigate, note, panel, openButton, pathText } from "../ui";
-import { createVoiceDetail, KIND_LABEL } from "./voice";
+import { createVoiceDetail, kindLabel, PACK_KINDS } from "./voice";
 
-const KIND_HINT: Record<PackKind, string> = {
-  "lora-adapter": "LoRA 适配器目录，包含训练生成的权重文件及元数据。",
-  "speaker-embedding": "独立说话人嵌入文件 (*.speaker.safetensors)。",
-  "reference-audio": "参考音频切片，推理引擎据此提取目标音色特征。",
-};
+function KIND_HINT(kind: PackKind): string {
+  switch (kind) {
+    case "lora-adapter":
+      return t.voices.hintLoraAdapter;
+    case "speaker-embedding":
+      return t.voices.hintSpeakerEmbedding;
+    case "reference-audio":
+      return t.voices.hintReferenceAudio;
+  }
+}
 
 /** A directory is a LoRA adapter; a lone file is an embedding unless it is audio.
  *  This is the same rule scripts/training/install_pack.py applies when it lays a
@@ -111,10 +117,10 @@ export function createVoicesScreen(): HTMLElement {
   let known: Pack[] = [];
 
   const list = panel({
-    title: "已安装音色包",
+    title: t.voices.listTitle,
     actions: [
       button({
-        label: "刷新",
+        label: t.voices.refresh,
         glyph: "arrow-clockwise",
         small: true,
         // Portraits go too: 刷新 is the user saying the list may be stale, and a file
@@ -125,11 +131,11 @@ export function createVoicesScreen(): HTMLElement {
         },
       }),
       button({
-        label: "添加目录…",
+        label: t.voices.addFolder,
         glyph: "folder-open",
         small: true,
         onClick: () => {
-          void pickFolder("选择音色包目录 (LoRA)")
+          void pickFolder(t.voices.pickFolderDialog)
             .then((picked) => {
               if (picked !== null) startDraft(picked, true);
             })
@@ -137,13 +143,13 @@ export function createVoicesScreen(): HTMLElement {
         },
       }),
       button({
-        label: "添加文件…",
+        label: t.voices.addFile,
         // Not primary: the empty state owns the one primary CTA on this screen, and
         // the panel header is a toolbar, not a call to action.
         glyph: "file-plus",
         small: true,
         onClick: () => {
-          void pickFile("选择说话人嵌入文件 (*.speaker.safetensors) 或参考音频", ["safetensors", "wav", "flac", "mp3"])
+          void pickFile(t.voices.pickFileDialog, ["safetensors", "wav", "flac", "mp3"])
             .then((picked) => {
               if (picked !== null) startDraft(picked, false);
             })
@@ -186,7 +192,7 @@ export function createVoicesScreen(): HTMLElement {
    *  again to put focus back on it. */
   function configure(pack: Pack): HTMLElement {
     const control = button({
-      label: "配置",
+      label: t.voices.configure,
       glyph: "gear",
       small: true,
       onClick: () => openPack(pack),
@@ -244,7 +250,7 @@ export function createVoicesScreen(): HTMLElement {
       id: "draft-character",
       type: "text",
       value: current.character,
-      placeholder: "留空使用名称",
+      placeholder: t.voices.characterPlaceholder,
       oninput: (ev: Event) => {
         current.character = (ev.target as HTMLInputElement).value;
       },
@@ -272,9 +278,9 @@ export function createVoicesScreen(): HTMLElement {
     const kindChip = el(
       "span",
       { class: "draft__kind" },
-      chip(KIND_LABEL[current.kind], "accent", "waveform"),
+      chip(kindLabel(current.kind), "accent", "waveform"),
     );
-    const kindHint = el("p", { class: "draft__hint", text: KIND_HINT[current.kind] });
+    const kindHint = el("p", { class: "draft__hint", text: KIND_HINT(current.kind) });
     const kindSelect = el(
       "select",
       {
@@ -284,12 +290,12 @@ export function createVoicesScreen(): HTMLElement {
           current.kind = (ev.target as HTMLSelectElement).value as PackKind;
           // The two dependent nodes are updated in place: re-rendering the form here
           // would take focus off the select the user just used.
-          fill(kindChip, chip(KIND_LABEL[current.kind], "accent", "waveform"));
-          kindHint.textContent = KIND_HINT[current.kind];
+          fill(kindChip, chip(kindLabel(current.kind), "accent", "waveform"));
+          kindHint.textContent = KIND_HINT(current.kind);
         },
       },
-      (Object.keys(KIND_LABEL) as PackKind[]).map((kind) =>
-        el("option", { value: kind, selected: kind === current.kind, text: KIND_LABEL[kind] }),
+      PACK_KINDS.map((kind) =>
+        el("option", { value: kind, selected: kind === current.kind, text: kindLabel(kind) }),
       ),
     );
 
@@ -300,16 +306,16 @@ export function createVoicesScreen(): HTMLElement {
     const avatarField = el("div", { class: "draft__avatar", id: "draft-avatar" });
 
     function renderAvatar(): void {
-      avatarValue.textContent = current.avatar ?? "未设置";
+      avatarValue.textContent = current.avatar ?? t.common.notSet;
       fill(
         avatarField,
         avatarValue,
         button({
-          label: current.avatar === null ? "选择图像…" : "更改图像…",
+          label: current.avatar === null ? t.voices.avatarPick : t.voices.avatarChange,
           glyph: "file-plus",
           small: true,
           onClick: () => {
-            void pickFile("选择头像文件", ["png", "jpg", "jpeg", "webp", "bmp"])
+            void pickFile(t.voices.avatarPickDialog, ["png", "jpg", "jpeg", "webp", "bmp"])
               .then(async (picked) => {
                 if (picked === null) return;
                 current.avatar = await importAvatar(picked, current.path);
@@ -322,8 +328,8 @@ export function createVoicesScreen(): HTMLElement {
           ? null
           : button({
               glyph: "x",
-              name: "清除头像",
-              title: "清除",
+              name: t.voices.avatarClear,
+              title: t.common.clear,
               small: true,
               kind: "quiet",
               onClick: () => {
@@ -346,17 +352,17 @@ export function createVoicesScreen(): HTMLElement {
 
       const problems: string[] = [];
       if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
-        problems.push("音色包 ID 仅支持小写字母、数字、点号、下划线及连字符 (-)，且不能以特殊符号开头。");
+        problems.push(t.voices.errBadId);
       }
-      if (known.some((pack) => pack.id === id)) problems.push(`已存在相同 ID 的音色包：${id}。`);
-      if (current.name.trim().length === 0) problems.push("音色名称不能为空。");
-      if (languages.length === 0) problems.push("请至少指定一种语言代码（如 ja）。");
-      if (current.engine.length === 0) problems.push("推理引擎不能为空；针对 Irodori 架构请填写 irodori。");
+      if (known.some((pack) => pack.id === id)) problems.push(t.voices.errDuplicateId(id));
+      if (current.name.trim().length === 0) problems.push(t.voices.errNameEmpty);
+      if (languages.length === 0) problems.push(t.voices.errNoLanguage);
+      if (current.engine.length === 0) problems.push(t.voices.errEngineEmpty);
 
       if (problems.length > 0) {
         fill(
           errorBox,
-          note("fail", "输入校验未通过", el("ul", { class: "draft__problems" }, problems.map((text) => el("li", { text })))),
+          note("fail", t.voices.validationTitle, el("ul", { class: "draft__problems" }, problems.map((text) => el("li", { text })))),
         );
         return;
       }
@@ -376,13 +382,13 @@ export function createVoicesScreen(): HTMLElement {
         .then(async () => {
           draft = null;
           renderDraft();
-          toast(`已成功注册音色包 ${pack.id}`, "ok");
+          toast(t.voices.registeredToast(pack.id), "ok");
           await refreshVoices();
           // The Setup screen counts registered packs, so it must not keep the old number.
           void refreshInventory();
         })
         .catch((err: unknown) => {
-          fill(errorBox, note("fail", "写入配置文件 (config.json) 失败", el("p", { text: ipcMessage(err) })));
+          fill(errorBox, note("fail", t.voices.writeFailed, el("p", { text: ipcMessage(err) })));
         });
     }
 
@@ -394,7 +400,7 @@ export function createVoicesScreen(): HTMLElement {
         el(
           "header",
           { class: "draft__head" },
-          el("h3", { class: "draft__title", text: "注册新音色包" }),
+          el("h3", { class: "draft__title", text: t.voices.draftTitle }),
           kindChip,
         ),
         el("div", { class: "draft__path" }, pathText(current.path, 72), openButton(current.path)),
@@ -402,21 +408,21 @@ export function createVoicesScreen(): HTMLElement {
         el(
           "div",
           { class: "draft__grid" },
-          field("draft-id", "音色包 ID", idInput, "voicePackId，作为 POST /api/speak 接口的唯一调用标识。"),
-          field("draft-name", "显示名称", nameInput),
-          field("draft-character", "角色名称", characterInput, "字幕窗口展示的说话人名称。"),
-          field("draft-avatar", "头像图标", avatarField, "字幕窗口显示的头像图片；将自动归档至音色包目录。"),
-          field("draft-lang", "支持语言", langInput, "以逗号分隔的语言代码（如 ja 或 ja,zh）。"),
-          field("draft-engine", "推理引擎", engineInput),
-          field("draft-kind", "模型类型", kindSelect, "已基于路径特征自动推断，可手动修正。"),
+          field("draft-id", t.voices.idLabel, idInput, t.voices.idHint),
+          field("draft-name", t.voices.nameLabel, nameInput),
+          field("draft-character", t.voices.characterLabel, characterInput, t.voices.characterHint),
+          field("draft-avatar", t.voices.avatarLabel, avatarField, t.voices.avatarHint),
+          field("draft-lang", t.voices.langLabel, langInput, t.voices.langHint),
+          field("draft-engine", t.voices.engineLabel, engineInput),
+          field("draft-kind", t.voices.kindLabel, kindSelect, t.voices.kindAutoHint),
         ),
         errorBox,
         el(
           "div",
           { class: "draft__actions" },
-          button({ label: "注册", kind: "primary", glyph: "check", onClick: submit }),
+          button({ label: t.voices.register, kind: "primary", glyph: "check", onClick: submit }),
           button({
-            label: "取消",
+            label: t.voices.cancel,
             kind: "quiet",
             onClick: () => {
               draft = null;
@@ -437,30 +443,30 @@ export function createVoicesScreen(): HTMLElement {
         confirming
           ? [
               button({
-                label: "确认移除",
+                label: t.voices.confirmRemove,
                 kind: "danger",
                 glyph: "trash",
                 small: true,
                 onClick: () => {
                   void removePack(pack.id)
                     .then(async () => {
-                      toast(`已移除音色包 ${pack.id}`, "ok");
+                      toast(t.voices.removedToast(pack.id), "ok");
                       await refreshVoices();
                     })
                     .catch((err: unknown) => {
                       renderActions(false);
-                      toast(`移除音色包失败：${ipcMessage(err)}`, "fail");
+                      toast(t.voices.removeFailedToast(ipcMessage(err)), "fail");
                     });
                 },
               }),
-              button({ label: "取消", kind: "quiet", small: true, onClick: () => renderActions(false) }),
+              button({ label: t.voices.cancel, kind: "quiet", small: true, onClick: () => renderActions(false) }),
             ]
           : [
               configure(pack),
               button({
                 glyph: "trash",
-                name: `移除 ${pack.id}`,
-                title: "从 config.json 移除配置项",
+                name: t.common.removeTag(pack.id),
+                title: t.voices.removeTitle,
                 small: true,
                 kind: "quiet",
                 onClick: () => renderActions(true),
@@ -482,18 +488,21 @@ export function createVoicesScreen(): HTMLElement {
           { class: "pack__head" },
           el("h3", { class: "pack__name", text: pack.character ?? pack.name }),
           el("code", { class: "pack__id", dir: "ltr", text: pack.id }),
-          chip(KIND_LABEL[pack.kind], "accent"),
+          chip(kindLabel(pack.kind), "accent"),
         ),
         el(
           "div",
           { class: "pack__meta" },
           pack.character === null || pack.character === undefined
             ? null
-            : el("span", { class: "pack__metaitem", text: `名称 ${pack.name}` }),
-          el("span", { class: "pack__metaitem", text: `引擎 ${pack.engine === "" ? "未指定" : pack.engine}` }),
+            : el("span", { class: "pack__metaitem", text: t.voices.metaName(pack.name) }),
           el("span", {
             class: "pack__metaitem",
-            text: `语言 ${pack.languages.length === 0 ? "未指定" : pack.languages.join(" / ")}`,
+            text: t.voices.metaEngine(pack.engine === "" ? t.voices.unspecified : pack.engine),
+          }),
+          el("span", {
+            class: "pack__metaitem",
+            text: t.voices.metaLangs(pack.languages.length === 0 ? t.voices.unspecified : pack.languages.join(" / ")),
           }),
         ),
         el("div", { class: "pack__path" }, pathText(pack.path, 64), openButton(pack.path)),
@@ -524,18 +533,18 @@ export function createVoicesScreen(): HTMLElement {
         list.body,
         emptyState({
           glyph: "microphone-stage",
-          title: "暂未安装音色包",
+          title: t.voices.emptyTitle,
           lines: [
             el("p", {
-              text: "支持导入 LoRA 权重目录、独立 *.speaker.safetensors 嵌入文件或参考音频文件。",
+              text: t.voices.emptyBody,
             }),
           ],
           actions: [
             button({
-              label: "添加目录…",
+              label: t.voices.addFolder,
               glyph: "folder-open",
               onClick: () => {
-                void pickFolder("选择音色包目录 (LoRA)")
+                void pickFolder(t.voices.pickFolderDialog)
                   .then((picked) => {
                     if (picked !== null) startDraft(picked, true);
                   })
@@ -543,11 +552,11 @@ export function createVoicesScreen(): HTMLElement {
               },
             }),
             button({
-              label: "添加文件…",
+              label: t.voices.addFile,
               kind: "primary",
               glyph: "file-plus",
               onClick: () => {
-                void pickFile("选择说话人嵌入文件 (*.speaker.safetensors) 或参考音频", [
+                void pickFile(t.voices.pickFileDialog, [
                   "safetensors",
                   "wav",
                   "flac",
@@ -560,7 +569,7 @@ export function createVoicesScreen(): HTMLElement {
               },
             }),
             button({
-              label: "前往部署语音引擎",
+              label: t.voices.goDeploy,
               glyph: "download-simple",
               kind: "quiet",
               // The router lives in main.ts; a screen asking to be left is a message,
@@ -596,7 +605,7 @@ export function createVoicesScreen(): HTMLElement {
       el(
         "div",
         { class: "screen__titles" },
-        el("h1", { class: "screen__title", tabindex: "-1", text: "音色" }),
+        el("h1", { class: "screen__title", tabindex: "-1", text: t.voices.title }),
       ),
     ),
     listHost,

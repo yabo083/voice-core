@@ -26,6 +26,7 @@
 
 import { el, fill, type Child } from "./dom";
 import { formatBytes } from "./format";
+import { t } from "./i18n";
 import { icon, type IconName } from "./icons";
 import { ipcMessage, pickFile, type ConfigFile } from "./ipc";
 import { toast } from "./toast";
@@ -111,7 +112,7 @@ function scaffold<T>(spec: Row<T>, control: HTMLElement): { root: HTMLElement; f
       .then(
         () => {
           show(null);
-          toast("已保存", "ok");
+          toast(t.common.saved, "ok");
         },
         (err: unknown) => show(ipcMessage(err)),
       )
@@ -202,7 +203,7 @@ export function number(spec: NumberRow): HTMLElement {
 
   const down = button({
     glyph: "minus",
-    name: `${spec.label} 减少`,
+    name: t.common.stepDown(spec.label),
     small: true,
     kind: "quiet",
     onClick: () => nudge(-step),
@@ -210,7 +211,7 @@ export function number(spec: NumberRow): HTMLElement {
   });
   const up = button({
     glyph: "plus",
-    name: `${spec.label} 增加`,
+    name: t.common.stepUp(spec.label),
     small: true,
     kind: "quiet",
     onClick: () => nudge(step),
@@ -236,13 +237,13 @@ export function number(spec: NumberRow): HTMLElement {
   function parse(raw: string): { value: number | null } | { problem: string } {
     const trimmed = raw.trim();
     if (trimmed === "") {
-      return spec.nullable === true ? { value: null } : { problem: "此项必填" };
+      return spec.nullable === true ? { value: null } : { problem: t.common.required };
     }
     const parsed = Number(trimmed);
-    if (!Number.isFinite(parsed)) return { problem: "请输入有效数字" };
-    if (spec.integer === true && !Number.isInteger(parsed)) return { problem: "请输入整数" };
+    if (!Number.isFinite(parsed)) return { problem: t.common.notANumber };
+    if (spec.integer === true && !Number.isInteger(parsed)) return { problem: t.common.notAnInteger };
     if (parsed < spec.min || parsed > spec.max) {
-      return { problem: `取值范围：${spec.min} - ${spec.max}` };
+      return { problem: t.common.range(spec.min, spec.max) };
     }
     return { value: parsed };
   }
@@ -411,7 +412,7 @@ export function colour(spec: ColourRow): HTMLElement {
   const picker = el("input", {
     type: "color",
     value: opaque(spec.value ?? spec.fallback ?? "#000000"),
-    "aria-label": `${spec.label} 取色`,
+    "aria-label": t.common.pickColour(spec.label),
     disabled: spec.disabled !== undefined,
   });
   const well = el(
@@ -419,7 +420,7 @@ export function colour(spec: ColourRow): HTMLElement {
     {
       class: "swatch__chip",
       type: "button",
-      "aria-label": `${spec.label} 取色`,
+      "aria-label": t.common.pickColour(spec.label),
       disabled: spec.disabled !== undefined,
     },
     picker,
@@ -428,7 +429,7 @@ export function colour(spec: ColourRow): HTMLElement {
     class: "input input--mono swatch__hex",
     type: "text",
     value: spec.value ?? "",
-    placeholder: spec.fallback ?? "未设置",
+    placeholder: spec.fallback ?? t.common.notSet,
     spellcheck: "false",
     disabled: spec.disabled !== undefined,
   });
@@ -438,8 +439,8 @@ export function colour(spec: ColourRow): HTMLElement {
     spec.unset === true
       ? button({
           glyph: "x",
-          name: `清除${spec.label}`,
-          title: "清除并继承上级配置",
+          name: t.common.clearField(spec.label),
+          title: t.common.clearInherit,
           small: true,
           kind: "quiet",
           disabled: spec.disabled !== undefined,
@@ -471,7 +472,7 @@ export function colour(spec: ColourRow): HTMLElement {
     const typed = hex.value.trim();
     if (typed === "") {
       if (spec.unset !== true) {
-        feedback.reject("颜色值不能为空");
+        feedback.reject(t.common.colourRequired);
         return;
       }
       well.style.background = cssColour(spec.fallback ?? "");
@@ -481,7 +482,7 @@ export function colour(spec: ColourRow): HTMLElement {
     if (!HEX.test(typed)) {
       // Refused here, and `config_edit` would refuse it too - which is the point: this
       // value never reaches the file, and the characters stay in the field.
-      feedback.reject("格式支持 #rgb、#rrggbb 或 #aarrggbb");
+      feedback.reject(t.common.badHex);
       return;
     }
     well.style.background = cssColour(typed);
@@ -511,7 +512,7 @@ export function tags(spec: TagsRow): HTMLElement {
   const entry = el("input", {
     class: "input tags__input",
     type: "text",
-    placeholder: spec.placeholder ?? "添加项",
+    placeholder: spec.placeholder ?? t.common.addTag,
     spellcheck: "false",
     disabled: spec.disabled !== undefined,
   });
@@ -532,7 +533,7 @@ export function tags(spec: TagsRow): HTMLElement {
             {
               class: "tags__x",
               type: "button",
-              "aria-label": `移除 ${tag}`,
+              "aria-label": t.common.removeTag(tag),
               disabled: spec.disabled !== undefined,
               onclick: () => {
                 current = current.filter((kept) => kept !== tag);
@@ -604,11 +605,11 @@ export function file(spec: FileRow): HTMLElement {
   let value = spec.value;
 
   function render(): void {
-    name.textContent = value ?? "未设置";
+    name.textContent = value ?? t.common.notSet;
     fill(
       tail,
       button({
-        label: value === null ? spec.pickLabel : "更改",
+        label: value === null ? spec.pickLabel : t.common.change,
         glyph: "file-plus",
         small: true,
         disabled: spec.disabled !== undefined,
@@ -627,8 +628,8 @@ export function file(spec: FileRow): HTMLElement {
         ? null
         : button({
             glyph: "x",
-            name: `清除${spec.label}`,
-            title: "清除",
+            name: t.common.clearField(spec.label),
+            title: t.common.clear,
             small: true,
             kind: "quiet",
             disabled: spec.disabled !== undefined,
@@ -641,6 +642,120 @@ export function file(spec: FileRow): HTMLElement {
     );
   }
   render();
+  return root;
+}
+
+// --- hotkey capture --------------------------------------------------------------------
+
+export interface HotkeyRow extends Row<string> {
+  placeholder?: string;
+}
+
+/** Event-key to chord-name for the keys whose `KeyboardEvent.key` is a word, not a
+ *  character. Everything else carries over as itself: letters upper-cased, F-keys,
+ *  digits and punctuation as typed. The names match what the presenter registers. */
+const KEY_NAMES: Record<string, string> = {
+  " ": "Space",
+  ArrowUp: "Up",
+  ArrowDown: "Down",
+  ArrowLeft: "Left",
+  ArrowRight: "Right",
+  PageUp: "PageUp",
+  PageDown: "PageDown",
+  Home: "Home",
+  End: "End",
+  Insert: "Insert",
+  Delete: "Delete",
+  Backspace: "Backspace",
+  Enter: "Enter",
+  Tab: "Tab",
+};
+
+/** The chord name for a key event, or null for a bare modifier press - which is a
+ *  half-typed chord, not a value. */
+function chordKey(ev: KeyboardEvent): string | null {
+  const key = ev.key;
+  if (key === "Control" || key === "Alt" || key === "Shift" || key === "Meta") return null;
+  if (/^F([1-9]|1[0-9]|2[0-4])$/.test(key)) return key;
+  if (/^Numpad[0-9]$/.test(key)) return key;
+  const named = KEY_NAMES[key];
+  if (named !== undefined) return named;
+  return key.length === 1 ? key.toUpperCase() : key;
+}
+
+/** A hotkey row: the value as text (hand-typed, as before), plus a capture button that
+ *  listens for the next chord and writes it - the interaction every game rebinding a key
+ *  uses, because "type Ctrl+Alt+D into a field" asks for characters nobody thinks of as
+ *  text. Validation is unchanged: the chord goes through `feedback.commit`, so a
+ *  modifier-less capture is refused by the same rule a typed value is. */
+export function hotkey(spec: HotkeyRow): HTMLElement {
+  const input = el("input", {
+    class: "input input--mono",
+    type: "text",
+    value: spec.value,
+    placeholder: spec.placeholder,
+    spellcheck: "false",
+    disabled: spec.disabled !== undefined,
+  });
+  const capture = button({
+    label: t.common.capture,
+    small: true,
+    kind: "quiet",
+    disabled: spec.disabled !== undefined,
+    onClick: () => (capturing ? stop() : start()),
+  });
+  const hint = el("span", { class: "form__capture-hint", "aria-hidden": "true" });
+  const control = el("div", { class: "capture" }, input, capture, hint);
+  const { root, feedback } = scaffold(spec, control);
+  control.removeAttribute("id");
+  input.id = `f-${spec.key}`;
+
+  let capturing = false;
+
+  function stop(): void {
+    if (!capturing) return;
+    capturing = false;
+    window.removeEventListener("keydown", onKey, true);
+    capture.textContent = t.common.capture;
+    hint.textContent = "";
+    input.classList.remove("is-capturing");
+  }
+
+  function start(): void {
+    if (capturing || spec.disabled !== undefined) return;
+    capturing = true;
+    capture.textContent = t.common.capturing;
+    hint.textContent = t.common.captureCancel;
+    input.classList.add("is-capturing");
+    window.addEventListener("keydown", onKey, true);
+  }
+
+  /** Capture phase on `window`, so the chord lands here before it reaches any other
+   *  control or the webview's own shortcuts; a captured chord must not also toggle
+   *  something else while the user is holding it. */
+  function onKey(ev: KeyboardEvent): void {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (ev.key === "Escape") {
+      stop();
+      return;
+    }
+    const key = chordKey(ev);
+    if (key === null) return;
+    const parts = [
+      ev.ctrlKey ? "Ctrl" : null,
+      ev.altKey ? "Alt" : null,
+      ev.shiftKey ? "Shift" : null,
+      ev.metaKey ? "Win" : null,
+      key,
+    ].filter((part): part is string => part !== null);
+    input.value = parts.join("+");
+    stop();
+    feedback.commit(input.value, true);
+  }
+
+  input.addEventListener("input", () => feedback.commit(input.value, false));
+  input.addEventListener("blur", () => feedback.commit(input.value, true));
   return root;
 }
 
@@ -664,9 +779,9 @@ export function form(...children: Child[]): HTMLElement {
 export function provenance(source: string | null, hint?: string): HTMLElement | null {
   if (source === null) return null;
   const known: Record<string, string> = {
-    pack: "音色包内置",
-    config: "用户配置 (config.json)",
-    derived: "自动推导 / 默认",
+    pack: t.common.provPack,
+    config: t.common.provConfig,
+    derived: t.common.provDerived,
   };
   const label = known[source] ?? source;
   const node = chip(label, source === "pack" ? "ok" : source === "config" ? "accent" : "idle");
@@ -828,12 +943,12 @@ export function jsonView(source: string, label: string): HTMLElement {
  *  with the line I typed". */
 export function rawFile(shown: ConfigFile, id: string, open = false): HTMLElement {
   const block = expander({
-    title: `查看源文件 · ${shown.label}`,
+    title: t.common.viewSource(shown.label),
     id,
     open,
     tail: shown.exists
       ? chip(formatBytes(shown.bytes), "idle")
-      : chip("文件不存在", "warn", "warning"),
+      : chip(t.common.fileMissing, "warn", "warning"),
   });
 
   fill(
@@ -842,17 +957,17 @@ export function rawFile(shown: ConfigFile, id: string, open = false): HTMLElemen
     !shown.exists
       ? note(
           "info",
-          "配置文件尚未生成",
+          t.common.cfgNotWritten,
           el("p", {
-            text: "系统将在写入配置时自动创建该文件；当前使用内置默认配置。",
+            text: t.common.cfgNotWrittenBody,
           }),
         )
       : shown.text === "" && shown.bytes > 0
         ? note(
             "warn",
-            "无法读取文件",
+            t.common.fileUnreadable,
             el("p", {
-              text: "文件存在但内容暂不可读（可能正在被外部编辑器保存）。折叠并重新展开此栏即可重新加载。",
+              text: t.common.fileUnreadableBody,
             }),
           )
         : jsonView(shown.text, shown.label),

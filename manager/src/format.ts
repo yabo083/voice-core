@@ -1,5 +1,7 @@
 // Display formatting and Windows path arithmetic. Nothing here talks to the host.
 
+import { t } from "./i18n";
+
 const KIB = 1024;
 const UNITS = ["B", "KiB", "MiB", "GiB", "TiB"] as const;
 
@@ -42,16 +44,17 @@ export function formatElapsed(ms: number): string {
 export function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) return "-";
   const total = Math.round(ms / 1000);
-  if (total < 60) return `${total} 秒`;
+  if (total < 60) return `${total} ${t.common.durSec}`;
   // A zero tail unit is noise: an idle window of exactly 15 minutes reads as
   // "15 分", not "15 分 0 秒".
   const m = Math.floor(total / 60);
   const s = total % 60;
-  if (m < 60) return s === 0 ? `${m} 分` : `${m} 分 ${s} 秒`;
+  if (m < 60) return s === 0 ? `${m} ${t.common.durMin}` : `${m} ${t.common.durMin} ${s} ${t.common.durSec}`;
   const h = Math.floor(m / 60);
-  if (h < 24) return m % 60 === 0 ? `${h} 小时` : `${h} 小时 ${m % 60} 分`;
+  if (h < 24)
+    return m % 60 === 0 ? `${h} ${t.common.durHour}` : `${h} ${t.common.durHour} ${m % 60} ${t.common.durMin}`;
   const d = Math.floor(h / 24);
-  return h % 24 === 0 ? `${d} 天` : `${d} 天 ${h % 24} 小时`;
+  return h % 24 === 0 ? `${d} ${t.common.durDay}` : `${d} ${t.common.durDay} ${h % 24} ${t.common.durHour}`;
 }
 
 export function formatPercent(done: number, total: number): string {

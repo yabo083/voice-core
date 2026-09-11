@@ -20,6 +20,7 @@
 // during the models stage there is roughly one event per second for an hour.
 
 import { el, fill, type Child } from "../dom";
+import { t } from "../i18n";
 import { formatBytes, formatElapsed, formatGiB, formatPercent } from "../format";
 import { icon, type IconName } from "../icons";
 import {
@@ -53,22 +54,22 @@ type StageState = "pending" | "running" | "ok" | "skip" | "fail";
 /** Result-oriented, and free of the engine's vocabulary: "DACVAE" and
  *  "runtime.json" belong in the log, where someone who needs them is already
  *  looking. */
-const STAGE_LABEL: Record<Stage, string> = {
-  preflight: "环境检查",
-  engine: "引擎源码",
-  codec: "音频编解码器",
-  venv: "Python 环境",
-  models: "模型权重",
-  layout: "写入配置",
-  smoke: "功能测试",
+const STAGE_LABEL: Record<Stage, () => string> = {
+  preflight: () => t.deploy.stagePreflight,
+  engine: () => t.deploy.stageEngine,
+  codec: () => t.deploy.stageCodec,
+  venv: () => t.deploy.stageVenv,
+  models: () => t.deploy.stageModels,
+  layout: () => t.deploy.stageLayout,
+  smoke: () => t.deploy.stageSmoke,
 };
 
-const STATE_LABEL: Record<StageState, string> = {
-  pending: "待执行",
-  running: "进行中",
-  ok: "完成",
-  skip: "已复用",
-  fail: "失败",
+const STATE_LABEL: Record<StageState, () => string> = {
+  pending: () => t.deploy.statePending,
+  running: () => t.deploy.stateRunning,
+  ok: () => t.deploy.stateOk,
+  skip: () => t.deploy.stateSkip,
+  fail: () => t.deploy.stateFail,
 };
 
 const STATE_TONE: Record<StageState, Tone> = {
@@ -159,7 +160,7 @@ export function createDeployScreen(): DeployScreen {
   let transient = false;
 
   // ------------------------------------------------------------- environment
-  const env = expander({ title: "环境与依赖", id: "deploy-env", open: true });
+  const env = expander({ title: t.deploy.envCard, id: "deploy-env", open: true });
 
   /** One row, one outcome. `right` is a chip when nothing is expected of the user
    *  and a button when something is. */
@@ -194,8 +195,8 @@ export function createDeployScreen(): DeployScreen {
         [el("div", { class: "inv__value" }, pathText(picked, 64))],
         button({
           glyph: "x",
-          name: `清除${label}`,
-          title: "清除",
+          name: t.common.clearField(label),
+          title: t.common.clear,
           small: true,
           kind: "quiet",
           onClick: () => {
@@ -208,9 +209,9 @@ export function createDeployScreen(): DeployScreen {
     return envRow(
       glyph,
       label,
-      [el("p", { class: "inv__miss", text: "未安装" })],
+      [el("p", { class: "inv__miss", text: t.deploy.notInstalled })],
       button({
-        label: "选择目录…",
+        label: t.deploy.pickDir,
         small: true,
         onClick: () => {
           void pickFolder(dialogTitle)
@@ -227,7 +228,7 @@ export function createDeployScreen(): DeployScreen {
 
   function renderEnv(inv: Inventory | null): void {
     if (inv === null) {
-      env.tail.textContent = "正在检测…";
+      env.tail.textContent = t.deploy.detecting;
       fill(
         env.body,
         el(
@@ -235,7 +236,7 @@ export function createDeployScreen(): DeployScreen {
           { class: "skeletons", "aria-hidden": "true" },
           [1, 2, 3, 4, 5].map(() => el("div", { class: "skeleton" })),
         ),
-        el("p", { class: "sr-only", role: "status", text: "正在检测系统运行环境" }),
+        el("p", { class: "sr-only", role: "status", text: t.deploy.detectingAria }),
       );
       return;
     }
@@ -249,8 +250,8 @@ export function createDeployScreen(): DeployScreen {
     // keeping is that nothing has to be downloaded twice.
     fill(
       env.tail,
-      reusableGiB > 0 ? chip(`${formatGiB(reusableGiB)} 可复用`, "reuse", "recycle") : null,
-      short ? chip("空间不足", "fail", "warning-circle") : null,
+      reusableGiB > 0 ? chip(t.deploy.reusable(formatGiB(reusableGiB)), "reuse", "recycle") : null,
+      short ? chip(t.deploy.diskShort, "fail", "warning-circle") : null,
     );
 
     fill(
@@ -258,41 +259,41 @@ export function createDeployScreen(): DeployScreen {
       pickRow(
         "engine_root",
         "folder-open",
-        "引擎源码",
-        "选择本地已有引擎目录",
+        t.deploy.engineSource,
+        t.deploy.pickEngineDir,
         inv.engine_root,
-        chip("复用", "reuse", "recycle"),
+        chip(t.deploy.reuse, "reuse", "recycle"),
       ),
       envRow(
         "cpu",
-        "Python 与 CUDA",
+        t.deploy.pythonCuda,
         [
           el("p", {
             class: "inv__text",
             text:
               inv.engine_python === null
                 ? inv.cuda === null
-                  ? "将在「Python 环境」阶段创建"
-                  : `将在「Python 环境」阶段创建 · CUDA ${inv.cuda}`
+                  ? t.deploy.pyLater
+                  : `${t.deploy.pyLater} · CUDA ${inv.cuda}`
                 : inv.cuda === null
-                  ? "未检测到 CUDA，推理性能将显著受限"
+                  ? t.deploy.noCuda
                   : `CUDA ${inv.cuda}`,
           }),
           inv.engine_python === null ? null : el("div", { class: "inv__value" }, pathText(inv.engine_python)),
         ],
         pythonReady
-          ? chip("就绪", "ok", "check-circle")
+          ? chip(t.deploy.ready, "ok", "check-circle")
           : inv.engine_python === null
-            ? chip("待安装", "idle", "circle-dashed")
-            : chip("需重建", "warn", "warning"),
+            ? chip(t.deploy.notInstalled, "idle", "circle-dashed")
+            : chip(t.deploy.rebuild, "warn", "warning"),
       ),
       pickRow(
         "hf_home",
         "database",
-        `模型权重 ${present.length} / ${inv.models.length}`,
-        "选择本地已有模型缓存目录",
+        t.deploy.weights(present.length, inv.models.length),
+        t.deploy.pickModelsDir,
         inv.hf_cache,
-        chip(`${formatGiB(reusableGiB)} 复用`, "reuse", "recycle"),
+        chip(t.deploy.reuseGiB(formatGiB(reusableGiB)), "reuse", "recycle"),
       ),
       inv.models.length === 0
         ? null
@@ -312,22 +313,22 @@ export function createDeployScreen(): DeployScreen {
       inv.packs.length > 0
         ? envRow(
             "microphone-stage",
-            `音色包 ${inv.packs.length}`,
+            t.deploy.packs(inv.packs.length),
             [
               el("p", {
                 class: "inv__text",
                 text: inv.packs.map((pack) => pack.character ?? pack.name).join("、"),
               }),
             ],
-            chip("就绪", "ok", "check-circle"),
+            chip(t.deploy.ready, "ok", "check-circle"),
           )
         : pickRow(
             "voice_packs",
             "microphone-stage",
-            "音色包",
-            "选择本地已有音色包目录",
+            t.deploy.packsLabel,
+            t.deploy.pickPacksDir,
             null,
-            chip("就绪", "ok", "check-circle"),
+            chip(t.deploy.ready, "ok", "check-circle"),
           ),
       // A bar, not a sentence. The track is the free space on the drive and the fill
       // is what this deployment wants from it; detect() reports free and needed, not
@@ -346,7 +347,7 @@ export function createDeployScreen(): DeployScreen {
               "p",
               { class: "disk__line" },
               el("strong", { text: formatGiB(inv.needs_gib) }),
-              el("span", { text: `所需空间 · 可用 ${formatGiB(inv.disk_free_gib)}` }),
+              el("span", { text: t.deploy.needLine(formatGiB(inv.disk_free_gib)) }),
             ),
             el(
               "div",
@@ -364,7 +365,7 @@ export function createDeployScreen(): DeployScreen {
   }
 
   // ------------------------------------------------------------------- stages
-  const stagesPanel = panel({ title: "部署步骤" });
+  const stagesPanel = panel({ title: t.deploy.stepsTitle });
   const stagesTail = el("span", { class: "panel__tail" });
   stagesPanel.root.querySelector(".panel__head")?.appendChild(stagesTail);
 
@@ -392,7 +393,7 @@ export function createDeployScreen(): DeployScreen {
         el(
           "div",
           { class: "stage__head" },
-          el("h3", { class: "stage__title", text: STAGE_LABEL[stage] }),
+          el("h3", { class: "stage__title", text: STAGE_LABEL[stage]() }),
           elapsed,
           chipSlot,
           retry,
@@ -424,7 +425,7 @@ export function createDeployScreen(): DeployScreen {
     // step that has not started are seven copies of the same non-information.
     fill(
       row.chipSlot,
-      model.state === "pending" ? null : chip(STATE_LABEL[model.state], STATE_TONE[model.state]),
+      model.state === "pending" ? null : chip(STATE_LABEL[model.state](), STATE_TONE[model.state]),
     );
     const showMessage = (model.state === "running" || model.state === "fail") && model.message !== "";
     row.message.hidden = !showMessage;
@@ -452,7 +453,7 @@ export function createDeployScreen(): DeployScreen {
       } else {
         // No total yet: an indeterminate bar is honest, a bar pinned at 0 is not.
         row.bar.removeAttribute("value");
-        row.barText.textContent = asBytes ? `已完成 ${formatBytes(model.done)}` : `已完成 ${model.done} 项`;
+        row.barText.textContent = asBytes ? t.deploy.doneBytes(formatBytes(model.done)) : t.deploy.doneItems(model.done);
       }
     } else {
       row.progressWrap.hidden = true;
@@ -460,7 +461,7 @@ export function createDeployScreen(): DeployScreen {
 
     fill(
       row.detail,
-      model.remedy === null ? null : note("fail", "排障指引", el("p", { class: "remedy", text: model.remedy })),
+      model.remedy === null ? null : note("fail", t.deploy.remedyTitle, el("p", { class: "remedy", text: model.remedy })),
       model.notes.length === 0
         ? null
         : el(
@@ -483,7 +484,7 @@ export function createDeployScreen(): DeployScreen {
       row.retry,
       model.state === "fail"
         ? button({
-            label: "重试当前步骤",
+            label: t.deploy.retryStep,
             glyph: "arrow-clockwise",
             small: true,
             disabled: running,
@@ -516,7 +517,7 @@ export function createDeployScreen(): DeployScreen {
 
   const logBody = el("div", { class: "logpane__body", id: "deploy-log-body", hidden: true }, logScroll);
   const bottomBtn = button({
-    label: "跳转至底部",
+    label: t.deploy.jumpBottom,
     glyph: "arrow-down",
     small: true,
     kind: "quiet",
@@ -528,7 +529,7 @@ export function createDeployScreen(): DeployScreen {
     },
   });
   const logToggle = button({
-    label: "展开详细日志",
+    label: t.deploy.expandLog,
     // One caret, rotated by CSS on aria-expanded: swapping the glyph would rebuild
     // the button and drop focus while a user is toggling it.
     glyph: "caret-right",
@@ -547,7 +548,7 @@ export function createDeployScreen(): DeployScreen {
     logBody.hidden = !open;
     logToggle.setAttribute("aria-expanded", String(open));
     const label = logToggle.querySelector("span");
-    if (label !== null) label.textContent = open ? "折叠详细日志" : "展开详细日志";
+    if (label !== null) label.textContent = open ? t.deploy.collapseLog : t.deploy.expandLog;
     // A scroll control belongs to a visible pane; kept on screen while collapsed it
     // is a dead control next to a closed drawer.
     bottomBtn.hidden = !open;
@@ -585,7 +586,7 @@ export function createDeployScreen(): DeployScreen {
       fill(
         cmdLeft,
         button({
-          label: "取消",
+          label: t.deploy.cancel,
           kind: "danger",
           glyph: "x",
           onClick: () => void cancelProvision().catch((err: unknown) => toast(ipcMessage(err), "fail")),
@@ -593,13 +594,13 @@ export function createDeployScreen(): DeployScreen {
       );
       // The hint that used to be a paragraph under the stage list. It is one sentence
       // and it is only true while a run is in flight, which is exactly a tooltip.
-      fill(cmdRight, blockedButton({ label: "正在执行…" }, "后台任务运行中，关闭窗口不影响执行"));
+      fill(cmdRight, blockedButton({ label: t.deploy.runningNow }, t.deploy.backgroundHint));
     } else if (finished) {
       fill(cmdLeft, null);
       fill(
         cmdRight,
         button({
-          label: "完成",
+          label: t.deploy.finish,
           kind: "primary",
           glyph: "check",
           onClick: (ev: MouseEvent) => navigate("status", ev),
@@ -608,9 +609,9 @@ export function createDeployScreen(): DeployScreen {
     } else {
       fill(
         cmdLeft,
-        button({ label: "仅检测", glyph: "check", onClick: () => void run(null, true) }),
+        button({ label: t.deploy.checkOnly, glyph: "check", onClick: () => void run(null, true) }),
         button({
-          label: "重新检测",
+          label: t.deploy.reDetect,
           glyph: "arrow-clockwise",
           kind: "quiet",
           onClick: () => void refreshInventory(),
@@ -619,7 +620,7 @@ export function createDeployScreen(): DeployScreen {
       fill(
         cmdRight,
         button({
-          label: transient ? "重新部署" : "开始部署",
+          label: transient ? t.deploy.redeploy : t.deploy.startDeploy,
           kind: "primary",
           glyph: "download-simple",
           onClick: () => void run(null, false),
@@ -641,7 +642,7 @@ export function createDeployScreen(): DeployScreen {
 
   function renderStagesTail(): void {
     if (!running && !finished) {
-      stagesTail.textContent = `共 ${STAGES.length} 步`;
+      stagesTail.textContent = t.deploy.stepsTotal(STAGES.length);
       return;
     }
     const index = STAGES.findIndex((stage) => stages.get(stage)?.state === "running");
@@ -653,8 +654,8 @@ export function createDeployScreen(): DeployScreen {
     }, 0);
     stagesTail.textContent =
       index === -1
-        ? `共 ${STAGES.length} 步 · 耗时 ${formatElapsed(spent)}`
-        : `步骤 ${index + 1} / ${STAGES.length} · 耗时 ${formatElapsed(spent)}`;
+        ? t.deploy.stepsTotalTime(STAGES.length, formatElapsed(spent))
+        : t.deploy.stepIndex(index + 1, STAGES.length, formatElapsed(spent));
   }
 
   function apply(event: BootstrapEvent): void {
@@ -696,7 +697,7 @@ export function createDeployScreen(): DeployScreen {
 
   function renderSummary(runError: string | null, checkOnly: boolean): void {
     if (runError !== null) {
-      fill(summary, note("fail", "启动任务失败", el("p", { text: runError })));
+      fill(summary, note("fail", t.deploy.startFailed, el("p", { text: runError })));
       return;
     }
 
@@ -709,9 +710,9 @@ export function createDeployScreen(): DeployScreen {
         summary,
         note(
           "warn",
-          `${failed.length} 个步骤执行失败`,
+          t.deploy.failedCount(failed.length),
           el("p", {
-            text: `${failed.map((stage) => STAGE_LABEL[stage]).join("、")}。排查问题后点击失败阶段的「重试当前步骤」，支持断点重试。`,
+            text: t.deploy.failedBody(failed.map((stage) => STAGE_LABEL[stage]()).join("、")),
           }),
         ),
       );
@@ -720,11 +721,11 @@ export function createDeployScreen(): DeployScreen {
     if (done + reused === 0) {
       // Cancelled runs land here with nothing terminal reported. Calling that a
       // finished deployment would claim an install that did not happen.
-      fill(summary, note("warn", "已取消，未对环境进行修改"));
+      fill(summary, note("warn", t.deploy.cancelled));
       return;
     }
     if (checkOnly) {
-      fill(summary, note("reuse", `环境检查通过：${done + reused} 项就绪`));
+      fill(summary, note("reuse", t.deploy.checkPassed(done + reused)));
       return;
     }
     fill(
@@ -733,8 +734,8 @@ export function createDeployScreen(): DeployScreen {
         "div",
         { class: "banner" },
         icon("check-circle", "banner__icon"),
-        el("p", { class: "banner__text", text: "部署完成，语音合成引擎已就绪" }),
-        el("span", { class: "banner__meta", text: reused > 0 ? `${reused} 个步骤已复用` : "" }),
+        el("p", { class: "banner__text", text: t.deploy.doneBanner }),
+        el("span", { class: "banner__meta", text: reused > 0 ? t.deploy.reusedCount(reused) : "" }),
       ),
     );
   }
@@ -783,7 +784,7 @@ export function createDeployScreen(): DeployScreen {
         const model = stages.get(stage);
         if (model?.state !== "running") continue;
         model.state = "pending";
-        model.message = "已中断";
+        model.message = t.deploy.interrupted;
         model.endedAt = Date.now();
       }
       const ok = STAGES.every((stage) => {
@@ -810,7 +811,7 @@ export function createDeployScreen(): DeployScreen {
   );
 
   const backSlot = el("span", { class: "screen__back" });
-  const title = el("h1", { class: "screen__title", tabindex: "-1", text: "部署" });
+  const title = el("h1", { class: "screen__title", tabindex: "-1", text: t.deploy.title });
 
   void onBootstrapEvent(apply);
   inventory.subscribe(renderEnv);
@@ -832,13 +833,13 @@ export function createDeployScreen(): DeployScreen {
   function setTransient(on: boolean): void {
     if (transient === on) return;
     transient = on;
-    title.textContent = on ? "环境检查" : "部署";
+    title.textContent = on ? t.deploy.transientTitle : t.deploy.title;
     fill(
       backSlot,
       on
         ? button({
             glyph: "arrow-left",
-            name: "返回状态",
+            name: t.deploy.backToStatus,
             kind: "quiet",
             small: true,
             onClick: (ev: MouseEvent) => navigate("status", ev),

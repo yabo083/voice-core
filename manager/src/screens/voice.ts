@@ -25,6 +25,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
 import { el, fill, type Child } from "../dom";
+import { t } from "../i18n";
 import {
   colour,
   cssColour,
@@ -139,22 +140,30 @@ const speakPreview = (id: string, text: string): Promise<Preview> =>
 
 // --- vocabulary ------------------------------------------------------------------------
 
-export const KIND_LABEL: Record<PackKind, string> = {
-  "lora-adapter": "LoRA 适配器",
-  "speaker-embedding": "说话人嵌入",
-  "reference-audio": "参考音频",
-};
+/** The pack kinds a human can name. Module-bound like the dictionary itself: the panel's
+ *  language is pinned at boot and a change reloads. */
+export function kindLabel(kind: PackKind): string {
+  switch (kind) {
+    case "lora-adapter":
+      return t.voice.kindLora;
+    case "speaker-embedding":
+      return t.voice.kindEmbedding;
+    case "reference-audio":
+      return t.voice.kindReference;
+  }
+}
 
-const REVEAL = [
-  { value: "typewriter", label: "打字机" },
-  { value: "sweep", label: "扫光" },
-  { value: "fade", label: "淡入" },
+export const PACK_KINDS: PackKind[] = ["lora-adapter", "speaker-embedding", "reference-audio"];
+
+const REVEAL = () => [
+  { value: "typewriter", label: t.voice.revealTypewriter },
+  { value: "sweep", label: t.voice.revealSweep },
+  { value: "fade", label: t.voice.revealFade },
 ];
 
 /** A handful of the 45 the checkpoint understands, named so the field is usable without
  *  opening the model card. They go straight into the spoken text and repeat for emphasis. */
-const EMOTION_HINT =
-  "支持在待念文本中嵌入情绪标记，重复输入可增强情绪表达：😆 喜び 😭 嗚咽 😱 悲鳴 😖 苦しげ 🥺 震え声 👂 囁き ⏩ 早口 🐢 ゆっくり 🤭 笑い 🫶 優しく";
+const EMOTION_HINT = () => t.voice.emotionHint;
 
 const PREVIEW_LINE = "おはよう、司令官さん。";
 
@@ -185,8 +194,8 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
           {
             class: "detail__back",
             type: "button",
-            "aria-label": "返回音色列表",
-            title: "返回 (Esc)",
+            "aria-label": t.voice.backToList,
+            title: t.voice.backTitle,
             onclick: onBack,
           },
           icon("arrow-left"),
@@ -206,19 +215,19 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
     onBack();
   });
 
-  const identity = panel({ title: "身份信息" });
+  const identity = panel({ title: t.voice.identity });
   // The one fact the controls cannot show: an empty field is not "off", it is "follow 设置".
-  const style = panel({ title: "字幕样式", hint: "未配置项将继承全局设置" });
-  const synthesis = panel({ title: "合成参数" });
-  const expression = panel({ title: "情绪控制" });
-  const audition = panel({ title: "语音试听" });
+  const style = panel({ title: t.voice.style, hint: t.voice.styleHint });
+  const synthesis = panel({ title: t.voice.synthesis });
+  const expression = panel({ title: t.voice.expression });
+  const audition = panel({ title: t.voice.audition });
   // Kept, unlike the settings screen's: a manifest can hold keys this build's form does not
   // render, and seeing them is the whole point.
   const raw = panel({
-    title: "源配置文件",
+    title: t.voice.raw,
     actions: [
       button({
-        label: "重新载入",
+        label: t.voice.reload,
         glyph: "arrow-clockwise",
         small: true,
         kind: "quiet",
@@ -229,7 +238,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
 
   fill(
     actions,
-    openButton(pack.path, "在文件资源管理器中打开音色包目录"),
+    openButton(pack.path, t.voice.openPackDir),
   );
 
   /** Whichever file currently decides this field, or null when the runtime is not up to
@@ -246,10 +255,10 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
     return provenance(
       from,
       from === "pack"
-        ? "当前属性由音色包内的 voicepack.json 定义。"
+        ? t.voice.provPackHint
         : from === "config"
-          ? "当前属性由全局 config.json 注册项定义；保存后将转由音色包自身配置管理。"
-          : "当前属性使用系统默认或推导值；保存后将写入音色包自身配置。",
+          ? t.voice.provConfigHint
+          : t.voice.provDerivedHint,
     );
   }
 
@@ -284,10 +293,10 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
 
   /** Why a control is inert, or undefined when it is not. */
   function blocked(): string | undefined {
-    if (config === null) return "正在加载音色包配置…";
+    if (config === null) return t.voice.blockedLoading;
     return config.writable
       ? undefined
-      : "音色包所在路径为只读介质或受限网络共享，无法写入修改。";
+      : t.voice.blockedReadonly;
   }
 
   function renderIdentity(): void {
@@ -304,23 +313,23 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
         { class: "cfg__path" },
         pathText(current.manifestPath, 64),
         current.manifestExists
-          ? chip("独立配置 (voicepack.json)", "ok", "check-circle")
-          : chip("未初始化配置（首次保存时自动生成）", "idle"),
+          ? chip(t.voice.manifestOk, "ok", "check-circle")
+          : chip(t.voice.manifestInit, "idle"),
       ),
       form(
         text({
           key: `pack-${current.id}-name`,
-          label: "显示名称",
+          label: t.voice.nameLabel,
           value: current.name ?? current.effective.name,
           disabled,
           meta: mark("name"),
-          validate: (value) => (value.trim() === "" ? "显示名称不能为空" : null),
+          validate: (value) => (value.trim() === "" ? t.voice.nameEmpty : null),
           save: (value) => apply({ field: "name", value }),
         }),
         text({
           key: `pack-${current.id}-character`,
-          label: "角色名称",
-          hint: "字幕窗口展示的说话人名称；留空时默认采用音色包名称。",
+          label: t.voice.characterLabel,
+          hint: t.voice.characterHint,
           value: current.character ?? current.effective.character ?? "",
           placeholder: current.effective.name,
           disabled,
@@ -329,11 +338,11 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
         }),
         segmented({
           key: `pack-${current.id}-kind`,
-          label: "模型类型",
+          label: t.voice.kindLabel,
           value: current.kind ?? current.effective.kind,
-          options: (Object.keys(KIND_LABEL) as PackKind[]).map((kind) => ({
+          options: PACK_KINDS.map((kind) => ({
             value: kind,
-            label: KIND_LABEL[kind],
+            label: kindLabel(kind),
           })),
           disabled,
           meta: mark("kind"),
@@ -341,34 +350,34 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
         }),
         tags({
           key: `pack-${current.id}-languages`,
-          label: "支持语言",
-          hint: "服务运行时将校验请求语言，拒绝未匹配语种的合成请求。",
+          label: t.voice.languagesLabel,
+          hint: t.voice.languagesHint,
           value: current.languages ?? current.effective.languages,
-          placeholder: "添加语种代码（如 ja）",
+          placeholder: t.voice.languagesPlaceholder,
           disabled,
           meta: mark("languages"),
-          validate: (value) => (value.length === 0 ? "请至少指定一种语言代码（如 ja）" : null),
+          validate: (value) => (value.length === 0 ? t.voice.languagesEmpty : null),
           save: (value) => apply({ field: "languages", value }),
         }),
         text({
           key: `pack-${current.id}-engine`,
-          label: "推理引擎",
-          hint: "引擎标识标签；针对 Irodori 架构请填写 irodori。",
+          label: t.voice.engineLabel,
+          hint: t.voice.engineHint,
           value: current.engine ?? current.effective.engine,
           mono: true,
           disabled,
           meta: mark("engine"),
-          validate: (value) => (value.trim() === "" ? "推理引擎不能为空" : null),
+          validate: (value) => (value.trim() === "" ? t.voice.engineEmpty : null),
           save: (value) => apply({ field: "engine", value }),
         }),
         file({
           key: `pack-${current.id}-avatar`,
-          label: "头像图标",
-          hint: "头像文件将归档至音色包目录，便于整体打包迁移。",
+          label: t.voice.avatarLabel,
+          hint: t.voice.avatarHint,
           value: current.avatar,
           glyph: "microphone-stage",
           extensions: ["png", "jpg", "jpeg", "webp", "bmp"],
-          pickLabel: "选择图像…",
+          pickLabel: t.voice.avatarPick,
           disabled,
           meta: mark("avatar"),
           bring: (picked) => importAvatar(picked, current.path),
@@ -390,11 +399,11 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
     fill(
       style.body,
       group(
-        "配色方案",
+        t.voice.coloursGroup,
         form(
           colour({
             key: `pack-${current.id}-name-color`,
-            label: "说话人颜色",
+            label: t.voice.nameColorLabel,
             value: dialog.nameColor,
             fallback: globals?.nameColor,
             unset: true,
@@ -404,7 +413,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
           }),
           colour({
             key: `pack-${current.id}-text-color`,
-            label: "正文文本颜色",
+            label: t.voice.textColorLabel,
             value: dialog.textColor,
             fallback: globals?.textColor,
             unset: true,
@@ -413,8 +422,8 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
           }),
           colour({
             key: `pack-${current.id}-ruby-color`,
-            label: "发音原文颜色",
-            hint: "格式支持 #rgb、#rrggbb 或 #aarrggbb（前两位为透明度通道）。",
+            label: t.voice.rubyColorLabel,
+            hint: t.voice.rubyColorHint,
             value: dialog.rubyColor,
             fallback: globals?.rubyColor,
             unset: true,
@@ -423,7 +432,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
           }),
           colour({
             key: `pack-${current.id}-countdown-color`,
-            label: "倒计时条颜色",
+            label: t.voice.countdownColorLabel,
             value: dialog.countdownColor,
             fallback: globals?.countdownColor,
             unset: true,
@@ -433,27 +442,27 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
         ),
       ),
       group(
-        "动效与停留",
+        t.voice.motionGroup,
         form(
           segmented({
             key: `pack-${current.id}-reveal`,
-            label: "文字动效",
+            label: t.voice.revealLabel,
             value: dialog.reveal,
-            options: REVEAL,
-            unset: "继承全局",
+            options: REVEAL(),
+            unset: t.voice.inheritGlobal,
             disabled,
             save: (value) => apply({ field: "reveal", value }),
           }),
           number({
             key: `pack-${current.id}-display-seconds`,
-            label: "停留时间",
+            label: t.voice.displaySecondsLabel,
             value: dialog.displaySeconds,
             min: 0.5,
             max: 600,
             step: 0.5,
             nullable: true,
-            unit: "秒",
-            placeholder: globals === null ? "继承全局" : String(globals.displaySeconds),
+            unit: t.voice.secondsUnit,
+            placeholder: globals === null ? t.voice.inheritGlobal : String(globals.displaySeconds),
             disabled,
             save: (value) => apply({ field: "displaySeconds", value }),
           }),
@@ -515,8 +524,8 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
       form(
         number({
           key: `pack-${current.id}-num-steps`,
-          label: "推理步数 (Steps)",
-          hint: "采样迭代步数：数值越高生成质量越稳定，耗时相应增加；默认值为 32。",
+          label: t.voice.stepsLabel,
+          hint: t.voice.stepsHint,
           value: current.synthesis.numSteps,
           min: 1,
           max: 200,
@@ -529,14 +538,14 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
         }),
         number({
           key: `pack-${current.id}-seed`,
-          label: "随机种子 (Seed)",
-          hint: "固定随机种子可确保相同文本生成一致的音频表现。",
+          label: t.voice.seedLabel,
+          hint: t.voice.seedHint,
           value: current.synthesis.seed,
           min: 0,
           max: 4294967295,
           integer: true,
           nullable: true,
-          placeholder: "随机生成 (-1)",
+          placeholder: t.voice.seedPlaceholder,
           disabled,
           save: (value) => apply({ field: "seed", value }),
         }),
@@ -548,7 +557,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
           max: 2,
           step: 0.05,
           nullable: true,
-          placeholder: "使用引擎默认值",
+          placeholder: t.voice.temperaturePlaceholder,
           disabled,
           save: (value) => apply({ field: "temperature", value }),
         }),
@@ -568,18 +577,18 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
       form(
         text({
           key: `pack-${current.id}-emotion`,
-          label: "情绪标记",
-          hint: EMOTION_HINT,
+          label: t.voice.emotionLabel,
+          hint: EMOTION_HINT(),
           value: current.expression.emotion ?? "",
-          placeholder: "输入表情符号（如 😭😭）",
+          placeholder: t.voice.emotionPlaceholder,
           disabled,
           meta: mark("expression"),
           save: (value) => apply({ field: "emotion", value: value.trim() === "" ? null : value }),
         }),
         number({
           key: `pack-${current.id}-cfg-caption`,
-          label: "情绪引导强度 (CFG Scale)",
-          hint: "cfgScaleCaption 参数，默认值为 3.0；数值越高对上方情绪标签的贴合越强。",
+          label: t.voice.cfgLabel,
+          hint: t.voice.cfgHint,
           value: current.expression.cfgScaleCaption,
           min: 0,
           max: 10,
@@ -599,7 +608,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
       type: "text",
       value: PREVIEW_LINE,
       spellcheck: "false",
-      "aria-label": "试听文本输入",
+      "aria-label": t.voice.auditionInput,
     });
     const result = el("div", { class: "preview__result" });
     let running = false;
@@ -608,7 +617,7 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
     // once. So the check happens on the click rather than on the render: no subscription to
     // leak when the page is dropped, and never a button that is wrong about the world.
     const go = button({
-      label: "试听合成",
+      label: t.voice.auditionGo,
       kind: "primary",
       glyph: "play",
       onClick: () => {
@@ -617,24 +626,24 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
           fill(
             result,
             icon("warning-circle"),
-            el("span", { text: "运行时服务未启动，请前往「状态」页面启动服务后再进行试听。" }),
+            el("span", { text: t.voice.auditionNotRunning }),
           );
           return;
         }
         running = true;
-        fill(result, icon("spinner-gap", "spin"), el("span", { text: "正在合成音频…" }));
+        fill(result, icon("spinner-gap", "spin"), el("span", { text: t.voice.auditionBusy }));
         void speakPreview(pack.id, line.value)
           .then((answer) => {
             fill(
               result,
               icon("check-circle"),
               el("span", {
-                text: `${(answer.durationMs / 1000).toFixed(2)} 秒音频 · ${(answer.bytes / 1024).toFixed(0)} KiB · 耗时 ${answer.totalMs} ms${answer.coldStart ? "（含模型冷启动）" : ""}`,
+                text: `${t.voice.auditionResult((answer.durationMs / 1000).toFixed(2), (answer.bytes / 1024).toFixed(0), answer.totalMs)}${answer.coldStart ? t.voice.auditionCold : ""}`,
               }),
               el("code", { class: "path", dir: "ltr", text: answer.requestId }),
             );
             if (answer.presenters === 0) {
-              toast("音频合成完成；当前未检测到活跃的字幕客户端，未触发本地播放。启动字幕端后重试即可收听。", "info");
+              toast(t.voice.auditionNoPresenter, "info");
             }
           })
           .catch((err: unknown) => {
@@ -667,9 +676,9 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
         ? null
         : note(
             "info",
-            "检测到当前版本未识别的配置字段",
+            t.voice.unknownTitle,
             el("p", {
-              text: `${current.unknown.join("、")}。保存配置时将精准修改对应项，其余未识别字段保持原样保留。`,
+              text: t.voice.unknownBody(current.unknown.join("、")),
             }),
           ),
     );
@@ -696,11 +705,11 @@ export function createVoiceDetail(pack: Pack, onBack: () => void): HTMLElement {
       manifest = shown;
       globals = global;
     } catch (err: unknown) {
-      toast(`加载音色包配置失败：${ipcMessage(err)}`, "fail");
+      toast(t.voice.loadFailed(ipcMessage(err)), "fail");
       return;
     }
     if (config === null) {
-      fill(body, note("fail", "音色包未找到", el("p", { text: `注册表中未找到音色包 ID：${pack.id}。` })));
+      fill(body, note("fail", t.voice.notFound, el("p", { text: t.voice.notFoundBody(pack.id) })));
       return;
     }
     renderAll();

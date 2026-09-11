@@ -5,6 +5,7 @@
 
 import { el, type Child } from "./dom";
 import { shortenPath } from "./format";
+import { t } from "./i18n";
 import { icon, type IconName } from "./icons";
 import { openPath, ipcMessage } from "./ipc";
 import { toast } from "./toast";
@@ -214,7 +215,7 @@ export function pathText(path: string, max?: number): HTMLElement {
   });
 }
 
-export function openButton(path: string, name = "在文件资源管理器中显示"): HTMLButtonElement {
+export function openButton(path: string, name = t.common.revealInExplorer): HTMLButtonElement {
   return button({
     glyph: "arrow-square-out",
     name,
@@ -230,7 +231,7 @@ export function openButton(path: string, name = "在文件资源管理器中显�
 async function copyText(value: string, source: HTMLElement, label: string): Promise<void> {
   try {
     await navigator.clipboard.writeText(value);
-    toast(`已复制${label}`, "ok");
+    toast(t.common.copied(label), "ok");
   } catch {
     // WebView2 refuses the async clipboard when the window is not focused. Selecting
     // the text keeps the user one keystroke from the same result instead of leaving
@@ -240,7 +241,7 @@ async function copyText(value: string, source: HTMLElement, label: string): Prom
     const selection = window.getSelection();
     selection?.removeAllRanges();
     selection?.addRange(range);
-    toast("剪贴板访问受限：内容已选中，请按 Ctrl+C 复制", "fail");
+    toast(t.common.clipboardFallback, "fail");
   }
 }
 
@@ -273,8 +274,8 @@ export function copyRow(spec: CopyRowSpec): HTMLElement {
       el("span", { class: "copyrow__label", text: spec.label }),
       button({
         glyph: "copy",
-        name: `复制${what}`,
-        title: `复制${what}`,
+        name: t.common.copy(what),
+        title: t.common.copy(what),
         small: true,
         kind: "quiet",
         onClick: () => void copyText(spec.value, value, what),

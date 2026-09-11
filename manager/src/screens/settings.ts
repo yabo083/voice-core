@@ -24,11 +24,12 @@ import {
   colour,
   cssColour,
   form,
+  hotkey as hotkeyRow,
   number,
   segmented,
-  text,
   toggle,
 } from "../form";
+import { currentLang, languages, setLang, t, type Lang } from "../i18n";
 import { icon } from "../icons";
 import { ipcMessage } from "../ipc";
 import { toast } from "../toast";
@@ -99,10 +100,11 @@ const settingsRestore = (seq: number): Promise<Settings> => invoke("settings_res
 
 // --- the screen ------------------------------------------------------------------------
 
-/** The panel titles, and the group half of a 版本 row's first line: one owner per word. */
-const DIALOG = "字幕外观";
-const HOTKEYS = "快捷键";
-const SERVICE = "服务";
+/** The group half of a 版本 row's first line: one owner per word. Module-bound, like the
+ *  dictionary itself: the panel's language is pinned at boot and a change reloads. */
+const DIALOG = t.settings.dialog;
+const HOTKEYS = t.settings.hotkeys;
+const SERVICE = t.settings.service;
 
 interface Field {
   group: string;
@@ -117,29 +119,29 @@ interface Field {
  *  change was to instead of naming the file it was in, which is what made the old list
  *  three identical lines. */
 const FIELDS: Record<SettingEdit["field"], Field> = {
-  annotationAbove: { group: DIALOG, label: "原文置于上方" },
-  reveal: { group: DIALOG, label: "文字动效" },
-  displaySeconds: { group: DIALOG, label: "停留时间" },
-  nameColor: { group: DIALOG, label: "说话人颜色" },
-  textColor: { group: DIALOG, label: "正文颜色" },
-  rubyColor: { group: DIALOG, label: "原文颜色" },
-  countdownColor: { group: DIALOG, label: "倒计时条颜色" },
-  toggleDialog: { group: HOTKEYS, label: "切换字幕显隐" },
-  toggleHold: { group: HOTKEYS, label: "字幕常驻开关" },
-  idleStopSecs: { group: SERVICE, label: "显存释放延时" },
+  annotationAbove: { group: DIALOG, label: t.settings.annotationAboveLabel },
+  reveal: { group: DIALOG, label: t.settings.revealLabel },
+  displaySeconds: { group: DIALOG, label: t.settings.displaySecondsLabel },
+  nameColor: { group: DIALOG, label: t.settings.nameColorLabel },
+  textColor: { group: DIALOG, label: t.settings.textColorLabel },
+  rubyColor: { group: DIALOG, label: t.settings.rubyColorLabel },
+  countdownColor: { group: DIALOG, label: t.settings.countdownColorLabel },
+  toggleDialog: { group: HOTKEYS, label: t.settings.toggleDialogLabel },
+  toggleHold: { group: HOTKEYS, label: t.settings.toggleHoldLabel },
+  idleStopSecs: { group: SERVICE, label: t.settings.idleStopSecsLabel },
 };
 
 /** The same table, indexed by whatever a recorded change actually ends in - that key for
  *  every setting this build has, and something a newer one wrote for anything else. */
 const BY_KEY: Record<string, Field | undefined> = FIELDS;
 
-const REVEAL = [
-  { value: "typewriter", label: "打字机" },
-  { value: "sweep", label: "扫光" },
-  { value: "fade", label: "淡入" },
+const REVEAL = () => [
+  { value: "typewriter", label: t.settings.revealTypewriter },
+  { value: "sweep", label: t.settings.revealSweep },
+  { value: "fade", label: t.settings.revealFade },
 ];
 
-const REVEAL_HINT = "打字机：按音频时长匀速显现；扫光：保持排版固定；淡入：按句子逐条淡入。";
+const REVEAL_HINT = () => t.settings.revealHint;
 
 /** Local time, because the timestamp came back as epoch ms precisely so the webview - which
  *  knows the machine's timezone - would be the one to format it.
@@ -161,7 +163,7 @@ function when(ms: number): string {
 /** A leaf as the row shows it: the value, or 默认值 when the key was not in the file - the
  *  same word the marker beside the control uses for the same state. */
 function valueText(leaf: Leaf): string {
-  if (!("set" in leaf)) return "默认值";
+  if (!("set" in leaf)) return t.settings.defaultValue;
   // The quotes belong to the file, not to the value, and this row is about the value. Every
   // recorded value is a colour, one of three words, a hotkey or a number, so none of them can
   // carry an escape that slicing the quotes off would break.
@@ -176,11 +178,12 @@ export function createSettingsScreen(): HTMLElement {
   const dialog = panel({ title: DIALOG });
   const keys = panel({ title: HOTKEYS });
   const service = panel({ title: SERVICE });
+  const language = panel({ title: t.settings.language });
   const history = panel({
-    title: "版本",
+    title: t.settings.history,
     actions: [
       button({
-        label: "刷新",
+        label: t.settings.refresh,
         glyph: "arrow-clockwise",
         small: true,
         kind: "quiet",
@@ -204,7 +207,7 @@ export function createSettingsScreen(): HTMLElement {
     const current = settings;
     if (current === null) return;
     for (const [key, node] of Object.entries(markers)) {
-      fill(node, current.written.includes(key) ? null : chip("默认值", "idle"));
+      fill(node, current.written.includes(key) ? null : chip(t.settings.defaultValue, "idle"));
     }
   }
 
@@ -250,7 +253,7 @@ export function createSettingsScreen(): HTMLElement {
         toggle({
           key: "set-annotation-above",
           label: FIELDS.annotationAbove.label,
-          hint: "设置发音原文的显示位置；关闭后固定置于下方。",
+          hint: t.settings.annotationAboveHint,
           value: current.annotationAbove,
           meta: marker("annotationAbove"),
           save: (value) => apply({ field: "annotationAbove", value }),
@@ -258,9 +261,9 @@ export function createSettingsScreen(): HTMLElement {
         segmented({
           key: "set-reveal",
           label: FIELDS.reveal.label,
-          hint: REVEAL_HINT,
+          hint: REVEAL_HINT(),
           value: current.reveal,
-          options: REVEAL,
+          options: REVEAL(),
           meta: marker("reveal"),
           save: (value) => apply({ field: "reveal", value: value ?? "typewriter" }),
         }),
@@ -271,7 +274,7 @@ export function createSettingsScreen(): HTMLElement {
           min: 0.5,
           max: 600,
           step: 0.5,
-          unit: "秒",
+          unit: t.settings.secondsUnit,
           meta: marker("displaySeconds"),
           save: (value) => apply({ field: "displaySeconds", value: value ?? 6 }),
         }),
@@ -292,7 +295,7 @@ export function createSettingsScreen(): HTMLElement {
         colour({
           key: "set-ruby-color",
           label: FIELDS.rubyColor.label,
-          hint: "格式支持 #rgb、#rrggbb 或 #aarrggbb（前两位为透明度通道）。",
+          hint: t.settings.rubyHint,
           value: current.rubyColor,
           meta: marker("rubyColor"),
           save: (value) => apply({ field: "rubyColor", value: value ?? "#9effffff" }),
@@ -364,27 +367,49 @@ export function createSettingsScreen(): HTMLElement {
     fill(
       keys.body,
       form(
-        text({
+        hotkeyRow({
           key: "set-toggle-dialog",
           label: FIELDS.toggleDialog.label,
-          hint: "必须包含修饰键（Ctrl/Alt/Shift），避免拦截系统全局输入。",
+          hint: t.settings.hotkeyHint,
           value: current.toggleDialog,
-          mono: true,
           placeholder: "Ctrl+Alt+D",
           meta: marker("toggleDialog"),
           validate: hotkey,
           save: (value) => apply({ field: "toggleDialog", value }),
         }),
-        text({
+        hotkeyRow({
           key: "set-toggle-hold",
           label: FIELDS.toggleHold.label,
-          hint: "必须包含修饰键（Ctrl/Alt/Shift），避免拦截系统全局输入。",
+          hint: t.settings.hotkeyHint,
           value: current.toggleHold,
-          mono: true,
           placeholder: "Ctrl+Alt+H",
           meta: marker("toggleHold"),
           validate: hotkey,
           save: (value) => apply({ field: "toggleHold", value }),
+        }),
+      ),
+    );
+  }
+
+  /** The panel's own language. A choice is a write-and-reload, not a live re-translation:
+   *  every screen is built once and re-rendered from stores, so a reload is both the
+   *  complete migration and the honest one. */
+  function renderLanguage(): void {
+    fill(
+      language.body,
+      form(
+        segmented({
+          key: "set-language",
+          label: t.settings.language,
+          hint: t.settings.languageHint,
+          value: currentLang,
+          options: languages().map(({ id, label }) => ({ value: id, label })),
+          save: (value) => {
+            setLang((value === "en" ? "en" : "zh") as Lang);
+            // The choice reloads the window; an unresolved save keeps the row's own
+            // "saved" toast from racing the navigation it just caused.
+            return new Promise<void>(() => {});
+          },
         }),
       ),
     );
@@ -402,20 +427,20 @@ export function createSettingsScreen(): HTMLElement {
         number({
           key: "set-idle-stop",
           label: FIELDS.idleStopSecs.label,
-          hint: "达到延时后释放模型缓存；持续空闲将终止引擎子进程。设为 0 表示常驻显存。",
+          hint: t.settings.idleStopHint,
           value: current.idleStopSecs,
           min: 0,
           max: 86400,
           step: 60,
           integer: true,
-          unit: "秒",
+          unit: t.settings.secondsUnit,
           meta: marker("idleStopSecs"),
           save: (value) => apply({ field: "idleStopSecs", value: value ?? 900 }),
         }),
       ),
       // The one standing note on this screen: it is the single control here that does not
       // apply immediately, and waiting for an effect that never comes is the costly version.
-      note("warn", "修改将在下次服务启动时生效"),
+      note("warn", t.settings.serviceNote),
     );
   }
 
@@ -429,14 +454,14 @@ export function createSettingsScreen(): HTMLElement {
         history.body,
         emptyState({
           glyph: "clock-counter-clockwise",
-          title: "暂无改动记录",
+          title: t.settings.historyEmpty,
           lines: [
             el(
               "p",
               null,
-              "改动任何设置后，这里会出现可以还原的记录；记录写在 ",
+              t.settings.historyEmptyLead,
               pathText("data\\settings.history.jsonl"),
-              "。",
+              t.settings.historyEmptyTail,
             ),
           ],
         }),
@@ -467,7 +492,7 @@ export function createSettingsScreen(): HTMLElement {
         confirming
           ? [
               button({
-                label: "确认还原",
+                label: t.settings.confirmRestore,
                 kind: "danger",
                 glyph: "check",
                 small: true,
@@ -483,18 +508,23 @@ export function createSettingsScreen(): HTMLElement {
                       paintMarkers();
                       paintPreview();
                       void loadHistory();
-                      toast(`已还原 ${change.file}`, "ok");
+                      toast(t.settings.restored(change.file), "ok");
                     })
                     .catch((err: unknown) => {
                       render(false);
-                      toast(`还原配置失败：${ipcMessage(err)}`, "fail");
+                      toast(t.settings.restoreFailed(ipcMessage(err)), "fail");
                     });
                 },
               }),
-              button({ label: "取消", kind: "quiet", small: true, onClick: () => render(false) }),
+              button({
+                label: t.settings.cancel,
+                kind: "quiet",
+                small: true,
+                onClick: () => render(false),
+              }),
             ]
           : button({
-              label: "还原",
+              label: t.settings.restore,
               glyph: "clock-counter-clockwise",
               small: true,
               kind: "quiet",
@@ -527,7 +557,7 @@ export function createSettingsScreen(): HTMLElement {
     try {
       settings = await settingsRead();
     } catch (err: unknown) {
-      toast(`加载设置失败：${ipcMessage(err)}`, "fail");
+      toast(t.settings.loadFailed(ipcMessage(err)), "fail");
       return;
     }
     renderDialog();
@@ -540,7 +570,7 @@ export function createSettingsScreen(): HTMLElement {
     try {
       changes = await settingsHistory();
     } catch (err: unknown) {
-      toast(`加载改动记录失败：${ipcMessage(err)}`, "fail");
+      toast(t.settings.loadHistoryFailed(ipcMessage(err)), "fail");
       changes = [];
     }
     renderHistory();
@@ -549,6 +579,7 @@ export function createSettingsScreen(): HTMLElement {
   renderDialog();
   renderKeys();
   renderService();
+  renderLanguage();
   renderHistory();
   void loadSettings();
   void loadHistory();
@@ -572,12 +603,13 @@ export function createSettingsScreen(): HTMLElement {
       el(
         "div",
         { class: "screen__titles" },
-        el("h1", { class: "screen__title", tabindex: "-1", text: "设置" }),
+        el("h1", { class: "screen__title", tabindex: "-1", text: t.settings.title }),
       ),
     ),
     dialog.root,
     keys.root,
     service.root,
+    language.root,
     history.root,
   );
 }
@@ -595,7 +627,7 @@ function hotkey(value: string): string | null {
     !parts.slice(0, -1).every(isModifier) ||
     isModifier(parts[parts.length - 1])
   ) {
-    return "快捷键格式：修饰键+按键，如 Ctrl+Alt+D。";
+    return t.settings.hotkeyFormat;
   }
   return null;
 }

@@ -11,6 +11,7 @@
 // red" has to be beside the thing that is red.
 
 import { el } from "./dom";
+import { t } from "./i18n";
 import { icon } from "./icons";
 
 export type ToastTone = "ok" | "fail" | "info";
@@ -64,7 +65,7 @@ export function toast(message: string, tone: ToastTone = "info"): void {
       {
         class: "btn btn--quiet btn--icon toast__close",
         type: "button",
-        "aria-label": "关闭提示",
+        "aria-label": t.common.closeToast,
         onclick: () => dismiss(key),
       },
       icon("x"),

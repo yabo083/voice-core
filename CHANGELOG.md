@@ -8,6 +8,27 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.7.0] - 2026-09-12
+
+### Added
+
+- **The panel speaks two languages.** Every user-facing string across the shell, the five
+  screens and the shared widget vocabulary moved into per-domain dictionaries
+  (`strings/*.ts`), with Chinese as the source of truth and the English object typed
+  against it — a key present in one language and missing in the other is a compile error,
+  not a leak at runtime. A 语言 picker at the top of Settings switches immediately; the
+  choice is panel-local (localStorage), the backend holds no language state, and a change
+  reloads the window, which is the complete migration because every screen is derived from
+  backend state on boot.
+- **Hotkeys are captured, not typed.** The two hotkey fields in Settings gained a 捕获
+  button: press it, press the combination, the field fills itself — the rebinding
+  interaction every game uses, because "type Ctrl+Alt+D into a field" asks for characters
+  nobody thinks of as text. Hand typing still works; the chord goes through the same
+  validation a typed value does, and Esc cancels mid-capture.
+- **The status screen's usage card names the deploy skill.** Three copy rows now: everyday
+  speech, training a voice, and deploying or repairing the environment — the third skill
+  shipped in 1.6.0 but the one card that tells an agent what exists never mentioned it.
+
 ## [1.6.1] - 2026-09-12
 
 ### Fixed

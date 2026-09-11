@@ -3288,3 +3288,25 @@ select.input:focus-visible,
     animation: none;
   }
 }
+
+/* Hotkey capture: the field plus a record button; while listening, the field glows
+   and the cancel hint sits right of it. */
+.capture {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.capture .input {
+  width: 14ch;
+}
+
+.capture .input.is-capturing {
+  border-color: var(--accent);
+}
+
+.form__capture-hint {
+  color: var(--ink-faint);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+}

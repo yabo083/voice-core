@@ -20,6 +20,7 @@
 // where the back arrow goes.
 
 import { el, fill } from "./dom";
+import { t } from "./i18n";
 import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, type Inventory } from "./ipc";
 import {
@@ -53,11 +54,11 @@ interface NavSpec {
 // The order the work happens in: what is running, whose voice, teaching a new one, and the
 // knobs last — a rail is a statement about what a user came here to do.
 const NAV: NavSpec[] = [
-  { id: "deploy", label: "部署", glyph: "download-simple" },
-  { id: "status", label: "状态", glyph: "pulse" },
-  { id: "voices", label: "音色", glyph: "microphone-stage" },
-  { id: "train", label: "训练", glyph: "magic-wand" },
-  { id: "settings", label: "设置", glyph: "gear" },
+  { id: "deploy", label: t.common.navDeploy, glyph: "download-simple" },
+  { id: "status", label: t.common.navStatus, glyph: "pulse" },
+  { id: "voices", label: t.common.navVoices, glyph: "microphone-stage" },
+  { id: "train", label: t.common.navTrain, glyph: "magic-wand" },
+  { id: "settings", label: t.common.navSettings, glyph: "gear" },
 ];
 
 function mount(app: HTMLElement): void {
@@ -167,7 +168,11 @@ function mount(app: HTMLElement): void {
         el("span", { class: "livestate__dot", "aria-hidden": "true" }),
         el("span", {
           class: "livestate__text",
-          text: current.reachable ? "服务运行中" : processes.runtime ? "服务启动中" : "服务已停止",
+          text: current.reachable
+            ? t.common.railRunning
+            : processes.runtime
+              ? t.common.railStarting
+              : t.common.railStopped,
         }),
       ),
     );
@@ -178,7 +183,7 @@ function mount(app: HTMLElement): void {
     // (and the runtime) when packs change, so it is the one whose count moves at all.
     const packCount = voices.value?.length ?? 0;
     badges.voices.textContent = packCount > 0 ? String(packCount) : "";
-    badges.status.textContent = current.reachable ? "运行中" : "";
+    badges.status.textContent = current.reachable ? t.common.badgeRunning : "";
 
     // The Deploy tab exists only while there is something to deploy. Hiding the row
     // rather than the button keeps the list from leaving a gap behind. It stays gone
@@ -187,7 +192,7 @@ function mount(app: HTMLElement): void {
     // a second, contradictory answer to "where am I".
     const provisionedNow = provisioned();
     items.deploy.hidden = provisionedNow;
-    badges.deploy.textContent = provisionedNow || inv === null ? "" : "待部署";
+    badges.deploy.textContent = provisionedNow || inv === null ? "" : t.common.badgePendingDeploy;
   }
 
   fill(
@@ -197,7 +202,7 @@ function mount(app: HTMLElement): void {
       { class: "app" },
       el(
         "nav",
-        { class: "rail", "aria-label": "主导航" },
+        { class: "rail", "aria-label": t.common.railAria },
         el(
           "div",
           { class: "brand" },
@@ -206,7 +211,7 @@ function mount(app: HTMLElement): void {
             "div",
             { class: "brand__text" },
             el("p", { class: "brand__name", text: "voice-core" }),
-            el("p", { class: "brand__role", text: "语音合成控制台" }),
+            el("p", { class: "brand__role", text: t.common.brandRole }),
           ),
         ),
         navList,

@@ -27,6 +27,7 @@
 // state saying what will appear here.
 
 import { el, fill } from "../dom";
+import { t } from "../i18n";
 import { formatBytes, formatDuration, formatElapsed } from "../format";
 import { icon, type IconName } from "../icons";
 import {
@@ -59,35 +60,35 @@ import {
 
 /** Result-oriented, and free of the engine's vocabulary: "DACVAE" and "manifest" belong in the
  *  console, where someone who needs them is already looking. */
-const STAGE_LABEL: Record<TrainStage, string> = {
-  dataset: "语料校验",
-  latents: "音频特征提取",
-  train: "训练适配器",
-  samples: "生成试听样本",
-  score: "音色相似度评分",
-  install: "安装音色包",
+const STAGE_LABEL: Record<TrainStage, () => string> = {
+  dataset: () => t.train.stageDataset,
+  latents: () => t.train.stageLatents,
+  train: () => t.train.stageTrain,
+  samples: () => t.train.stageSamples,
+  score: () => t.train.stageScore,
+  install: () => t.train.stageInstall,
 };
 
 /** What the step produces, not what it does. A stage's own `message` replaces this the moment
  *  it starts, so this line is only ever read before that step has run. */
-const STAGE_HINT: Record<TrainStage, string> = {
-  dataset: "dataset.jsonl 与质检报告",
-  latents: "DACVAE 潜变量 (.pt) 与训练清单",
-  train: "LoRA 权重训练（高 GPU 负载阶段）",
-  samples: "固定随机种子 · 每个检查点各一组样本",
-  score: "GE2E d-vector · CPU",
-  install: "归档检查点并生成 voicepack.json",
+const STAGE_HINT: Record<TrainStage, () => string> = {
+  dataset: () => t.train.hintDataset,
+  latents: () => t.train.hintLatents,
+  train: () => t.train.hintTrain,
+  samples: () => t.train.hintSamples,
+  score: () => t.train.hintScore,
+  install: () => t.train.hintInstall,
 };
 
 /** The words the status file uses, in the words the screen uses. `interrupted` is the one the
  *  event stream cannot produce: a stage whose process died without a terminal event. */
-const STATE_LABEL: Record<string, string> = {
-  pending: "待执行",
-  running: "进行中",
-  ok: "已完成",
-  skip: "已跳过",
-  fail: "失败",
-  interrupted: "已中断",
+const STATE_LABEL: Record<string, () => string> = {
+  pending: () => t.train.statePending,
+  running: () => t.train.stateRunning,
+  ok: () => t.train.stateOk,
+  skip: () => t.train.stateSkip,
+  fail: () => t.train.stateFail,
+  interrupted: () => t.train.stateInterrupted,
 };
 
 const STATE_GLYPH: Record<string, IconName> = {
@@ -176,15 +177,15 @@ function tokenize(message: string): Segment[] {
 
 /** What each file of a run is for. Keyed by the name on disk because that is what the backend
  *  reports — it measures files, it does not name them in Chinese. */
-const ARTEFACT: Record<string, string> = {
-  "dataset.jsonl": "数据集清单 (dataset.jsonl)",
-  "dataset.jsonl.qa.json": "语料质检报告 (dataset.jsonl.qa.json)",
-  "train_manifest.jsonl": "训练样本清单 (train_manifest.jsonl)",
-  latents: "潜变量特征目录 (latents)",
-  lora: "模型检查点目录 (lora)",
-  samples: "试听音频样本 (samples)",
-  score: "相似度评估报告 (score)",
-  "installed.txt": "安装记录 (installed.txt)",
+const ARTEFACT: Record<string, () => string> = {
+  "dataset.jsonl": () => t.train.artefactDataset,
+  "dataset.jsonl.qa.json": () => t.train.artefactQa,
+  "train_manifest.jsonl": () => t.train.artefactManifest,
+  latents: () => t.train.artefactLatents,
+  lora: () => t.train.artefactLora,
+  samples: () => t.train.artefactSamples,
+  score: () => t.train.artefactScore,
+  "installed.txt": () => t.train.artefactInstalled,
 };
 
 /** Directories all draw as a folder — which of them is which is what the label is for. */
@@ -231,7 +232,7 @@ export function createTrainingScreen(): TrainingScreen {
 
   // ---------------------------------------------------------------------------- 运行
   // Every run with a status file, including the ones this window never saw start.
-  const runsPanel = panel({ title: "训练运行" });
+  const runsPanel = panel({ title: t.train.runsPanel });
   const runsTable = el("div", { class: "table" });
   const runsState = el("div", { class: "panel__body" });
 
@@ -241,10 +242,10 @@ export function createTrainingScreen(): TrainingScreen {
         runsTable,
         emptyState({
           glyph: "magic-wand",
-          title: "暂无训练运行",
+          title: t.train.runsEmpty,
           lines: [
             el("p", {
-              text: "让 agent 按 voice-core-voice-training 技能执行训练，它每一步写下的状态文件会让这次运行出现在这里。",
+              text: t.train.runsEmptyBody,
             }),
           ],
         }),
@@ -258,10 +259,10 @@ export function createTrainingScreen(): TrainingScreen {
       el(
         "div",
         { class: "table__head" },
-        el("span", { class: "table__cell", text: "音色包 ID" }),
-        el("span", { class: "table__cell", text: "阶段" }),
-        el("span", { class: "table__cell", text: "状态" }),
-        el("span", { class: "table__cell", text: "更新于" }),
+        el("span", { class: "table__cell", text: t.train.colPack }),
+        el("span", { class: "table__cell", text: t.train.colStage }),
+        el("span", { class: "table__cell", text: t.train.colState }),
+        el("span", { class: "table__cell", text: t.train.colUpdated }),
       ),
       ...runs.map((run) =>
         el(
@@ -282,7 +283,7 @@ export function createTrainingScreen(): TrainingScreen {
           ),
           el("span", {
             class: "table__cell",
-            text: `${formatDuration(Math.max(0, Date.now() - run.updated))} 前`,
+            text: t.train.ago(formatDuration(Math.max(0, Date.now() - run.updated))),
           }),
         ),
       ),
@@ -295,12 +296,12 @@ export function createTrainingScreen(): TrainingScreen {
     }
     const position = run.total !== null && run.done !== null ? ` · ${run.done}/${run.total}` : "";
     const sentence = run.live
-      ? `正在运行 · ${stageLabel(run.stage)}${position}`
+      ? t.train.liveSentence(stageLabel(run.stage), position)
       : run.failure !== null
-        ? `上次运行在阶段「${stageLabel(run.failed_stage ?? "")}」失败`
+        ? t.train.lastFailed(stageLabel(run.failed_stage ?? ""))
         : run.state === "interrupted"
-          ? `上次运行在阶段「${stageLabel(run.stage)}」被中断`
-          : `上次运行至阶段「${stageLabel(run.stage)}」· ${stateLabel(run.state)}`;
+          ? t.train.lastInterrupted(stageLabel(run.stage))
+          : t.train.lastUntil(stageLabel(run.stage), stateLabel(run.state));
 
     fill(
       runsState,
@@ -311,7 +312,7 @@ export function createTrainingScreen(): TrainingScreen {
         el("span", { text: sentence }),
         el("span", {
           class: "field__hint",
-          text: `PID ${run.pid} · 更新于 ${formatDuration(Math.max(0, Date.now() - run.updated))} 前`,
+          text: t.train.pidLine(run.pid, t.train.ago(formatDuration(Math.max(0, Date.now() - run.updated)))),
         }),
       ),
       run.failure === null
@@ -321,7 +322,7 @@ export function createTrainingScreen(): TrainingScreen {
             run.failure,
             el("p", {
               class: "remedy",
-              text: run.remedy ?? "标准错误流 (stderr) 中包含详细错误堆栈",
+              text: run.remedy ?? t.train.stderrHint,
             }),
           ),
     );
@@ -330,7 +331,7 @@ export function createTrainingScreen(): TrainingScreen {
   fill(runsPanel.body, runsTable, runsState);
 
   // ---------------------------------------------------------------------------- 进度
-  const progress = panel({ title: "训练进度" });
+  const progress = panel({ title: t.train.progressPanel });
 
   interface WizardRow {
     root: HTMLElement;
@@ -342,13 +343,13 @@ export function createTrainingScreen(): TrainingScreen {
   function wizardRow(index: number, stage: TrainStage): WizardRow {
     const dot = icon(STATE_GLYPH.pending, "wizard__dot");
     const num = el("span", { class: "wizard__num" }, dot);
-    const label = el("p", { class: "wizard__label", text: STAGE_LABEL[stage] });
-    const sub = el("p", { class: "wizard__sub", text: STAGE_HINT[stage] });
+    const label = el("p", { class: "wizard__label", text: STAGE_LABEL[stage]() });
+    const sub = el("p", { class: "wizard__sub", text: STAGE_HINT[stage]() });
     const root = el(
       "div",
       {
         class: `wizard__step wizard__step--${STATE_CLASS.pending}`,
-        "aria-label": `步骤 ${index}：${STAGE_LABEL[stage]}`,
+        "aria-label": t.train.stepAria(index, STAGE_LABEL[stage]()),
       },
       num,
       el("div", { class: "wizard__body" }, label, sub),
@@ -384,7 +385,7 @@ export function createTrainingScreen(): TrainingScreen {
       onclick: () => followLog(),
     },
     icon("arrow-down", "chip__icon"),
-    el("span", { text: "跟随" }),
+    el("span", { text: t.train.follow }),
   );
   const logLines = el(
     "div",
@@ -434,10 +435,10 @@ export function createTrainingScreen(): TrainingScreen {
         row === null || row.started === null || state === "pending"
           ? ""
           : ` · ${formatElapsed((row.ended ?? Date.now()) - row.started)}`;
-      view.label.textContent = `${STAGE_LABEL[stage]}${elapsed}`;
+      view.label.textContent = `${STAGE_LABEL[stage]()}${elapsed}`;
       view.sub.textContent =
         row === null || state === "pending"
-          ? STAGE_HINT[stage]
+          ? STAGE_HINT[stage]()
           : row.message === ""
             ? stateLabel(state)
             : row.message;
@@ -471,7 +472,7 @@ export function createTrainingScreen(): TrainingScreen {
     } else {
       // No total yet: an indeterminate bar is honest, a bar pinned at 0 is not.
       bar.removeAttribute("value");
-      barText.textContent = `已完成 ${live.done}`;
+      barText.textContent = t.train.doneCount(live.done);
     }
   }
 
@@ -558,8 +559,8 @@ export function createTrainingScreen(): TrainingScreen {
 
   // ---------------------------------------------------------------------------- 成果
   const results = panel({
-    title: "训练成果",
-    hint: "已按验证损失升序排序，默认选中最优检查点",
+    title: t.train.resultsPanel,
+    hint: t.train.resultsHint,
   });
   const table = el("div", { class: "table" });
 
@@ -571,10 +572,10 @@ export function createTrainingScreen(): TrainingScreen {
         table,
         emptyState({
           glyph: "magic-wand",
-          title: "暂无检查点生成",
+          title: t.train.checkpointsEmpty,
           lines: [
             el("p", {
-              text: "模型训练过程中将按保存间隔生成检查点，评分阶段将追加相似度评估指标。",
+              text: t.train.checkpointsEmptyBody,
             }),
           ],
         }),
@@ -591,10 +592,10 @@ export function createTrainingScreen(): TrainingScreen {
       el(
         "div",
         { class: "table__head" },
-        el("span", { class: "table__cell", text: "检查点" }),
-        el("span", { class: "table__cell", text: "步数" }),
-        el("span", { class: "table__cell", text: "验证损失" }),
-        el("span", { class: "table__cell", text: "相似度下界" }),
+        el("span", { class: "table__cell", text: t.train.colCheckpoint }),
+        el("span", { class: "table__cell", text: t.train.colStep }),
+        el("span", { class: "table__cell", text: t.train.colValLoss }),
+        el("span", { class: "table__cell", text: t.train.colLowerBound }),
       ),
       ...items.map((item) =>
         el(
@@ -615,7 +616,7 @@ export function createTrainingScreen(): TrainingScreen {
             el("span", { dir: "ltr", text: item.name }),
             // Derived, not stored: installed.txt on the scratch tree is the state; a chip
             // that paraphrases it would just be a second copy to keep in sync.
-            item.installed ? chip("已安装", "ok", "check") : null,
+            item.installed ? chip(t.train.installedChip, "ok", "check") : null,
           ),
           el("span", { class: "table__cell", text: item.step === null ? "—" : String(item.step) }),
           el("span", {
@@ -640,7 +641,7 @@ export function createTrainingScreen(): TrainingScreen {
   // ---------------------------------------------------------------------------- 文件
   // The run as it exists on disk. The two log files are named apart from the rest because a
   // discard keeps them: they are the record, and the tree is regenerable.
-  const files = panel({ title: "产物文件" });
+  const files = panel({ title: t.train.filesPanel });
   const fileList = el("div", { class: "stage__detail" });
   const fileActions = el("div", { class: "panel__actions" });
 
@@ -657,7 +658,7 @@ export function createTrainingScreen(): TrainingScreen {
         el("span", { class: "filerow__name", dir: "ltr", title: item.path, text: item.name }),
         el("span", {
           class: "field__hint",
-          text: item.dir && item.exists ? `${label} · ${item.files} 个文件` : label,
+          text: item.dir && item.exists ? t.train.filesCount(label, item.files) : label,
         }),
       ),
       el(
@@ -665,7 +666,7 @@ export function createTrainingScreen(): TrainingScreen {
         { class: "filerow__tail" },
         el("span", {
           class: "filerow__size",
-          text: item.exists ? formatBytes(item.bytes) : "未生成",
+          text: item.exists ? formatBytes(item.bytes) : t.train.notGenerated,
         }),
         item.exists ? openButton(item.path) : null,
       ),
@@ -683,30 +684,30 @@ export function createTrainingScreen(): TrainingScreen {
     fill(
       fileList,
       scratch.exists
-        ? el("div", {}, ...scratch.entries.map((item) => fileRow(item, ARTEFACT[item.name] ?? "")))
+        ? el("div", {}, ...scratch.entries.map((item) => fileRow(item, ARTEFACT[item.name]?.() ?? "")))
         : emptyState({
             glyph: "folder-open",
-            title: "暂无暂存目录",
+            title: t.train.noScratch,
             lines: [pathText(scratch.dir, 72)],
           }),
-      el("p", { class: "field__hint", text: "日志文件（清理暂存区时将予以保留）" }),
+      el("p", { class: "field__hint", text: t.train.logsKept }),
       el(
         "div",
         {},
-        fileRow(scratch.transcript, "事件日志"),
-        fileRow(scratch.status, "状态数据 (JSON)"),
+        fileRow(scratch.transcript, t.train.eventLog),
+        fileRow(scratch.status, t.train.statusData),
       ),
       discardRefusal === null
         ? null
         : note(
             "warn",
-            "暂存目录中存在未安装的检查点",
+            t.train.discardRefusalTitle,
             el("p", { text: discardRefusal }),
             el(
               "div",
               { class: "panel__actions" },
               button({
-                label: "确认清理并删除未保存检查点",
+                label: t.train.confirmDiscard,
                 glyph: "trash",
                 kind: "danger",
                 onClick: () => void discard(true),
@@ -727,9 +728,12 @@ export function createTrainingScreen(): TrainingScreen {
       !scratch.exists
         ? null
         : run?.live === true
-          ? blockedButton({ label: "清理暂存", glyph: "trash", small: true }, "该音色包正在训练")
+          ? blockedButton(
+            { label: t.train.discardScratch, glyph: "trash", small: true },
+            t.train.discardBlocked,
+          )
           : button({
-              label: "清理暂存",
+              label: t.train.discardScratch,
               glyph: "trash",
               kind: "danger",
               small: true,
@@ -747,9 +751,9 @@ export function createTrainingScreen(): TrainingScreen {
 
   /** Why 安装为音色包 is not live, in one sentence, or null. */
   function installBlocker(): string | null {
-    if (installing) return "正在安装音色包";
-    if (current() === null) return "请先选择一次训练运行";
-    if (chosen === null) return "本次运行尚无可安装的检查点";
+    if (installing) return t.train.installingNow;
+    if (current() === null) return t.train.pickRunFirst;
+    if (chosen === null) return t.train.noCheckpoint;
     return null;
   }
 
@@ -757,7 +761,7 @@ export function createTrainingScreen(): TrainingScreen {
     fill(
       cmdLeft,
       button({
-        label: "刷新",
+        label: t.train.refresh,
         glyph: "arrow-clockwise",
         kind: "quiet",
         onClick: () => void poll(),
@@ -765,7 +769,7 @@ export function createTrainingScreen(): TrainingScreen {
     );
     const reason = installBlocker();
     const chosenItem = tree?.checkpoints.find((item) => item.path === chosen) ?? null;
-    const label = chosenItem?.installed === true ? "重新安装" : "安装为音色包";
+    const label = chosenItem?.installed === true ? t.train.reinstall : t.train.installAsPack;
     fill(
       cmdRight,
       reason === null
@@ -874,7 +878,7 @@ export function createTrainingScreen(): TrainingScreen {
       // one's own action by listening for one's own side effect would be observing the
       // notification instead of the result.
       await refreshVoices();
-      toast(`音色包 ${run.pack_id} 已安装，将在下次服务加载时生效`, "ok");
+      toast(t.train.installedToast(run.pack_id), "ok");
     } catch (err: unknown) {
       toast(ipcMessage(err), "fail");
     } finally {
@@ -894,7 +898,7 @@ export function createTrainingScreen(): TrainingScreen {
     try {
       const freed = await trainingDiscard(run.pack_id, confirmed);
       discardRefusal = null;
-      toast(`已清理 ${run.pack_id} 的暂存目录，释放存储空间 ${formatBytes(freed)}`, "ok");
+      toast(t.train.discardedToast(run.pack_id, formatBytes(freed)), "ok");
     } catch (err: unknown) {
       discardRefusal = ipcMessage(err);
       renderFiles();
@@ -932,7 +936,7 @@ export function createTrainingScreen(): TrainingScreen {
       el(
         "div",
         { class: "screen__titles" },
-        el("h1", { class: "screen__title", tabindex: "-1", text: "训练" }),
+        el("h1", { class: "screen__title", tabindex: "-1", text: t.train.title }),
       ),
     ),
     runsPanel.root,
@@ -983,11 +987,11 @@ function rowFor(run: TrainingRun | null, stage: TrainStage): TrainingStageStatus
 /** A stage name in Chinese, or the name itself when the file says something this build does not
  *  know: an unknown stage is data, not a reason to render nothing. */
 function stageLabel(stage: string): string {
-  return STAGE_LABEL[stage as TrainStage] ?? stage;
+  return STAGE_LABEL[stage as TrainStage]?.() ?? stage;
 }
 
 function stateLabel(state: string): string {
-  return STATE_LABEL[state] ?? state;
+  return STATE_LABEL[state]?.() ?? state;
 }
 
 /** 0.6 is not a threshold the engine has; it is where the reference corpus's own leave-one-out

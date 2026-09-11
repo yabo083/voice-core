@@ -38,11 +38,12 @@
 ; 7. Prerequisite:
 ;    - VoiceCore.exe is a WebView2 host. A machine without the Evergreen Runtime is told so,
 ;      with the download link, instead of being handed a blank window.
-; 8. Agent skills:
-;    - The two SKILL.md files ship inside the tree (skills\) AND at
+;    - The three SKILL.md files ship inside the tree (skills\) AND at
 ;      %USERPROFILE%\.agents\skills\<name>\SKILL.md, which is where an agent with memory looks
 ;      for a skill without being handed a path. Ours overwrite on upgrade and are removed on
 ;      uninstall; the [Files] section states why.
+;      (voice-core-tts: 日常出声; voice-core-voice-training: 音色训练; voice-core-deploy:
+;      环境部署与修复 - bootstrap 七阶段驱动, 见 skills\voice-core-deploy\SKILL.md)
 ; ==============================================================================
 
 #if Ver < EncodeVer(6, 3, 0)
@@ -185,6 +186,8 @@ Source: "{#SourceTree}\skills\voice-core-tts\SKILL.md"; \
   DestDir: "{%USERPROFILE}\.agents\skills\voice-core-tts"; Flags: ignoreversion
 Source: "{#SourceTree}\skills\voice-core-voice-training\SKILL.md"; \
   DestDir: "{%USERPROFILE}\.agents\skills\voice-core-voice-training"; Flags: ignoreversion
+Source: "{#SourceTree}\skills\voice-core-deploy\SKILL.md"; \
+  DestDir: "{%USERPROFILE}\.agents\skills\voice-core-deploy"; Flags: ignoreversion
 
 [InstallDelete]
 ; Shortcuts earlier versions created, deleted on every install.
@@ -238,6 +241,7 @@ Filename: "{app}\bin\voice-core.exe"; Parameters: "stop"; WorkingDir: "{app}"; \
 ; when nothing else is inside them.
 Type: dirifempty; Name: "{%USERPROFILE}\.agents\skills\voice-core-tts"
 Type: dirifempty; Name: "{%USERPROFILE}\.agents\skills\voice-core-voice-training"
+Type: dirifempty; Name: "{%USERPROFILE}\.agents\skills\voice-core-deploy"
 
 [Code]
 const

@@ -8,11 +8,11 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
-## [Unreleased]
+## [1.6.0] - 2026-09-11
 
-The panel's observability items from `ROADMAP.md`: the training console reads like a log
-instead of like DOM churn, an installed checkpoint says so, and config.json changes made
-outside the panel arrive as events instead of as staleness.
+The panel's observability items from `ROADMAP.md` (now resolved and retired), plus an
+agent-facing deployment story: three skills instead of two, and every skill starts from
+a deterministic install-root discovery instead of a placeholder path.
 
 ### Added
 
@@ -22,6 +22,24 @@ outside the panel arrive as events instead of as staleness.
   the events into one refresh of the voices and inventory stores per quiet 500 ms, so a
   registration burst costs one re-read, not one per write. Only config.json is watched:
   every registration fact the panel shows comes from its `voicePacks` array, and a pack's
+  own manifest is read fresh whenever the screen that shows it opens.
+- **A third skill, `voice-core-deploy`.** The installer ships a program and a promise;
+  the environment (engine tree, venv, 4.44 GiB of weights) still comes from
+  `scripts/bootstrap.ps1`, and nothing told an agent that. The new skill covers the
+  whole path: registry-driven install-root discovery, a doctor triage table that
+  separates "not provisioned" from "not running" from "broken", the seven bootstrap
+  stages with their reuse and resume semantics, and a one-utterance end-to-end check.
+- **Every skill now starts at section 0: find the install.** The TTS skill carried a
+  `<install-root>` placeholder and no way to resolve it, so a zero-context agent
+  guessed at drives (or worse, started `voice-core-runtime.exe` by hand with a
+  `--tts-python` copied from a doctor hint that points one directory above the real
+  venv interpreter). The startup protocol is now a registry lookup by the fixed AppId,
+  a `doctor` probe, exactly one entry point (`VoiceCore.exe` - the panel owns the
+  runtime and the presenter, and hand-starting either fights it), and a readiness
+  poll. The failure table names the traps that were measured on a real machine:
+  MSYS shells cannot exec a PE (wrap in `pwsh -NoProfile -Command`), and a bare
+  `$_` inside a `-Command` string is eaten by the outer shell (write a `.ps1`, run
+  `-File`).
   own manifest is read fresh whenever the screen that shows it opens.
 - **Checkpoint table marks installed packs.** `installed.txt` beside the scratch tree has
   been written by every install since 1.2.0 and read back by nothing; `checkpoints()` now

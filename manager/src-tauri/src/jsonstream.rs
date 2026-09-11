@@ -493,7 +493,9 @@ mod tests {
     /// `runtime.json`'s interpreter, the same one the training commands resolve.
     fn test_python(root: &std::path::Path) -> Option<PathBuf> {
         let raw = std::fs::read_to_string(root.join("data/runtime.json")).ok()?;
-        let file: Value = serde_json::from_str(&raw).ok()?;
+        // runtime.json is JSONC (the app itself seeds it with comments), so parse
+        // with the tolerance the real readers use, or a seeded comment breaks tests.
+        let file: Value = serde_json::from_str(&crate::config_edit::normalize(&raw)).ok()?;
         let path = PathBuf::from(file.get("ttsPython")?.as_str()?);
         path.is_file().then_some(path)
     }

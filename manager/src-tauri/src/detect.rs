@@ -169,7 +169,10 @@ fn read_runtime_file(host: &Host) -> RuntimeFile {
     let Ok(raw) = std::fs::read_to_string(&path) else {
         return RuntimeFile::default();
     };
-    match serde_json::from_str(&raw) {
+    // The same tolerance everywhere else reads these files with (`config_edit::normalize`):
+    // this app's own `settings_write` seeds runtime.json with a `//` note, so a strict parse
+    // here would warn about the app's own writing on every detect pass.
+    match serde_json::from_str(&config_edit::normalize(&raw)) {
         Ok(file) => file,
         Err(err) => {
             host.log(&format!("{} is not readable JSON: {err}", path.display()));
@@ -416,4 +419,34 @@ fn gib(bytes: u64) -> f64 {
 
 fn display(path: PathBuf) -> String {
     path.display().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The seed `runtime.json` this app's own `settings_write` writes carries a
+    /// `//` note, and so does every file the runtime tolerates. A strict parse
+    /// here would warn about our own writing on every detect pass.
+    #[test]
+    fn seeded_jsonc_runtime_json_reads_clean() {
+        let mut host = crate::host::Host::new();
+        let dir = std::env::temp_dir().join(format!("vc-detect-jsonc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("runtime.json"),
+            "// 运行时自己的文件。\n{\n  \"idleStopSecs\": 900,\n  \"ttsPython\": \"x/python.exe\",\n}\n",
+        )
+        .unwrap();
+        host.data_dir = dir.clone();
+
+        let file = read_runtime_file(&host);
+        assert_eq!(
+            file.tts_python.as_deref(),
+            Some(Path::new("x/python.exe")),
+            "the configured path must survive the comments"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

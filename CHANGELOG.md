@@ -8,6 +8,18 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.6.1] - 2026-09-12
+
+### Fixed
+
+- **The panel no longer warns about its own `runtime.json`.** `detect.rs` parsed it with
+  strict `serde_json`, while `settings_write` seeds the same file with a `//` note and the
+  runtime reads it as JSONC — so every detect pass logged "not readable JSON: key must be
+  a string" against a file the app itself had written, and sent the next debugger down a
+  false trail. It now reads through `config_edit::normalize` (BOM, comments, one dangling
+  comma), the same tolerance as everywhere else, with a regression test that feeds it the
+  exact seed text.
+
 ## [1.6.0] - 2026-09-11
 
 The panel's observability items from `ROADMAP.md` (now resolved and retired), plus an

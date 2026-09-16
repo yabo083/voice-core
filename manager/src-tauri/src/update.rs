@@ -659,21 +659,34 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         return Err("更新包文件已不在：data\\update\\ 下的文件被移动或删除了".to_string());
     }
 
-    // Stack down first. The installer's CloseApplications would close the
-    // runtime anyway; closing it here means the state change reaches the panel
-    // before anything starts disappearing under it.
+    // Stack down first, then this panel. The installer's AppMutex check runs
+    // before anything else and counts the panel itself: leave VoiceCore.exe
+    // alive and a suppressed message box answers Cancel for the user (measured:
+    // exit 1, 'Setup has detected that voice-core is currently running'). The
+    // runtime goes through the supervisor; the panel schedules its own exit —
+    // after this command returns, so the IPC response is delivered first.
     let _ = crate::supervise::stop_stack(app.clone()).await;
 
     let mut command = std::process::Command::new("cmd");
     command
         .arg("/C")
+        .arg("timeout")
+        .arg("/t")
+        .arg("2")
+        .arg("/nobreak")
+        .arg(">nul")
+        .arg("&")
+        .arg("taskkill")
+        .arg("/F")
+        .arg("/IM")
+        .arg("VoiceCore.exe")
+        .arg("&")
         .arg("start")
         .arg("")
         .arg(&staged)
         .arg("/VERYSILENT")
         .arg("/SUPPRESSMSGBOXES")
         .arg("/NORESTART")
-        .arg("/CLOSEAPPLICATIONS")
         .arg("/RESTARTAPPLICATIONS");
     hidden(&mut command);
     match command.spawn() {
@@ -699,9 +712,15 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
             let watcher_app = app.clone();
             let watcher_staged = staged.clone();
             tauri::async_runtime::spawn(async move {
+                // The panel taskkills itself ~2 s in, so this loop usually dies
+                // with the process — it only ever finishes when the panel
+                // outlived the installer, which means the installer bailed
+                // (SmartScreen, a refused elevation) and someone is still
+                // looking at a spinner. Restoring the staged file is for that
+                // survivor; a successful install simply never reaches it.
                 let pid = installer_pid;
                 let mut alive = true;
-                for _ in 0..240 {
+                for _ in 0..300 {
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                     alive = process_alive(pid);
                     if !alive {
@@ -709,10 +728,6 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
                     }
                 }
                 let app = watcher_app;
-                // A successful install closes this panel via AppMutex before the
-                // installer exits, and the restarted panel reads a fresh state —
-                // reaching this point with the panel alive means the install did
-                // not complete.
                 if !alive {
                     let host = app.state::<Host>();
                     host.log("update: installer exited without closing the panel; restoring the install button");

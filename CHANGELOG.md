@@ -8,6 +8,18 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.3] - 2026-09-17
+
+### Fixed
+
+- **The staged installer exited 1 on every run** (measured, `/LOG`): Inno's
+  AppMutex check counts the panel itself, and a suppressed message box answers
+  Cancel — `Setup has detected that voice-core is currently running`. The
+  updater now stops the runtime, then schedules its own panel's exit via a
+  2-second delayed `taskkill` before spawning the installer, so the mutex is
+  free when Setup checks it. `/RESTARTAPPLICATIONS` brings the (updated) panel
+  back.
+
 ## [1.9.2] - 2026-09-17
 
 ### Changed

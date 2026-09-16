@@ -117,6 +117,15 @@ pub fn logs_dir(data_dir: &Path) -> PathBuf {
     dir
 }
 
+/// `data/update`, created on demand: where a downloaded installer is staged
+/// until it is handed to Setup. Inside the data dir rather than beside it so a
+/// portable tree's updates travel with it, and so an uninstall that keeps `data\`
+/// (the installer's `uninsneveruninstall`) also keeps nothing half-downloaded
+/// from being cleaned up by the next attempt.
+pub fn update_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("update")
+}
+
 /// The backend service. `bin/` in a package, `target/<profile>/` in a checkout.
 pub fn runtime_exe(root: &Path) -> Option<PathBuf> {
     first_existing([

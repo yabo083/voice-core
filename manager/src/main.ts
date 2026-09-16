@@ -22,7 +22,7 @@
 import { el, fill } from "./dom";
 import { settleLanguageTransition, t } from "./i18n";
 import { brandMark, icon, type IconName } from "./icons";
-import { ipcMessage, onStackState, type Inventory } from "./ipc";
+import { ipcMessage, onStackState, updateCheck, type Inventory } from "./ipc";
 import {
   inventory,
   refreshInventory,
@@ -79,6 +79,9 @@ function mount(app: HTMLElement): void {
   const bar = el("div", { class: "cmdslot" });
 
   let active: ScreenId | null = null;
+  /** Set by the boot-time update check; cleared the first time 设置 is opened, because
+   *  a badge that survives its own visit is a badge that trains people to ignore it. */
+  let updateAvailable = false;
 
   /** True once the engine is installed, which is what retires the Deploy tab. */
   function provisioned(): boolean {
@@ -193,6 +196,10 @@ function mount(app: HTMLElement): void {
     const provisionedNow = provisioned();
     items.deploy.hidden = provisionedNow;
     badges.deploy.textContent = provisionedNow || inv === null ? "" : t.common.badgePendingDeploy;
+
+    // The update badge rides on 设置, the screen that owns the panel. Visiting it
+    // clears the flag — see the navigate listener — and clearing it re-renders here.
+    badges.settings.textContent = updateAvailable ? t.common.badgeUpdateAvailable : "";
   }
 
   fill(
@@ -233,8 +240,23 @@ function mount(app: HTMLElement): void {
   // subscriptions, not three renders fighting over one badge.
   voices.subscribe(renderRail);
 
+  // A newer release lights the 设置 badge until the user visits the screen — one quiet
+  // check per window life, not a poll: GitHub's API is shared and rate-limited, and a
+  // panel that hammers it is its own outage. An offline or rate-limited machine answers
+  // with silence, which is exactly the nudge a badge never sent.
+  void updateCheck()
+    .then((outcome) => {
+      updateAvailable = outcome.update_available;
+      renderRail();
+    })
+    .catch(() => undefined);
+
   document.addEventListener("app:navigate", (ev: Event) => {
     const { to, focus } = (ev as CustomEvent<{ to: ScreenId; focus: boolean }>).detail;
+    if (to === "settings" && updateAvailable) {
+      updateAvailable = false;
+      renderRail();
+    }
     if (NAV.some((item) => item.id === to)) show(to, focus);
   });
 

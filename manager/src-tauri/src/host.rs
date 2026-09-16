@@ -11,6 +11,7 @@ use crate::detect::Probe;
 use crate::jsonstream::StreamRun;
 use crate::layout;
 use crate::supervise::Stack;
+use crate::update;
 
 pub struct Host {
     pub root: PathBuf,
@@ -32,6 +33,10 @@ pub struct Host {
     /// for the process lifetime and dropped when a provision run ends — the only
     /// event that can put a different interpreter on disk.
     pub probe: Mutex<Option<Probe>>,
+    /// The self-update download: one slot, polled by the settings screen through
+    /// `update_status`. A download belongs to this process, not to the page that
+    /// started it, so it survives closing the screen it was started from.
+    pub update: update::UpdateDownload,
 }
 
 impl Host {
@@ -56,6 +61,7 @@ impl Host {
             provision: Mutex::new(StreamRun::default()),
             training: Mutex::new(StreamRun::default()),
             probe: Mutex::new(None),
+            update: update::UpdateDownload::default(),
         }
     }
 

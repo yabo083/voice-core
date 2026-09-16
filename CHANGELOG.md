@@ -8,6 +8,42 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.8.0] - 2026-09-16
+
+### Added
+
+- **The panel updates itself.** A 更新 panel on Settings checks GitHub Releases, compares
+  against this build's own version, and walks the release's installer from download to a
+  detached Setup run — the same Inno Setup chain a manual install-over follows, so an
+  update inherits CloseApplications, the never-deleted `data\` tree and the relaunch for
+  free. The download streams into a process-owned slot (one at a time, polled by the
+  panel, surviving navigation away from the screen that started it), is checked against
+  GitHub's per-asset SHA-256 digest when the API serves one, and lands in
+  `data\update\`; 安装 stops the backend, spawns the installer detached, and the
+  installer's [Run] entry brings the panel back. A newer release also lights a 可更新
+  badge on the 设置 rail item until it is visited.
+- **Four mirrors for the release endpoints, tried in order.** Direct GitHub first, then
+  three public prefix proxies (`ghproxy.net`, `gh-proxy.com`, `ghfast.top`) — one rule
+  covers both the API call and the asset download, because a prefix proxy wraps any
+  GitHub URL the same way. The check reports which mirror answered; a download walks the
+  list again with the check's winner first, since a mirror that answered seconds ago can
+  be dead now. The panel exposes a preferred-mirror dropdown (自动 by default, reset per
+  visit — yesterday's fastest mirror is not a fact about today). `VC_UPDATE_PROXY` feeds
+  reqwest's proxy support for users who run their own (`http(s)://`, `socks5://`), and
+  the system proxy is honoured when no explicit one is set, so an already-running Clash
+  counts without a word typed anywhere.
+
+### Changed
+
+- **The installer relaunches the app after a silent install.** `[Run]`'s `skipifsilent`
+  is gone: the updater's `/VERYSILENT` upgrade previously ended with nothing running,
+  which reads as the app having vanished. Interactive installs see the same checkbox as
+  before; only silent ones change behaviour.
+- **`VoiceCore.exe` now links TLS.** The updater is the first outbound-https caller in
+  this executable's history (everything else is loopback HTTP), so `reqwest` gains
+  `native-tls` — Windows' own certificate store — and the manifest gains `sha2` for the
+  digest check.
+
 ## [1.7.0] - 2026-09-12
 
 ### Added

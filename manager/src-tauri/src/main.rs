@@ -26,6 +26,7 @@ mod runtime_api;
 mod shell;
 mod supervise;
 mod training;
+mod update;
 mod usage;
 mod watch;
 
@@ -98,6 +99,11 @@ fn main() {
             training::training_log,
             training::install_trained_pack,
             training::training_discard,
+            update::update_check,
+            update::update_status,
+            update::update_download,
+            update::update_install,
+            update::open_url,
         ])
         .build(tauri::generate_context!());
 

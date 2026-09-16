@@ -19,6 +19,7 @@ export const commonZh = {
   railStopped: "服务已停止",
   badgeRunning: "运行中",
   badgePendingDeploy: "待部署",
+  badgeUpdateAvailable: "可更新",
 
   // --- shared widgets (ui.ts) ----------------------------------------------------------
   revealInExplorer: "在文件资源管理器中显示",
@@ -80,6 +81,7 @@ export const commonEn: typeof commonZh = {
   railStopped: "Service stopped",
   badgeRunning: "Running",
   badgePendingDeploy: "Not deployed",
+  badgeUpdateAvailable: "Update",
   revealInExplorer: "Show in File Explorer",
   copied: (what) => `${what} copied`,
   copy: (what) => `Copy ${what}`,

@@ -230,6 +230,84 @@ export const packManifestFile = (id: string): Promise<ConfigFile | null> =>
 export const packEffective = (id: string): Promise<EffectivePack | null> =>
   invoke("pack_effective", { id });
 
+// --- 更新: settings screen, one download at a time ---------------------------------------
+
+/** One downloadable file of the current GitHub release. The backend drops every
+ *  other asset at the parse boundary; only the `-setup.exe` installer survives. */
+export interface UpdateAsset {
+  name: string;
+  size: number;
+  url: string;
+  digest: string | null;
+}
+
+/** The release `releases/latest` answered with, trimmed to what the panel shows. */
+export interface ReleaseInfo {
+  tag: string;
+  version: string;
+  name: string;
+  notes: string;
+  url: string;
+  published_ms: number;
+  asset: ReleaseAsset | null;
+}
+
+/** Same shape as `ReleaseInfo.asset`; named apart because the download call takes
+ *  one of these back, so the type the panel read is the type the panel sends. */
+export type ReleaseAsset = {
+  name: string;
+  size: number;
+  url: string;
+  digest: string | null;
+};
+
+export interface CheckOutcome {
+  /** This build's own version, from the compiler — the comparison's baseline. */
+  current: string;
+  update_available: boolean;
+  release: ReleaseInfo;
+  /** The backend's mirror table: names for the dropdown, prefixes for the record. */
+  mirrors: [string, string][];
+  /** The mirror that answered the check, when one did. */
+  via: string | null;
+}
+
+/** Where the one download is. `active` covers everything between the first byte
+ *  and the end; `done`/`failed` are the terminal states the panel renders. */
+export interface DownloadProgress {
+  active: boolean;
+  downloaded: number;
+  total: number;
+  done: boolean;
+  failed: boolean;
+  error: string;
+}
+
+export interface UpdateState {
+  progress: DownloadProgress;
+  /** The verified installer on disk, awaiting 安装. */
+  staged: string | null;
+  /** Set once Setup has been spawned; 安装程序已启动 means this. */
+  launched: string | null;
+}
+
+/** Never rejects on "no update": `update_available` is the answer either way. A
+ *  rejection means every mirror failed or GitHub answered 404 — the sentence in
+ *  the error says which. */
+export const updateCheck = (): Promise<CheckOutcome> => invoke("update_check");
+
+export const updateStatus = (): Promise<UpdateState> => invoke("update_status");
+
+/** Spawns the transfer; resolves at once, progress arrives by polling. */
+export const updateDownload = (asset: ReleaseAsset, preferredMirror: string | null): Promise<void> =>
+  invoke("update_download", { asset, preferredMirror });
+
+/** Hands the staged installer to Setup and gets out of the way. */
+export const updateInstall = (): Promise<void> => invoke("update_install");
+
+/** Opens an https URL in the user's browser; the backend refuses anything else. */
+export const openUrl = (url: string): Promise<void> => invoke("open_url", { url });
+
 // --- 训练 screen: an agent runs the pipeline, the panel watches it --------------------
 //
 // Every shape below is read off the disk. `scripts/training/_layout.py` writes

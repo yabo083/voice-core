@@ -1,6 +1,6 @@
 [package]
 name = "voice-core-manager"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "VoiceCore desktop shell: the one launcher, owning the tray, the runtime and the subtitle presenter."
@@ -35,12 +35,17 @@ tauri-plugin-opener = "2"
 tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# No TLS. Every request this app makes is plain HTTP to 127.0.0.1:8760; linking
-# schannel or rustls for loopback traffic would be dead weight in the notices.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
-# `time` for the supervisor's poll interval, `sync` for one-shot dialog results.
-# tauri already builds tokio, so these two features add no new crate.
-tokio = { version = "1", features = ["time", "sync"] }
+# Was "no TLS" while every request went to 127.0.0.1:8760. The updater now
+# reaches api.github.com and the release mirrors over https; native-tls keeps
+# the chain on Windows' own certificate store rather than shipping a second CA
+# bundle in the notices. system-proxy is what makes an already-running Clash
+# count without a word typed anywhere.
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls"] }
+# The update installer's integrity check: GitHub publishes a per-asset SHA-256,
+# and a download whose hash does not match is refused, not warned about.
+sha2 = "0.10"
+# `fs` for the streamed write of the staged installer.
+tokio = { version = "1", features = ["time", "sync", "fs", "io-util"] }
 
 # Kernel-enforced process ownership, the same mechanism the runtime uses for its
 # engine worker: a job object with KILL_ON_JOB_CLOSE cannot leak a child and

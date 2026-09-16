@@ -32,7 +32,16 @@ import {
 } from "../form";
 import { currentLang, languages, setLang, t, type Lang } from "../i18n";
 import { icon } from "../icons";
-import { ipcMessage } from "../ipc";
+import {
+  ipcMessage,
+  updateCheck,
+  updateDownload,
+  updateInstall,
+  updateStatus,
+  openUrl,
+  type CheckOutcome,
+  type UpdateState,
+} from "../ipc";
 import { toast } from "../toast";
 import { button, chip, emptyState, note, panel, pathText } from "../ui";
 
@@ -106,6 +115,7 @@ const settingsRestore = (seq: number): Promise<Settings> => invoke("settings_res
 const DIALOG = t.settings.dialog;
 const HOTKEYS = t.settings.hotkeys;
 const SERVICE = t.settings.service;
+const UPDATE = t.settings.update;
 
 interface Field {
   group: string;
@@ -180,6 +190,22 @@ export function createSettingsScreen(): HTMLElement {
   const keys = panel({ title: HOTKEYS });
   const service = panel({ title: SERVICE });
   const language = panel({ title: t.settings.language });
+  const update = panel({
+    title: UPDATE,
+    hint: t.settings.updateMirrorHint,
+    actions: [
+      button({
+        label: t.settings.updatePage,
+        glyph: "arrow-square-out",
+        small: true,
+        kind: "quiet",
+        onClick: () => {
+          if (check) void openUrl(check.release.url).catch((err: unknown) => toast(ipcMessage(err), "fail"));
+          else void openUrl("https://github.com/yabo083/voice-core/releases").catch((err: unknown) => toast(ipcMessage(err), "fail"));
+        },
+      }),
+    ],
+  });
   const history = panel({
     title: t.settings.history,
     actions: [
@@ -445,6 +471,289 @@ export function createSettingsScreen(): HTMLElement {
     );
   }
 
+  // --- 更新 ---------------------------------------------------------------------------------
+  //
+  // The one panel here that is not a form over a config file: its state lives in the
+  // host process (the download slot), the network, and GitHub — which is why nothing in
+  // it goes through `settings_write` and its failure modes are sentences from
+  // `update.rs`, not from this screen.
+  //
+  // The download belongs to the process, so this panel polls `update_status` only while
+  // it is on screen (plus one settle check at mount): navigating away stops the ticker,
+  // and coming back re-reads the truth — a download started here and left behind keeps
+  // running, and the poll picks it up on return.
+
+  /** The last check's answer, null until one has run this visit. */
+  let check: CheckOutcome | null = null;
+  /** The last polled download state. */
+  let state: UpdateState | null = null;
+
+  /** MiB with one decimal, the unit a release page quotes. */
+  function mib(bytes: number): string {
+    return (bytes / (1024 * 1024)).toFixed(1);
+  }
+
+  /** A relative date for the row's tail: "三天前" ages better than a date a person
+   *  has to subtract by hand. `Intl.RelativeTimeFormat` exists in the webview. */
+  function published(ms: number): string {
+    if (ms === 0) return t.settings.updatePublishedNever;
+    const rtf = new Intl.RelativeTimeFormat(currentLang, { numeric: "auto" });
+    const minutes = Math.round((ms - Date.now()) / 60_000);
+    if (Math.abs(minutes) < 60) return rtf.format(minutes, "minute");
+    const hours = Math.round(minutes / 60);
+    if (Math.abs(hours) < 24) return rtf.format(hours, "hour");
+    return rtf.format(Math.round(hours / 24), "day");
+  }
+
+  function renderUpdate(): void {
+    if (check === null && state === null) {
+      fill(
+        update.body,
+        el(
+          "div",
+          { class: "update__idle" },
+          el("span", { class: "update__current", text: `${t.settings.updateCurrent}: —` }),
+          button({
+            label: t.settings.updateCheck,
+            glyph: "arrow-clockwise",
+            small: true,
+            onClick: () => void runCheck(),
+          }),
+        ),
+      );
+      return;
+    }
+
+    const rows: HTMLElement[] = [];
+    const currentLine = el("span", {
+      class: "update__current",
+      text: `${t.settings.updateCurrent}: ${check?.current ?? "…"}`,
+    });
+
+    if (check === null) {
+      rows.push(
+        el(
+          "div",
+          { class: "update__idle" },
+          currentLine,
+          button({
+            label: t.settings.updateChecking,
+            glyph: "circle-dashed",
+            small: true,
+            kind: "quiet",
+            disabled: true,
+            onClick: () => undefined,
+          }),
+        ),
+      );
+    } else {
+      const { release, update_available: available } = check;
+      rows.push(
+        el(
+          "div",
+          { class: "update__row" },
+          currentLine,
+          el(
+            "span",
+            { class: "update__latest" },
+            el("span", { text: `${t.settings.updateLatest}: ${release.version || release.tag}` }),
+            available
+              ? chip(t.settings.updateAvailable, "run", "download-simple")
+              : chip(t.settings.updateIsNewest, "ok", "check-circle"),
+          ),
+        ),
+        el("div", { class: "update__meta", text: `${release.name} · ${published(release.published_ms)}${check.via ? ` · ${t.settings.updateVia(check.via)}` : ""}` }),
+        el("div", { class: "update__actions" }, updateControls(release, available)),
+      );
+    }
+
+    // The download's own line, whatever the check said: a poll can land here with a
+    // download running from a previous visit's check.
+    if (state !== null && (state.progress.active || state.progress.done || state.progress.failed)) {
+      rows.push(downloadLine(state));
+    }
+
+    fill(update.body, ...rows);
+  }
+
+  /** The action row under the version line: what is possible right now, and only
+   *  that. Download while an update exists, install while one is staged, retry
+   *  after a failure — never two of these at once. */
+  function updateControls(release: CheckOutcome["release"], available: boolean): HTMLElement[] {
+    const mirror = select({
+      key: "set-update-mirror",
+      label: t.settings.updateMirror,
+      hint: t.settings.updateMirrorHint,
+      value: preferredMirror,
+      options: [
+        { value: "", label: t.settings.updateMirrorAuto },
+        ...(check?.mirrors ?? []).filter(([name]) => name !== "direct").map(([id, label]) => ({ value: id, label })),
+      ],
+      save: (value) => {
+        preferredMirror = value;
+        return Promise.resolve();
+      },
+    });
+
+    const controls: HTMLElement[] = [mirror];
+    if (state?.progress.failed === true) {
+      controls.push(
+        el("span", { class: "update__error", text: `${t.settings.updateReadyFailed}：${state.progress.error}` }),
+        button({
+          label: t.settings.updateRetry,
+          glyph: "arrow-clockwise",
+          small: true,
+          onClick: () => void beginDownload(release),
+        }),
+      );
+      return controls;
+    }
+    if (state?.progress.active === true) {
+      controls.push(
+        el("span", { class: "update__bartext", text: t.settings.updateDownloading }),
+      );
+      return controls;
+    }
+    if (state?.progress.done === true && state.staged !== null) {
+      controls.push(
+        el("span", { class: "update__staged", text: t.settings.updateStaged }),
+        button({
+          label: t.settings.updateInstall,
+          glyph: "download-simple",
+          kind: "primary",
+          onClick: () => {
+            // The point of no return gets one confirmation: the backend stops the
+            // runtime before spawning Setup, and a stray click is otherwise an
+            // outage the user did not ask for.
+            if (window.confirm(t.settings.updateConfirmInstall)) {
+              void updateInstall()
+                .then(() => {
+                  toast(t.settings.updateLaunched, "ok");
+                  void pollOnce();
+                })
+                .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
+            }
+          },
+        }),
+      );
+      return controls;
+    }
+    if (available && release.asset !== null) {
+      controls.push(
+        button({
+          label: `${t.settings.updateDownload} · ${t.settings.updateSizeUnit(mib(release.asset.size))}`,
+          glyph: "download-simple",
+          onClick: () => void beginDownload(release),
+        }),
+      );
+    } else if (release.asset === null) {
+      controls.push(
+        note("warn", t.settings.updateNoReleases),
+      );
+    }
+    return controls;
+  }
+
+  /** The progress line, shown while active and as the terminal state after. */
+  function downloadLine(current: UpdateState): HTMLElement {
+    const { progress } = current;
+    const pct = progress.total > 0 ? Math.round((progress.downloaded / progress.total) * 100) : null;
+    const bar = el("progress", { class: "bar", max: progress.total || 1 });
+    if (pct !== null) bar.value = progress.downloaded;
+    return el(
+      "div",
+      { class: "update__download" },
+      el("div", { class: "update__downloadhead" },
+        el("span", {
+          class: "update__bartext",
+          text: progress.active
+            ? t.settings.updateDownloadedOf(mib(progress.downloaded), progress.total > 0 ? t.settings.updateSizeUnit(mib(progress.total)) : "…")
+            : progress.done
+              ? t.settings.updateStaged
+              : `${t.settings.updateReadyFailed}：${progress.error}`,
+        }),
+        current.launched !== null
+          ? chip(t.settings.updateLaunched, "ok", "check-circle")
+          : null,
+      ),
+      bar,
+    );
+  }
+
+  /** The preferred mirror this visit. Session-scoped on purpose: a mirror that was
+   *  best yesterday may be dead today, and "自动" is the honest default every visit. */
+  let preferredMirror: string | null = null;
+
+  async function runCheck(): Promise<void> {
+    check = null;
+    renderUpdate();
+    try {
+      check = await updateCheck();
+    } catch (err: unknown) {
+      toast(ipcMessage(err), "fail");
+      renderUpdate();
+      return;
+    }
+    renderUpdate();
+    if (check.update_available) {
+      // One poll to learn whether a download is already mid-flight (it is not — the
+      // check just answered) and to render the action row.
+      await pollOnce();
+    }
+  }
+
+  async function beginDownload(release: CheckOutcome["release"]): Promise<void> {
+    if (release.asset === null) return;
+    try {
+      await updateDownload(release.asset, preferredMirror);
+    } catch (err: unknown) {
+      toast(ipcMessage(err), "fail");
+      return;
+    }
+    startTicker();
+    await pollOnce();
+  }
+
+  async function pollOnce(): Promise<void> {
+    try {
+      state = await updateStatus();
+    } catch {
+      return; // a poll that raced a shutdown is not a user-facing failure
+    }
+    if (state.progress.active === false) stopTicker();
+    renderUpdate();
+  }
+
+  /** The 250 ms poll, alive only while a download is. `startTicker` clears any
+   *  previous interval first, so a check → download → finish → download cycle can
+   *  never stack two of them. */
+  let ticker = 0;
+  function startTicker(): void {
+    stopTicker();
+    ticker = window.setInterval(() => void pollOnce(), 250);
+  }
+  function stopTicker(): void {
+    if (ticker !== 0) window.clearInterval(ticker);
+    ticker = 0;
+  }
+
+  /** Check on entry, quietly, once per panel-open — the same nudge the rail badge
+   *  uses, and never more often: the Releases API is a shared, rate-limited thing. */
+  async function checkOnEntry(): Promise<void> {
+    try {
+      check = await updateCheck();
+      state = await updateStatus();
+      if (state.progress.active) startTicker();
+    } catch {
+      // Silence is the point: an offline machine must not open Settings onto a
+      // failure toast. The panel renders the idle row with a manual 检查更新,
+      // which is the same information one click later.
+      check = null;
+      state = null;
+    }
+    renderUpdate();
+  }
+
   function renderHistory(): void {
     if (changes === null) {
       fill(history.body, skeleton(2));
@@ -582,6 +891,7 @@ export function createSettingsScreen(): HTMLElement {
   renderService();
   renderLanguage();
   renderHistory();
+  renderUpdate();
   void loadSettings();
   void loadHistory();
 
@@ -593,6 +903,9 @@ export function createSettingsScreen(): HTMLElement {
     if (to !== "settings") return;
     void loadSettings();
     void loadHistory();
+    // One quiet check per entry, never per minute: GitHub's API is rate-limited and
+    // shared, and a panel that polls it in the background is a rate-limit victim.
+    void checkOnEntry();
   });
 
   return el(
@@ -611,6 +924,7 @@ export function createSettingsScreen(): HTMLElement {
     dialog.root,
     keys.root,
     service.root,
+    update.root,
     history.root,
   );
 }

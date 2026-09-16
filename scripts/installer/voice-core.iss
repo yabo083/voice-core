@@ -224,9 +224,14 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 ; screen is where provisioning lives now, and unlike bootstrap.ps1 launched blind it can find an
 ; engine, a virtualenv or a model cache that is already on this machine and reuse it instead of
 ; downloading ~4.8 GB again. Checked by default: a fresh install is unusable until it has run.
+;
+; No skipifsilent: the panel's updater launches Setup with /VERYSILENT, and "the panel I pressed
+; 安装 in came back afterwards" is the whole contract of that flow — a silent upgrade that ends
+; with nothing running reads as the app having vanished. Interactive installs see the checkbox
+; exactly as before; only silent ones change behaviour.
 Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; \
   Description: "{cm:LaunchAppDescription}"; \
-  Flags: postinstall nowait skipifsilent; Check: GuiPresent
+  Flags: postinstall nowait; Check: GuiPresent
 
 [UninstallRun]
 ; Ask the running voice-core runtime service to stop gracefully before deleting binaries.

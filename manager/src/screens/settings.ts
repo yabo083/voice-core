@@ -614,25 +614,31 @@ export function createSettingsScreen(): HTMLElement {
         container.appendChild(spinner());
         container.appendChild(el("span", { class: "update__spinlabel", text: t.settings.updateRestarting }));
       } else {
-        container.appendChild(
-          button({
-            label: t.settings.updateInstall,
-            glyph: "download-simple",
-            kind: "primary",
-            onClick: () => {
-              // The point of no return gets one confirmation: the backend stops
-              // the runtime before spawning Setup, and a stray click is otherwise
-              // an outage the user did not ask for.
-              if (window.confirm(t.settings.updateConfirmInstall)) {
+        // The point of no return gets one confirmation, as a two-step button —
+        // the same pattern the train screen's delete-confirm uses. `window.confirm`
+        // maps to the dialog plugin's command, which this app grants to nobody, so
+        // a native confirm here dies with `not allowed by ACL`.
+        const install = button({
+          label: t.settings.updateInstall,
+          glyph: "download-simple",
+          kind: "primary",
+          onClick: () => {
+            const confirmed = button({
+              label: t.settings.updateConfirmInstallShort,
+              glyph: "warning",
+              kind: "danger",
+              onClick: () => {
                 void updateInstall()
                   .then(() => {
                     void pollOnce();
                   })
                   .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
-              }
-            },
-          }),
-        );
+              },
+            });
+            install.replaceWith(confirmed);
+          },
+        });
+        container.appendChild(install);
       }
       return container;
     }
@@ -691,8 +697,10 @@ export function createSettingsScreen(): HTMLElement {
     checkInFlight = false;
     renderUpdate();
     if (check.update_available) {
-      // One poll to learn whether a download is already mid-flight (it is not — the
-      // check just answered) and to render the action row.
+      // One poll to learn whether a download is already staged or mid-flight —
+      // the check answers fresh, but the download slot remembers. Without this,
+      // a check after staging collapsed the row back to 下载更新 and a second
+      // click downloaded the whole thing again.
       await pollOnce();
     }
   }
@@ -700,6 +708,15 @@ export function createSettingsScreen(): HTMLElement {
   async function beginDownload(): Promise<void> {
     const asset = check?.release.asset;
     if (asset === null || asset === undefined) return;
+    // Already staged: a second download of a verified installer is waste. The
+    // row that offers 下载 should not exist in this state, but a click racing a
+    // poll lands here — route it to what the user actually wanted.
+    const staged = state?.progress.done === true ? state.staged : null;
+    if (staged !== null) {
+      toast(t.settings.updateStaged, "info");
+      renderUpdate();
+      return;
+    }
     try {
       await updateDownload(asset);
     } catch (err: unknown) {

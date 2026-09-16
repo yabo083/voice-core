@@ -654,15 +654,16 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
+  /* Hover changes the fill only. Animating border-color on a 1px hairline is
+     what made the frame flicker on hover: the transition repaints the border
+     arc and WebView2 drops a frame between the two colors. */
   transition:
     background var(--dur-2) var(--ease),
-    border-color var(--dur-2) var(--ease),
     transform var(--dur-1) var(--ease);
 }
 
 .btn:hover:not(:disabled) {
   background: var(--bg-active);
-  border-color: var(--ink-faint);
 }
 
 .btn:active:not(:disabled) {

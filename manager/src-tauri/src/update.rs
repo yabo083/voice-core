@@ -556,9 +556,12 @@ async fn try_candidate(
     url: &str,
     name: &str,
 ) -> Result<u64, String> {
+    // No total-transfer timeout here: `timeout()` on the request would budget
+    // the whole body, and a 45 MB asset on a slow-but-alive link is healthy.
+    // The connect timeout bounds the handshake; the per-read idle timeout at
+    // the loop below bounds a stalled connection.
     let response = client
         .get(url)
-        .timeout(PER_MIRROR_TIMEOUT)
         .send()
         .await
         .map_err(|err| format!("{name}: {err}"))?;
@@ -566,9 +569,13 @@ async fn try_candidate(
         return Err(format!("{name}: HTTP {}", response.status().as_u16()));
     }
 
-    let mut file = tokio::fs::File::create(staged_path)
+    // A 1 MiB buffered writer: reqwest hands the stream over in small chunks,
+    // and an unbuffered write per chunk makes every 64 KiB a syscall — the
+    // difference between saturating a gigabit link and crawling at a tenth of it.
+    let raw = tokio::fs::File::create(staged_path)
         .await
         .map_err(|err| format!("无法写入 {}：{err}", staged_path.display()))?;
+    let mut file = tokio::io::BufWriter::with_capacity(1024 * 1024, raw);
     let mut hasher = Sha256::new();
     let mut downloaded: u64 = 0;
     let mut last_tick = now_ms();
@@ -594,6 +601,9 @@ async fn try_candidate(
             host.update.set(|state| state.progress.downloaded = downloaded);
         }
     }
+    tokio::io::AsyncWriteExt::flush(&mut file)
+        .await
+        .map_err(|err| format!("写入失败：{err}"))?;
 
     // A mirror that truncates at 90% but answers 200 must not stage a partial
     // installer: the API said how big the file is.
@@ -667,20 +677,83 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         .arg("/RESTARTAPPLICATIONS");
     hidden(&mut command);
     match command.spawn() {
-        // Deliberately not waited on: the installer is Windows's problem now,
-        // and `std::mem::forget` is what keeps the Child destructor from
-        // concluding the parent should reap it.
+        // Not forgotten this time — the PID is the liveness probe below.
         Ok(child) => {
-            std::mem::forget(child);
-            host.log(&format!("update: installer launched from {staged}"));
+            let installer_pid = child.id();
+            host.log(&format!(
+                "update: installer launched from {staged} (pid {installer_pid})"
+            ));
             host.update.set(|state| {
                 state.launched = Some(staged.clone());
                 state.progress = DownloadProgress::default();
-                state.staged = None;
+                state.staged = Some(staged.clone());
+            });
+
+            // The spinner is a promise the installer may not keep: SmartScreen
+            // refusal, a cancelled UAC, a corrupt download — all leave this
+            // panel spinning forever. Watch the installer: while it lives, an
+            // install is in progress; the moment it exits AND this panel is
+            // still the same process (a successful install restarted us under
+            // a newer version), the run failed — hand the staged file back to
+            // the row as a retryable install instead of an eternal spinner.
+            let watcher_app = app.clone();
+            let watcher_staged = staged.clone();
+            tauri::async_runtime::spawn(async move {
+                let pid = installer_pid;
+                let mut alive = true;
+                for _ in 0..240 {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    alive = process_alive(pid);
+                    if !alive {
+                        break;
+                    }
+                }
+                let app = watcher_app;
+                // A successful install closes this panel via AppMutex before the
+                // installer exits, and the restarted panel reads a fresh state —
+                // reaching this point with the panel alive means the install did
+                // not complete.
+                if !alive {
+                    let host = app.state::<Host>();
+                    host.log("update: installer exited without closing the panel; restoring the install button");
+                    host.update.set(|state| {
+                        state.launched = None;
+                        state.staged = Some(watcher_staged.clone());
+                        state.progress.done = true;
+                    });
+                }
             });
             Ok(())
         }
         Err(err) => Err(format!("无法启动安装程序：{err}")),
+    }
+}
+
+/// Is this PID still running? An OpenProcess probe, not a handle hold — the
+/// caller deliberately does not keep the Child, and a leaked handle would keep
+/// the process alive as far as the OS cares.
+fn process_alive(pid: u32) -> bool {
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, GetExitCodeProcess,
+        };
+        unsafe {
+            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if handle.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(handle, &mut code);
+            CloseHandle(handle);
+            ok != 0 && code == STILL_ACTIVE as u32
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = pid;
+        false
     }
 }
 

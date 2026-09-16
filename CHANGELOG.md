@@ -8,6 +8,29 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.1] - 2026-09-17
+
+### Fixed
+
+- **The install button worked on no machine**: `window.confirm` maps to the dialog
+  plugin's command, which this app grants to nobody, so pressing 安装并重启 died with
+  `plugin:dialog|confirm not allowed by ACL`. Replaced with the train screen's
+  two-step button — first press turns it into a red 确认安装, second press runs.
+- **Hover flicker on every button**: the hover transition animated `border-color`
+  on a 1px hairline, and WebView2 dropped a frame between the two colors. Hover
+  now animates the fill only; the frame is constant.
+- **Downloads crawled on a fast link**: one unbuffered write per ~64 KiB chunk made
+  each chunk a syscall, and the request's `timeout()` silently budgeted the whole
+  body. A 1 MiB `BufWriter` groups the writes and the total-transfer timeout is
+  gone (the per-read idle timeout still cuts a stalled connection).
+- **A staged installer could be downloaded twice**: a check after staging collapsed
+  the row back to 下载更新. The check now refreshes the download slot's state, and
+  a click that races a poll routes to the staged installer instead.
+- **安装后永远正在重启**: the launched spinner was a promise the installer might
+  not keep (SmartScreen refusal, cancelled UAC). The backend now watches the
+  installer process; if it exits while this panel is still alive, the staged file
+  is handed back to the row as a retryable install.
+
 ## [1.9.0] - 2026-09-17
 
 ### Changed

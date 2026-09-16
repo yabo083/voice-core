@@ -8,6 +8,26 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.7] - 2026-09-17
+
+### Fixed
+
+- **Every update ended in an avoidable 重新部署** (measured on this machine):
+  the interpreter search in both the panel and bootstrap ranked the engine
+  checkout's `.venv` — upstream's own `uv sync` layout — above the packaged
+  `runtime\python`, and the package had been shipping that `.venv` inside the
+  engine source: torch-less, with a `pyvenv.cfg` pointing at an interpreter on
+  the packaging machine. Every detect therefore probed the wreck first, called
+  a healthy install 需重建, and sent an already-deployed user back through the
+  deploy screen after every update. Three changes: packaging now strips
+  environments from the engine tree (`Copy-SourceTree`: `.venv`, `venv`, `env`,
+  `.tox`, `site-packages`, `pyvenv.cfg`; `.git` still travels); the panel's
+  candidate order now matches what `voice-core-runtime` itself resolves —
+  configured, then the packaged venv, then the packaged embeddable, and only
+  then the engine-tree environments; bootstrap's inventory follows the same
+  order. The runtime never starts an engine-tree interpreter on a packaged
+  install, so neither does the verdict that decides what the panel believes.
+
 ## [1.9.6] - 2026-09-17
 
 ### Fixed

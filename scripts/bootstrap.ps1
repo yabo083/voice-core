@@ -550,14 +550,22 @@ function Resolve-Inventory {
   $inv.CodecOk = Test-CodecTree $inv.EngineRoot
 
   # --- interpreter
+  # Same order the panel and the runtime resolve by: the configured one, then the
+  # interpreter shipped in the tree — the only two the runtime itself will ever
+  # start — and only then an environment found inside the engine tree. A checkout
+  # can carry a .venv from wherever it was cloned (upstream's `uv sync` layout);
+  # that environment answers to the engine's development, not to this install, and
+  # a package built from it once shipped a torch-less .venv that made every detect
+  # after an update call a healthy install 需重建. An engine-tree interpreter is a
+  # report on a dev checkout, never this install's verdict.
   $pys = New-Object System.Collections.ArrayList
   if ($rt -and $rt.ttsPython) {
     [void]$pys.Add(@{ Path = (Resolve-Against $rt.ttsPython $script:Root); Why = 'ttsPython in data/runtime.json' })
   }
-  [void]$pys.Add(@{ Path = (Join-Path $inv.EngineRoot 'env\Scripts\python.exe'); Why = "the engine tree's env\" })
-  [void]$pys.Add(@{ Path = (Join-Path $inv.EngineRoot 'webui\Irodori-TTS\.venv\Scripts\python.exe'); Why = "uv sync's .venv" })
   [void]$pys.Add(@{ Path = (Join-Path $script:Root 'runtime\python\Scripts\python.exe'); Why = 'the packaged virtualenv' })
   [void]$pys.Add(@{ Path = (Join-Path $script:Root 'runtime\python\python.exe'); Why = 'the packaged embeddable interpreter' })
+  [void]$pys.Add(@{ Path = (Join-Path $inv.EngineRoot 'env\Scripts\python.exe'); Why = "the engine tree's env\" })
+  [void]$pys.Add(@{ Path = (Join-Path $inv.EngineRoot 'webui\Irodori-TTS\.venv\Scripts\python.exe'); Why = "uv sync's .venv" })
   foreach ($c in $pys) {
     if (-not (Test-Path -LiteralPath $c.Path)) { continue }
     $state = Test-EnginePython $c.Path

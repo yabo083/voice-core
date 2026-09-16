@@ -141,6 +141,24 @@ function Copy-Tree($from, $to) {
   $global:LASTEXITCODE = 0
 }
 
+# Copy a source tree WITHOUT any Python environment that happens to live inside it.
+#
+# A checkout used as -EngineRoot often carries its own interpreter: `.venv` from
+# upstream's `uv sync`, `env\` from the engine's setup script. Shipping one inside
+# the package is worse than dead weight — a venv's pyvenv.cfg records its base
+# interpreter as an absolute path on the PACKAGING machine, and an installed copy
+# of it probes as broken. The panel's interpreter search then finds this wreck
+# before the healthy runtime\python the package also ships, and reports an install
+# that can speak as needing a rebuild — measured, on the machine the 1.9.7 fix
+# came from. Environments are never portable; they are always rebuilt in place.
+function Copy-SourceTree($from, $to) {
+  New-Item -ItemType Directory -Force -Path $to | Out-Null
+  $null = robocopy $from $to /E /NFL /NDL /NJH /NJS /NP /R:1 /W:1 `
+    /XD .venv venv env .tox site-packages __pycache__ /XF pyvenv.cfg
+  if ($LASTEXITCODE -ge 8) { throw "robocopy failed ($LASTEXITCODE): $from -> $to" }
+  $global:LASTEXITCODE = 0
+}
+
 function Measure-Tree($path) {
   if (-not (Test-Path $path)) { return 0 }
   $sum = (Get-ChildItem -Recurse -File -Force $path | Measure-Object -Sum Length).Sum
@@ -449,7 +467,9 @@ if ($IncludeEngine) {
   # depend on any of this - upstream's LICENSE and our FORK.md are plain files in the tree, so
   # a package with .git stripped would still be compliant. It would just be less recoverable.
   Step "engine source ($(Format-Size (Measure-Tree (Join-Path $EngineRoot 'webui'))))"
-  Copy-Tree (Join-Path $EngineRoot 'webui') (Join-Path $outRoot 'runtime\engine\webui')
+  # Copy-SourceTree, not Copy-Tree: a dev checkout's own .venv (uv sync's layout)
+  # must not travel — see the function's comment. .git still does, on purpose.
+  Copy-SourceTree (Join-Path $EngineRoot 'webui') (Join-Path $outRoot 'runtime\engine\webui')
 }
 
 if ($IncludeModels) {

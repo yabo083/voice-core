@@ -212,19 +212,33 @@ fn resolve_engine_root(host: &Host, runtime_file: &RuntimeFile) -> Option<PathBu
     None
 }
 
-/// Interpreter candidates, in the order the reference machine makes true: the
-/// configured one first, then `env/` beside the engine (what the engine's own
-/// `setup_env.ps1` creates), then a venv inside the engine repo, then a portable
-/// interpreter shipped in the tree.
+/// Interpreter candidates, in the order the runtime itself resolves them
+/// (`src/bin/voice-core-runtime.rs`): the configured one first, then the
+/// interpreter shipped in the tree — the only two the runtime will ever start.
+///
+/// The engine-tree candidates (`env/`, the engine repo's `.venv`) come last and
+/// are a report on a dev checkout or a reused tree, never a verdict this app
+/// should rest on: an engine source can carry a `.venv` from wherever it was
+/// cloned — upstream's own `uv sync` layout — and that environment answers to
+/// the engine's development, not to this install. Measured on the reference
+/// install, that `.venv` shipped inside the package as a torch-less interpreter
+/// pointing at the packager's machine, and probing it first made every detect
+/// after an update report a healthy environment as 需重建.
+///
+/// First existing candidate wins; a probe failure is *not* walked past. That is
+/// not stubbornness but honesty about what would run: the runtime resolves
+/// exactly one interpreter and starts it, so reporting a fallback the runtime
+/// would not touch would paint a panel green over a synthesis that is about to
+/// fail on worker start.
 fn resolve_python(runtime_file: &RuntimeFile, root: &Path, engine_dir: &Path) -> Option<PathBuf> {
     let mut candidates = Vec::new();
     if let Some(configured) = runtime_file.tts_python.as_deref() {
         candidates.push(layout::absolute(root, configured));
     }
-    candidates.push(engine_dir.join("env/Scripts/python.exe"));
-    candidates.push(engine_dir.join("webui/Irodori-TTS/.venv/Scripts/python.exe"));
     candidates.push(root.join("runtime/python/Scripts/python.exe"));
     candidates.push(root.join("runtime/python/python.exe"));
+    candidates.push(engine_dir.join("env/Scripts/python.exe"));
+    candidates.push(engine_dir.join("webui/Irodori-TTS/.venv/Scripts/python.exe"));
     candidates.into_iter().find(|path| path.is_file())
 }
 
@@ -453,6 +467,56 @@ mod tests {
             Some(Path::new("x/python.exe")),
             "the configured path must survive the comments"
         );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The order the runtime itself resolves by: the interpreter shipped in the
+    /// tree beats anything found inside the engine tree. An engine checkout's
+    /// `.venv` (upstream's `uv sync` layout) answers to the engine's development;
+    /// the measured failure was one shipped in a package, torch-less and pointing
+    /// at the packager's machine, outranking the healthy packaged venv and turning
+    /// every post-update detect into 需重建.
+    #[test]
+    fn packaged_venv_outranks_engine_checkout_venv() {
+        let dir = std::env::temp_dir().join(format!("vc-detect-pyorder-{}", std::process::id()));
+        let root = dir.join("root");
+        let engine = dir.join("engine");
+        for path in [
+            root.join("runtime/python/Scripts/python.exe"),
+            engine.join("webui/Irodori-TTS/.venv/Scripts/python.exe"),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"").unwrap();
+        }
+
+        let picked = resolve_python(&RuntimeFile::default(), &root, &engine)
+            .expect("an existing candidate must be picked");
+        assert_eq!(
+            picked,
+            root.join("runtime/python/Scripts/python.exe"),
+            "the packaged virtualenv is what the runtime would start, so it is what detect reports"
+        );
+
+        // No packaged venv: the engine-tree environment is still found — a reused
+        // engine tree with its own working env\ is a legitimate answer.
+        let picked = resolve_python(&RuntimeFile::default(), &dir.join("no-such-root"), &engine)
+            .expect("the engine checkout's interpreter is the last resort");
+        assert_eq!(
+            picked,
+            engine.join("webui/Irodori-TTS/.venv/Scripts/python.exe")
+        );
+
+        // The configured path, when it exists, still wins over everything: it is
+        // what the runtime starts first, too.
+        let configured = dir.join("elsewhere/python.exe");
+        std::fs::create_dir_all(configured.parent().unwrap()).unwrap();
+        std::fs::write(&configured, b"").unwrap();
+        let file = RuntimeFile {
+            tts_python: Some(configured.clone()),
+            ..RuntimeFile::default()
+        };
+        assert_eq!(resolve_python(&file, &root, &engine), Some(configured));
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -262,8 +262,11 @@ function mount(app: HTMLElement): void {
 
   // Where the window opens is a statement about what is left to do: an unprovisioned
   // tree opens on Deploy, a provisioned one without voices opens on Voices, and a
-  // finished install opens on Status.
+  // finished install opens on Status. The update-preview URL skips the statement:
+  // it exists to put 更新 on screen in a plain browser, nothing else.
+  const previewUpdate = new URLSearchParams(window.location.search).get("vcPreview") === "update";
   function landing(inv: Inventory | null): ScreenId {
+    if (previewUpdate) return "settings";
     if (inv === null || inv.engine_python === null || !inv.python_ok) return "deploy";
     return inv.packs.length === 0 ? "voices" : "status";
   }

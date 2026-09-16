@@ -19,7 +19,7 @@
 
 import { invoke } from "@tauri-apps/api/core";
 
-import { el, fill } from "../dom";
+import { el, fill, type Child } from "../dom";
 import {
   colour,
   cssColour,
@@ -492,21 +492,9 @@ export function createSettingsScreen(): HTMLElement {
     return (bytes / (1024 * 1024)).toFixed(1);
   }
 
-  /** A relative date for the row's tail: "三天前" ages better than a date a person
-   *  has to subtract by hand. `Intl.RelativeTimeFormat` exists in the webview. */
-  function published(ms: number): string {
-    if (ms === 0) return t.settings.updatePublishedNever;
-    const rtf = new Intl.RelativeTimeFormat(currentLang, { numeric: "auto" });
-    const minutes = Math.round((ms - Date.now()) / 60_000);
-    if (Math.abs(minutes) < 60) return rtf.format(minutes, "minute");
-    const hours = Math.round(minutes / 60);
-    if (Math.abs(hours) < 24) return rtf.format(hours, "hour");
-    return rtf.format(Math.round(hours / 24), "day");
-  }
-
-  /** The compact mirror picker: a bare control, its label spoken by the shared
-   *  tooltip (hover and keyboard focus). Lives on the version row, not in a form
-   *  of its own — one fact, one control. */
+  /** The compact channel picker: a bare control, its label spoken by the shared
+   *  tooltip (hover and keyboard focus). Lives on its fact row, not in a form of
+   *  its own — one fact, one control. */
   function mirrorPicker(): HTMLElement {
     const control = el(
       "select",
@@ -522,153 +510,161 @@ export function createSettingsScreen(): HTMLElement {
     return withTip(control, t.settings.updateMirrorHint);
   }
 
+  /** One fact as the draft draws it: the label at the left edge, the value at the
+   *  right. The panel is a list of these; nothing else. */
+  function factRow(label: string, value: Child, ...rest: Child[]): HTMLElement {
+    return el("div", { class: "update__fact" }, el("span", { text: label }), el("span", { class: "update__value" }, value), rest);
+  }
+
+  /** One render per state, and every state renders the whole truth: what this
+   *  build is, what the release is, the channel, and the single action the state
+   *  allows. A download interrupted at any point re-derives its row from
+   *  `update_status` on the next poll or panel entry, so recovery from any
+   *  interruption is the same code path as arriving fresh. */
   function renderUpdate(): void {
+    // Nothing has been checked this visit: the version line and the check affordance.
     if (check === null && state === null) {
       fill(
         update.body,
-        el(
-          "div",
-          { class: "update__idle" },
-          el("span", { class: "update__current", text: `${t.settings.updateCurrent}: —` }),
-          button({
-            label: t.settings.updateCheck,
-            glyph: "arrow-clockwise",
-            small: true,
-            onClick: () => void runCheck(),
-          }),
+        factRow(
+          t.settings.updateCurrent,
+          "—",
+          el("span", { class: "update__actions" },
+            button({
+              label: t.settings.updateCheck,
+              glyph: "arrow-clockwise",
+              small: true,
+              onClick: () => void runCheck(),
+            }),
+          ),
         ),
       );
       return;
     }
 
-    const rows: HTMLElement[] = [];
-    const currentLine = el("span", {
-      class: "update__current",
-      text: `${t.settings.updateCurrent}: ${check?.current ?? "…"}`,
-    });
-
     if (check === null) {
-      rows.push(
-        el(
-          "div",
-          { class: "update__idle" },
-          currentLine,
+      fill(
+        update.body,
+        factRow(
+          t.settings.updateCurrent,
+          "…",
+          el("span", { class: "update__actions" },
+            button({
+              label: t.settings.updateChecking,
+              glyph: "circle-dashed",
+              small: true,
+              kind: "quiet",
+              disabled: true,
+              onClick: () => undefined,
+            }),
+          ),
+        ),
+      );
+      return;
+    }
+
+    const { release, update_available: available } = check;
+    const rows: HTMLElement[] = [factRow(t.settings.updateCurrent, check.current)];
+
+    if (!available) {
+      // Up to date: the version line carries the word, no second row, no chip.
+      rows[0].appendChild(
+        el("span", { class: "update__actions" }, chip(t.settings.updateIsNewest, "ok", "check-circle")),
+      );
+      fill(update.body, ...rows);
+      return;
+    }
+
+    rows.push(factRow(t.settings.updateAvailable, release.version));
+
+    const actionRow = factRow(t.settings.updateMirror, mirrorPicker());
+    if (state?.progress.active === true) {
+      // Downloading owns the row: progress bar where the channel was, percent as
+      // the value. No buttons — the only way out is finish or fail.
+      actionRow.replaceChild(
+        downloadBar(state),
+        actionRow.querySelector(".update__value") ?? actionRow.firstChild!,
+      );
+      fill(update.body, ...rows, actionRow);
+      return;
+    }
+    if (state?.progress.done === true && state.staged !== null) {
+      // Verified on disk. `launched` set means the installer is already out and
+      // this panel is about to be closed by it — the row says so instead of
+      // offering a second install; anything else offers 安装, on the right.
+      if (state.launched !== null) {
+        actionRow.appendChild(
+          el("span", { class: "update__actions" }, chip(t.settings.updateLaunched, "ok", "check-circle")),
+        );
+      } else {
+        actionRow.appendChild(
+          el("span", { class: "update__actions" },
+            button({
+              label: t.settings.updateInstall,
+              glyph: "download-simple",
+              kind: "primary",
+              onClick: () => {
+                // The point of no return gets one confirmation: the backend stops
+                // the runtime before spawning Setup, and a stray click is otherwise
+                // an outage the user did not ask for.
+                if (window.confirm(t.settings.updateConfirmInstall)) {
+                  void updateInstall()
+                    .then(() => {
+                      toast(t.settings.updateLaunched, "ok");
+                      void pollOnce();
+                    })
+                    .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
+                }
+              },
+            }),
+          ),
+        );
+      }
+      fill(update.body, ...rows, actionRow);
+      return;
+    }
+    if (state?.progress.failed === true) {
+      actionRow.appendChild(
+        el("span", { class: "update__actions" },
+          el("span", { class: "update__error", text: state.progress.error }),
           button({
-            label: t.settings.updateChecking,
-            glyph: "circle-dashed",
+            label: t.settings.updateRetry,
+            glyph: "arrow-clockwise",
             small: true,
-            kind: "quiet",
-            disabled: true,
-            onClick: () => undefined,
+            onClick: () => void beginDownload(release),
           }),
         ),
       );
-    } else {
-      const { release, update_available: available } = check;
-      const facts = el(
-        "div",
-        { class: "update__facts" },
-        el("span", { class: "update__date", text: published(release.published_ms) }),
-        mirrorPicker(),
-      );
-      rows.push(
-        el(
-          "div",
-          { class: "update__row" },
-          currentLine,
-          available
-            ? chip(t.settings.updateAvailable, "run", "download-simple")
-            : chip(t.settings.updateIsNewest, "ok", "check-circle"),
-        ),
-        facts,
-        el("div", { class: "update__actions" }, updateControls(release, available)),
-      );
+      fill(update.body, ...rows, actionRow);
+      return;
     }
-
-    // The download's own line, whatever the check said: a poll can land here with a
-    // download running from a previous visit's check.
-    if (state !== null && (state.progress.active || state.progress.done || state.progress.failed)) {
-      rows.push(downloadLine(state));
-    }
-
-    fill(update.body, ...rows);
-  }
-
-  /** The action row: what is possible right now, and only that. Download while an
-   *  update exists, install while one is staged, retry after a failure — never two
-   *  of these at once. */
-  function updateControls(release: CheckOutcome["release"], available: boolean): HTMLElement[] {
-    const controls: HTMLElement[] = [];
-    if (state?.progress.failed === true) {
-      controls.push(
-        el("span", { class: "update__error", text: state.progress.error }),
+    // A check has answered, a download is available, nothing is in flight.
+    actionRow.appendChild(
+      el("span", { class: "update__actions" },
         button({
-          label: t.settings.updateRetry,
-          glyph: "arrow-clockwise",
-          small: true,
-          onClick: () => void beginDownload(release),
-        }),
-      );
-      return controls;
-    }
-    if (state?.progress.done === true && state.staged !== null) {
-      controls.push(
-        button({
-          label: t.settings.updateInstall,
-          glyph: "download-simple",
-          kind: "primary",
-          onClick: () => {
-            // The point of no return gets one confirmation: the backend stops the
-            // runtime before spawning Setup, and a stray click is otherwise an
-            // outage the user did not ask for.
-            if (window.confirm(t.settings.updateConfirmInstall)) {
-              void updateInstall()
-                .then(() => {
-                  toast(t.settings.updateLaunched, "ok");
-                  void pollOnce();
-                })
-                .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
-            }
-          },
-        }),
-      );
-      return controls;
-    }
-    if (available && release.asset !== null) {
-      controls.push(
-        button({
-          label: `${t.settings.updateDownload} · ${t.settings.updateSizeUnit(mib(release.asset.size))}`,
+          label: t.settings.updateDownload,
           glyph: "download-simple",
           onClick: () => void beginDownload(release),
         }),
-      );
-    }
-    return controls;
-  }
-
-  /** The progress line, shown while active and as the terminal state after. */
-  function downloadLine(current: UpdateState): HTMLElement {
-    const { progress } = current;
-    const pct = progress.total > 0 ? Math.round((progress.downloaded / progress.total) * 100) : null;
-    const bar = el("progress", { class: "bar", max: progress.total || 1 });
-    if (pct !== null) bar.value = progress.downloaded;
-    return el(
-      "div",
-      { class: "update__download" },
-      el("div", { class: "update__downloadhead" },
-        el("span", {
-          class: "update__bartext",
-          text: progress.active
-            ? t.settings.updateDownloadedOf(mib(progress.downloaded), progress.total > 0 ? t.settings.updateSizeUnit(mib(progress.total)) : "…")
-            : progress.done
-              ? t.settings.updateStaged
-              : progress.error,
-        }),
-        current.launched !== null
-          ? chip(t.settings.updateLaunched, "ok", "check-circle")
-          : null,
       ),
+    );
+    fill(update.body, ...rows, actionRow);
+  }
+
+  /** The in-row download bar that replaces the channel picker while a download
+   *  runs. One row, one truth: the bar IS the state. */
+  function downloadBar(current: UpdateState): HTMLElement {
+    const { progress } = current;
+    const bar = el("progress", { class: "bar update__bar", max: progress.total || 1 });
+    if (progress.total > 0) bar.value = progress.downloaded;
+    return el(
+      "span",
+      { class: "update__progress" },
       bar,
+      el("span", {
+        class: "update__bartext",
+        text: t.settings.updateDownloadedOf(mib(progress.downloaded), progress.total > 0 ? t.settings.updateSizeUnit(mib(progress.total)) : "…"),
+      }),
     );
   }
 
@@ -729,9 +725,126 @@ export function createSettingsScreen(): HTMLElement {
     ticker = 0;
   }
 
+  // --- 更新预览 ----------------------------------------------------------------------------
+  //
+  // Outside Tauri (`npm run dev` in a plain browser) every invoke rejects, so the
+  // update panel would only ever show its idle row. The preview escape hatch: open
+  // the dev URL with `?vcPreview=update` and the panel renders from a fixture,
+  // switching states by `#state=` — newest, available, downloading, staged, failed —
+  // so every visual state is debuggable in a browser before it is ever packaged.
+
+  const PREVIEW = new URLSearchParams(window.location.search).get("vcPreview") === "update";
+
+  /** A fake check answer. Numbers and dates are fixed so screenshots compare. */
+  function previewCheck(): CheckOutcome {
+    return {
+      current: "1.8.0",
+      update_available: false,
+      release: {
+        tag: "v1.9.0",
+        version: "1.9.0",
+        name: "voice-core 1.9.0",
+        notes: "",
+        url: "https://github.com/yabo083/voice-core/releases",
+        published_ms: Date.now() - 3 * 86_400_000,
+        asset: {
+          name: "voice-core-1.9.0-setup.exe",
+          size: 47_185_920,
+          url: "",
+          digest: null,
+        },
+      },
+      mirrors: [
+        ["direct", ""],
+        ["ghproxy.net", "https://ghproxy.net"],
+        ["gh-proxy.com", "https://gh-proxy.com"],
+        ["ghfast.top", "https://ghfast.top"],
+      ],
+      via: "direct",
+    };
+  }
+
+  /** The preview state switch. The `unchecked` state renders the fixture with no
+   *  check answer at all — the idle row, what a first visit shows before anything
+   *  has run; `checking` is the transient spinner row. */
+  function previewState(name: string): void {
+    window.clearInterval(previewTimer);
+    check = previewCheck();
+    state = { progress: { active: false, downloaded: 0, total: 0, done: false, failed: false, error: "" }, staged: null, launched: null };
+    preferredMirror = null;
+    switch (name) {
+      case "unchecked":
+        check = null;
+        state = null;
+        break;
+      case "checking":
+        check = null;
+        state = null;
+        check = null;
+        // The checking row is check === null with state === null and a spin — the
+        // idle render with the button disabled. Simulate the answer arriving:
+        window.setTimeout(() => {
+          if (window.location.hash !== "#state=checking") return;
+          previewState("newest");
+        }, 2500);
+        break;
+      case "newest":
+        check!.update_available = false;
+        break;
+      case "available":
+        check!.update_available = true;
+        break;
+      case "downloading":
+        check!.update_available = true;
+        state!.progress = { active: true, downloaded: 19_652_608, total: 47_185_920, done: false, failed: false, error: "" };
+        startTickerPreview();
+        break;
+      case "staged":
+        check!.update_available = true;
+        state!.progress = { active: false, downloaded: 47_185_920, total: 47_185_920, done: true, failed: false, error: "" };
+        state!.staged = "C:\\…\\data\\update\\voice-core-1.9.0-setup.exe";
+        break;
+      case "failed":
+        check!.update_available = true;
+        state!.progress = { active: false, downloaded: 8_388_608, total: 47_185_920, done: false, failed: true, error: "ghproxy.net: 连接停滞超过 30 秒" };
+        break;
+      // The state this panel cannot poll for: the installer is out, the panel is
+      // about to be closed by it. Rendered from `launched` being set.
+      case "installing":
+        check!.update_available = true;
+        state!.progress = { active: false, downloaded: 47_185_920, total: 47_185_920, done: true, failed: false, error: "" };
+        state!.staged = "C:\\…\\data\\update\\voice-core-1.9.0-setup.exe";
+        state!.launched = state!.staged;
+        break;
+    }
+    renderUpdate();
+  }
+
+  /** The preview twin of the poll ticker: frozen mid-download, a bar that breathes. */
+  let previewTimer = 0;
+  function startTickerPreview(): void {
+    window.clearInterval(previewTimer);
+    previewTimer = window.setInterval(() => {
+      if (state?.progress.active !== true) {
+        window.clearInterval(previewTimer);
+        return;
+      }
+      const next = state.progress.downloaded + 96_000;
+      state.progress.downloaded = next >= state.progress.total ? state.progress.total : next;
+      renderUpdate();
+    }, 250);
+  }
+
   /** Check on entry, quietly, once per panel-open — the same nudge the rail badge
    *  uses, and never more often: the Releases API is a shared, rate-limited thing. */
   async function checkOnEntry(): Promise<void> {
+    if (PREVIEW) {
+      const wanted = window.location.hash.replace(/^#state=/, "") || "available";
+      check = previewCheck();
+      check.update_available = wanted !== "newest";
+      previewState(wanted);
+      return;
+    }
     try {
       check = await updateCheck();
       state = await updateStatus();
@@ -884,8 +997,15 @@ export function createSettingsScreen(): HTMLElement {
   renderLanguage();
   renderHistory();
   renderUpdate();
-  void loadSettings();
-  void loadHistory();
+  if (PREVIEW) {
+    // A browser preview has no navigation events and no backend: render the
+    // fixture state at once. The other panels keep their skeletons, which is
+    // honest about what a browser cannot know.
+    void checkOnEntry();
+  } else {
+    void loadSettings();
+    void loadHistory();
+  }
 
   // Both files are hand-editable by design, and the runtime and the presenter both re-read
   // them. The shell builds this screen once and afterwards only hides it, so without this a
@@ -893,12 +1013,24 @@ export function createSettingsScreen(): HTMLElement {
   document.addEventListener("app:navigate", (ev: Event) => {
     const { to } = (ev as CustomEvent<{ to: string }>).detail;
     if (to !== "settings") return;
+    if (PREVIEW) {
+      // A hash change is the state switch; nothing re-reads.
+      previewState(window.location.hash.replace(/^#state=/, "") || "available");
+      return;
+    }
     void loadSettings();
     void loadHistory();
     // One quiet check per entry, never per minute: GitHub's API is rate-limited and
     // shared, and a panel that polls it in the background is a rate-limit victim.
     void checkOnEntry();
   });
+
+  if (PREVIEW) {
+    // The state switch without a reload: edit the hash, the panel follows.
+    window.addEventListener("hashchange", () => {
+      previewState(window.location.hash.replace(/^#state=/, "") || "available");
+    });
+  }
 
   return el(
     "div",

@@ -8,6 +8,19 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.6] - 2026-09-17
+
+### Fixed
+
+- **The stale-probe fix was incomplete** (measured): 1.9.5 cleared the cache
+  when the installer was scheduled, but the panel that comes back afterwards
+  ran its first detect while the installer's `-Only venv` stage was still
+  rebuilding the environment — failed again, and cached the failure for the
+  process lifetime. The cache now stores successes only: a failed probe is one
+  sample of an environment that may be mid-change, so the next detect re-probes
+  instead of inheriting the verdict. Re-probing a genuinely broken environment
+  costs seconds; caching the failure cost the whole deploy screen.
+
 ## [1.9.5] - 2026-09-17
 
 ### Fixed

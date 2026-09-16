@@ -295,7 +295,14 @@ fn cached_probe(host: &Host, python: &Path) -> Probe {
         }
     }
     let probe = run_probe(host, python);
-    *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = Some(probe.clone());
+    // Cache successes only. A failure is one sample of an environment that may
+    // be mid-change — an installer swapping the venv produced exactly this —
+    // and a cached 'broken' poisons every later detect for the process
+    // lifetime. Re-probing a genuinely broken environment costs seconds;
+    // caching the failure costs the whole deploy screen.
+    if probe.ok {
+        *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = Some(probe.clone());
+    }
     probe
 }
 

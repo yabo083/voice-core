@@ -496,11 +496,6 @@ export function createSettingsScreen(): HTMLElement {
   /** The last polled download state. */
   let state: UpdateState | null = null;
 
-  /** MiB with one decimal, the unit a release page quotes. */
-  function mib(bytes: number): string {
-    return (bytes / (1024 * 1024)).toFixed(1);
-  }
-
   /** One fact as the draft draws it: the label at the left edge, the value hard
    *  against the right. Extra slots trail inside the value box, so `space-between`
    *  never spreads three items into a middle column. */
@@ -666,17 +661,34 @@ export function createSettingsScreen(): HTMLElement {
   /** The in-row download bar: the value IS the state while a download runs. */
   function downloadBar(current: UpdateState): HTMLElement {
     const { progress } = current;
-    const bar = el("progress", { class: "bar update__bar", max: progress.total || 1 });
-    if (progress.total > 0) bar.value = progress.downloaded;
+    // A ring rather than a bar: 32px of arc carries the same information in a
+    // third of the width, right where the version numbers sat.
+    const RADIUS = 11;
+    const CIRC = 2 * Math.PI * RADIUS;
+    const pct = progress.total > 0 ? progress.downloaded / progress.total : 0;
+    const ring = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    ring.setAttribute("class", "update__ring");
+    ring.setAttribute("viewBox", "0 0 28 28");
+    const track = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    track.setAttribute("cx", "14");
+    track.setAttribute("cy", "14");
+    track.setAttribute("r", String(RADIUS));
+    track.setAttribute("class", "update__ring-track");
+    const fill = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    fill.setAttribute("cx", "14");
+    fill.setAttribute("cy", "14");
+    fill.setAttribute("r", String(RADIUS));
+    fill.setAttribute("class", "update__ring-fill");
+    fill.style.strokeDasharray = String(CIRC);
+    fill.style.strokeDashoffset = String(CIRC * (1 - pct));
+    ring.append(track, fill);
     return el(
       "span",
       { class: "update__progress" },
-      bar,
+      ring,
       el("span", {
         class: "update__bartext",
-        text: progress.total > 0
-          ? t.settings.updateDownloadedOf(mib(progress.downloaded), t.settings.updateSizeUnit(mib(progress.total)))
-          : t.settings.updateDownloadedOf(mib(progress.downloaded), "…"),
+        text: `${Math.round(pct * 100)}%`,
       }),
     );
   }

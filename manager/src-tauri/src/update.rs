@@ -533,6 +533,24 @@ async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetI
                     state.progress.done = true;
                     state.staged = Some(staged_path.display().to_string());
                 });
+                // Superseded packages have no second life: the winner is verified,
+                // everything else in data\update is a stale download. Sweep them.
+                if let Some(dir) = staged_path.parent() {
+                    if let Ok(entries) = std::fs::read_dir(dir) {
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path != staged_path
+                                && path.is_file()
+                                && path
+                                    .extension()
+                                    .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                            {
+                                let _ = std::fs::remove_file(&path);
+                                host.log(&format!("update: removed superseded {}", path.display()));
+                            }
+                        }
+                    }
+                }
                 host.log(&format!("update: staged {}", staged_path.display()));
                 return;
             }

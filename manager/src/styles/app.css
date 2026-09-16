@@ -3454,20 +3454,33 @@ select.input {
   }
 }
 
-/* The in-row download bar: replaces the channel picker while a download runs,
-   so the row keeps its shape and the bar IS the state. */
+/* The in-row download ring: track + accent arc, spinning in the value slot
+   where the version numbers sit. */
 .update__progress {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
-  min-width: 200px;
-  max-width: 320px;
-  flex: 1;
+  gap: var(--sp-3);
   justify-content: flex-end;
 }
 
-.update__bar {
-  flex: 1;
+.update__ring {
+  width: 28px;
+  height: 28px;
+  transform: rotate(-90deg);
+}
+
+.update__ring-track {
+  fill: none;
+  stroke: var(--bg-active);
+  stroke-width: 3;
+}
+
+.update__ring-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 3;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 250ms linear;
 }
 
 .update__bartext {

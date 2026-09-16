@@ -55,6 +55,10 @@ fn main() {
             build_tray(app.handle())?;
             supervise::watch(app.handle().clone());
             watch::start(app.handle().clone());
+            // Self-update heartbeat: one check shortly after boot, one every six
+            // hours, timestamp in data\update\last-check.txt. Silent by design —
+            // the panel's own check is the loud path.
+            update::start(app.handle().clone());
             // Before the first paint, so the caption is never briefly the system's.
             if let Some(window) = app.get_webview_window("main") {
                 caption::paint(&window);
@@ -100,6 +104,7 @@ fn main() {
             training::install_trained_pack,
             training::training_discard,
             update::update_check,
+            update::update_last_check,
             update::update_status,
             update::update_download,
             update::update_install,

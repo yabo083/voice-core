@@ -35,6 +35,7 @@ import { icon } from "../icons";
 import {
   ipcMessage,
   updateCheck,
+  updateLastCheck,
   updateDownload,
   updateInstall,
   updateStatus,
@@ -43,7 +44,7 @@ import {
   type UpdateState,
 } from "../ipc";
 import { toast } from "../toast";
-import { button, chip, emptyState, note, panel, pathText, withTip } from "../ui";
+import { button, chip, emptyState, note, panel, pathText } from "../ui";
 
 // IPC — hoisted into ipc.ts by the integrator
 
@@ -484,6 +485,11 @@ export function createSettingsScreen(): HTMLElement {
 
   /** The last check's answer, null until one has run this visit. */
   let check: CheckOutcome | null = null;
+  /** Epoch ms of the last answered check — boot, the periodic sweep or the
+   *  button all write it; 0 means this install has never checked. */
+  let lastCheckMs = 0;
+  /** True between pressing 检查更新 and the answer landing. */
+  let checkInFlight = false;
   /** The last polled download state. */
   let state: UpdateState | null = null;
 
@@ -492,74 +498,65 @@ export function createSettingsScreen(): HTMLElement {
     return (bytes / (1024 * 1024)).toFixed(1);
   }
 
-  /** The compact channel picker: a bare control, its label spoken by the shared
-   *  tooltip (hover and keyboard focus). Lives on its fact row, not in a form of
-   *  its own — one fact, one control. */
-  function mirrorPicker(): HTMLElement {
-    const control = el(
-      "select",
-      { class: "select select--bare", "aria-label": t.settings.updateMirror },
-      el("option", { value: "", text: t.settings.updateMirrorAuto }),
-      ...(check?.mirrors ?? [])
-        .filter(([name]) => name !== "direct")
-        .map(([id]) => el("option", { value: id, text: id, selected: preferredMirror === id })),
-    );
-    control.addEventListener("change", () => {
-      preferredMirror = control.value === "" ? null : control.value;
-    });
-    return withTip(control, t.settings.updateMirrorHint);
-  }
-
   /** One fact as the draft draws it: the label at the left edge, the value hard
-   *  against the right. Extra slots (a chip, a button) trail after the value, so
-   *  `space-between` never spreads three items into a middle column — the ugly
-   *  centered number came from exactly that. */
+   *  against the right. Extra slots trail inside the value box, so `space-between`
+   *  never spreads three items into a middle column. */
   function factRow(label: string, value: Child, ...rest: Child[]): HTMLElement {
     const right = el("span", { class: "update__value" }, value, rest);
     return el("div", { class: "update__fact" }, el("span", { text: label }), right);
   }
 
-  /** One render per state, and every state renders the whole truth: what this
-   *  build is, what the release is, the channel, and the single action the state
-   *  allows. A download interrupted at any point re-derives its row from
-   *  `update_status` on the next poll or panel entry, so recovery from any
-   *  interruption is the same code path as arriving fresh. */
-  function renderUpdate(): void {
-    // Nothing has been checked this visit: the version line and the check affordance.
-    if (check === null && state === null) {
-      fill(
-        update.body,
-        factRow(
-          t.settings.updateCurrent,
-          "—",
-          el("span", { class: "update__actions" },
-            button({
-              label: t.settings.updateCheck,
-              glyph: "arrow-clockwise",
-              small: true,
-              onClick: () => void runCheck(),
-            }),
-          ),
-        ),
-      );
-      return;
-    }
+  /** A spinning circle, the glyph the other screens use for "working". */
+  function spinner(): SVGElement {
+    return icon("circle-dashed", "update__spin");
+  }
 
+  /** When a check last answered — boot, the periodic sweep or the button all
+   *  write it. Never checked: an em dash, a fact in itself. */
+  function lastChecked(): string {
+    return lastCheckMs === 0 ? "—" : `${t.settings.updateLastChecked}: ${relative(lastCheckMs)}`;
+  }
+
+  function relative(ms: number): string {
+    const rtf = new Intl.RelativeTimeFormat(currentLang, { numeric: "auto" });
+    const minutes = Math.round((ms - Date.now()) / 60_000);
+    if (Math.abs(minutes) < 60) return rtf.format(minutes, "minute");
+    const hours = Math.round(minutes / 60);
+    if (Math.abs(hours) < 24) return rtf.format(hours, "hour");
+    return rtf.format(Math.round(hours / 24), "day");
+  }
+
+  /** One render per state, and every state renders the whole truth. A download
+   *  interrupted at any point re-derives its row from `update_status` on the next
+   *  poll or panel entry, so recovery from any interruption is the same code path
+   *  as arriving fresh. The channel never asks the user to pick: the backend walks
+   *  its mirror list itself, which is plumbing, not a preference worth a control. */
+  function renderUpdate(): void {
+    // No check has answered yet. The right side says when one last ran — boot,
+    // the periodic sweep, or the button all land here — and offers the manual run.
     if (check === null) {
+      const checking = checkInFlight;
       fill(
         update.body,
         factRow(
           t.settings.updateCurrent,
-          "…",
+          checking ? spinner() : lastChecked(),
           el("span", { class: "update__actions" },
-            button({
-              label: t.settings.updateChecking,
-              glyph: "circle-dashed",
-              small: true,
-              kind: "quiet",
-              disabled: true,
-              onClick: () => undefined,
-            }),
+            checking
+              ? button({
+                  label: t.settings.updateChecking,
+                  glyph: "circle-dashed",
+                  small: true,
+                  kind: "quiet",
+                  disabled: true,
+                  onClick: () => undefined,
+                })
+              : button({
+                  label: t.settings.updateCheck,
+                  glyph: "arrow-clockwise",
+                  small: true,
+                  onClick: () => void runCheck(),
+                }),
           ),
         ),
       );
@@ -569,8 +566,7 @@ export function createSettingsScreen(): HTMLElement {
     const { release, update_available: available } = check;
 
     if (!available) {
-      // Up to date: version and verdict are one fact, one unit on the right —
-      // a number hanging at the edge with a chip after it read as two loose ends.
+      // Up to date: version and verdict are one fact, one unit on the right.
       fill(
         update.body,
         factRow(
@@ -581,85 +577,86 @@ export function createSettingsScreen(): HTMLElement {
       return;
     }
 
-    const rows: HTMLElement[] = [factRow(t.settings.updateCurrent, check.current)];
-    rows.push(factRow(t.settings.updateAvailable, release.version));
-
-    const actionRow = factRow(t.settings.updateMirror, mirrorPicker());
+    // An update exists: one plain fact row, current version at the left of the
+    // arrow, the release chip on the right of it, the one action at the end. The
+    // download's own state swaps into the value slot while it runs.
+    const value = el("span", { class: "update__value" });
     if (state?.progress.active === true) {
-      // Downloading owns the row: progress bar where the channel was, percent as
-      // the value. No buttons — the only way out is finish or fail.
-      actionRow.replaceChild(
-        downloadBar(state),
-        actionRow.querySelector(".update__value") ?? actionRow.firstChild!,
-      );
-      fill(update.body, ...rows, actionRow);
-      return;
+      value.appendChild(downloadBar(state));
+    } else {
+      value.appendChild(el("span", { class: "update__from", text: check.current }));
+      value.appendChild(icon("caret-right", "update__arrow"));
+      value.appendChild(chip(release.version, "run"));
     }
-    if (state?.progress.done === true && state.staged !== null) {
-      // Verified on disk. `launched` set means the installer is already out and
-      // this panel is about to be closed by it — the row says so instead of
-      // offering a second install; anything else offers 安装, on the right.
-      if (state.launched !== null) {
-        actionRow.querySelector(".update__value")!.appendChild(
-          chip(t.settings.updateLaunched, "ok", "check-circle"),
-        );
-      } else {
-        actionRow.querySelector(".update__value")!.appendChild(
-          el("span", { class: "update__actions" },
-            button({
-              label: t.settings.updateInstall,
-              glyph: "download-simple",
-              kind: "primary",
-              onClick: () => {
-                // The point of no return gets one confirmation: the backend stops
-                // the runtime before spawning Setup, and a stray click is otherwise
-                // an outage the user did not ask for.
-                if (window.confirm(t.settings.updateConfirmInstall)) {
-                  void updateInstall()
-                    .then(() => {
-                      toast(t.settings.updateLaunched, "ok");
-                      void pollOnce();
-                    })
-                    .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
-                }
-              },
-            }),
-          ),
-        );
-      }
-      fill(update.body, ...rows, actionRow);
-      return;
-    }
-    if (state?.progress.failed === true) {
-      actionRow.querySelector(".update__value")!.appendChild(
-        el("span", { class: "update__actions" },
-          el("span", { class: "update__error", text: state.progress.error }),
-          button({
-            label: t.settings.updateRetry,
-            glyph: "arrow-clockwise",
-            small: true,
-            onClick: () => void beginDownload(release),
-          }),
-        ),
-      );
-      fill(update.body, ...rows, actionRow);
-      return;
-    }
-    // A check has answered, a download is available, nothing is in flight.
-    actionRow.querySelector(".update__value")!.appendChild(
-      el("span", { class: "update__actions" },
-        button({
-          label: t.settings.updateDownload,
-          glyph: "download-simple",
-          onClick: () => void beginDownload(release),
-        }),
-      ),
+    value.appendChild(updateAction());
+    fill(
+      update.body,
+      factRow(t.settings.updateAvailable, value),
+      // The failure sentence renders as its own full-width row below — a sibling,
+      // never content inside the fact row, which is what squeezed it into a
+      // two-line badge last round.
+      state?.progress.failed === true && state.progress.error !== ""
+        ? el("div", { class: "update__errorline", text: state.progress.error })
+        : null,
     );
-    fill(update.body, ...rows, actionRow);
   }
 
-  /** The in-row download bar that replaces the channel picker while a download
-   *  runs. One row, one truth: the bar IS the state. */
+  /** The single action the current download state allows — nothing else renders
+   *  beside it. */
+  function updateAction(): HTMLElement {
+    const container = el("span", { class: "update__actions" });
+    if (state?.progress.done === true && state.staged !== null) {
+      // Verified on disk. `launched` set means the installer is already out and
+      // this panel is about to be closed by it — a spinner carries the wait, and
+      // the installer's own [Run] brings the panel back when it is done.
+      if (state.launched !== null) {
+        container.appendChild(spinner());
+        container.appendChild(el("span", { class: "update__spinlabel", text: t.settings.updateRestarting }));
+      } else {
+        container.appendChild(
+          button({
+            label: t.settings.updateInstall,
+            glyph: "download-simple",
+            kind: "primary",
+            onClick: () => {
+              // The point of no return gets one confirmation: the backend stops
+              // the runtime before spawning Setup, and a stray click is otherwise
+              // an outage the user did not ask for.
+              if (window.confirm(t.settings.updateConfirmInstall)) {
+                void updateInstall()
+                  .then(() => {
+                    void pollOnce();
+                  })
+                  .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
+              }
+            },
+          }),
+        );
+      }
+      return container;
+    }
+    if (state?.progress.failed === true) {
+      container.appendChild(
+        button({
+          label: t.settings.updateRetry,
+          glyph: "arrow-clockwise",
+          small: true,
+          onClick: () => void beginDownload(),
+        }),
+      );
+      return container;
+    }
+    container.appendChild(
+      button({
+        label: t.settings.updateDownload,
+        glyph: "download-simple",
+        onClick: () => void beginDownload(),
+      }),
+    );
+    return container;
+  }
+
+  /** The in-row download bar: the value IS the state while a download runs. */
   function downloadBar(current: UpdateState): HTMLElement {
     const { progress } = current;
     const bar = el("progress", { class: "bar update__bar", max: progress.total || 1 });
@@ -670,25 +667,27 @@ export function createSettingsScreen(): HTMLElement {
       bar,
       el("span", {
         class: "update__bartext",
-        text: t.settings.updateDownloadedOf(mib(progress.downloaded), progress.total > 0 ? t.settings.updateSizeUnit(mib(progress.total)) : "…"),
+        text: progress.total > 0
+          ? t.settings.updateDownloadedOf(mib(progress.downloaded), t.settings.updateSizeUnit(mib(progress.total)))
+          : t.settings.updateDownloadedOf(mib(progress.downloaded), "…"),
       }),
     );
   }
 
-  /** The preferred mirror this visit. Session-scoped on purpose: a mirror that was
-   *  best yesterday may be dead today, and "自动" is the honest default every visit. */
-  let preferredMirror: string | null = null;
-
   async function runCheck(): Promise<void> {
     check = null;
+    checkInFlight = true;
     renderUpdate();
     try {
       check = await updateCheck();
+      lastCheckMs = Date.now();
     } catch (err: unknown) {
       toast(ipcMessage(err), "fail");
+      checkInFlight = false;
       renderUpdate();
       return;
     }
+    checkInFlight = false;
     renderUpdate();
     if (check.update_available) {
       // One poll to learn whether a download is already mid-flight (it is not — the
@@ -697,10 +696,11 @@ export function createSettingsScreen(): HTMLElement {
     }
   }
 
-  async function beginDownload(release: CheckOutcome["release"]): Promise<void> {
-    if (release.asset === null) return;
+  async function beginDownload(): Promise<void> {
+    const asset = check?.release.asset;
+    if (asset === null || asset === undefined) return;
     try {
-      await updateDownload(release.asset, preferredMirror);
+      await updateDownload(asset);
     } catch (err: unknown) {
       toast(ipcMessage(err), "fail");
       return;
@@ -761,13 +761,6 @@ export function createSettingsScreen(): HTMLElement {
           digest: null,
         },
       },
-      mirrors: [
-        ["direct", ""],
-        ["ghproxy.net", "https://ghproxy.net"],
-        ["gh-proxy.com", "https://gh-proxy.com"],
-        ["ghfast.top", "https://ghfast.top"],
-      ],
-      via: "direct",
     };
   }
 
@@ -778,23 +771,27 @@ export function createSettingsScreen(): HTMLElement {
     window.clearInterval(previewTimer);
     check = previewCheck();
     state = { progress: { active: false, downloaded: 0, total: 0, done: false, failed: false, error: "" }, staged: null, launched: null };
-    preferredMirror = null;
+    lastCheckMs = Date.now() - 2 * 3_600_000;
     switch (name) {
       case "unchecked":
         check = null;
         state = null;
+        lastCheckMs = 0;
         break;
       case "checking":
         check = null;
         state = null;
-        check = null;
-        // The checking row is check === null with state === null and a spin — the
-        // idle render with the button disabled. Simulate the answer arriving:
+        lastCheckMs = Date.now() - 2 * 3_600_000;
+        // The checking row is `check === null` with the spinner up. Simulate the
+        // answer arriving:
+        checkInFlight = true;
+        renderUpdate();
         window.setTimeout(() => {
+          checkInFlight = false;
           if (window.location.hash !== "#state=checking") return;
           previewState("newest");
         }, 2500);
-        break;
+        return;
       case "newest":
         check!.update_available = false;
         break;
@@ -847,13 +844,13 @@ export function createSettingsScreen(): HTMLElement {
   async function checkOnEntry(): Promise<void> {
     if (PREVIEW) {
       const wanted = window.location.hash.replace(/^#state=/, "") || "available";
-      check = previewCheck();
-      check.update_available = wanted !== "newest";
+      checkInFlight = wanted === "checking";
       previewState(wanted);
       return;
     }
     try {
       check = await updateCheck();
+      lastCheckMs = await updateLastCheck();
       state = await updateStatus();
       if (state.progress.active) startTicker();
     } catch {

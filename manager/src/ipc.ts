@@ -266,10 +266,6 @@ export interface CheckOutcome {
   current: string;
   update_available: boolean;
   release: ReleaseInfo;
-  /** The backend's mirror table: names for the dropdown, prefixes for the record. */
-  mirrors: [string, string][];
-  /** The mirror that answered the check, when one did. */
-  via: string | null;
 }
 
 /** Where the one download is. `active` covers everything between the first byte
@@ -296,11 +292,16 @@ export interface UpdateState {
  *  the error says which. */
 export const updateCheck = (): Promise<CheckOutcome> => invoke("update_check");
 
+/** Epoch ms a check last answered; 0 = never. Boot, the six-hour sweep and the
+ *  button all write it. */
+export const updateLastCheck = (): Promise<number> => invoke("update_last_check");
+
 export const updateStatus = (): Promise<UpdateState> => invoke("update_status");
 
-/** Spawns the transfer; resolves at once, progress arrives by polling. */
-export const updateDownload = (asset: ReleaseAsset, preferredMirror: string | null): Promise<void> =>
-  invoke("update_download", { asset, preferredMirror });
+/** Spawns the transfer; resolves at once, progress arrives by polling. The
+ *  backend picks the endpoint: direct first, mirrors as fallback. */
+export const updateDownload = (asset: ReleaseAsset): Promise<void> =>
+  invoke("update_download", { asset });
 
 /** Hands the staged installer to Setup and gets out of the way. */
 export const updateInstall = (): Promise<void> => invoke("update_install");

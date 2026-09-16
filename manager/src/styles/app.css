@@ -3396,18 +3396,46 @@ select.input {
   min-width: 0;
 }
 
-/* The single action a state allows, on the fact row's right edge. */
+/* The single action a state allows, trailing the value in the same box. */
 .update__actions {
   display: flex;
   align-items: center;
   gap: var(--sp-4);
-  justify-content: flex-end;
 }
 
-.update__error {
+/* The current version at the left of the arrow, muted; the release chip after
+   the arrow carries the color. */
+.update__from {
+  color: var(--ink-muted);
+}
+
+.update__arrow {
+  color: var(--ink-faint);
+}
+
+/* The waiting spinner and its label. */
+.update__spin {
+  animation: spin 1.2s linear infinite;
+}
+
+.update__spinlabel {
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* The failure sentence: its own full-width row below the fact list, outside it. */
+.update__errorline {
+  display: block;
   color: var(--st-fail);
   font-size: var(--fs-sm);
   overflow-wrap: anywhere;
+  padding: var(--sp-2) 0 0;
 }
 
 /* The in-row download bar: replaces the channel picker while a download runs,

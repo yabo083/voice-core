@@ -16,7 +16,7 @@
 //! URL becomes `<mirror>/<github-url>` — so one rule covers both the
 //! `api.github.com` JSON and the `releases/download` asset. Each candidate is
 //! tried in order; the first answer wins, and the winner of the *check* is
-//! remembered only as the download's preferred first candidate, never as a fact
+//! remembered only as the download's first candidate, never as a fact
 //! about the network: a mirror that answered seconds ago can be dead now, so
 //! the download walks the whole list again. A user behind their own proxy names
 //! it in `VC_UPDATE_PROXY` — the string goes straight to reqwest's proxy
@@ -112,12 +112,6 @@ pub struct CheckOutcome {
     /// gets to claim.
     pub update_available: bool,
     pub release: ReleaseInfo,
-    /// The mirror table, so the dropdown renders from the same list the backend
-    /// walks rather than a second copy of the names.
-    pub mirrors: Vec<(&'static str, &'static str)>,
-    /// The mirror that answered, so a check that succeeded through ghproxy.net
-    /// can say something about the network that 有新版本 alone does not.
-    pub via: Option<String>,
 }
 
 /// Where a download is, right now — the polled shape.
@@ -373,10 +367,10 @@ fn outbound_client() -> Result<reqwest::Client, String> {
     builder.build().map_err(|err| err.to_string())
 }
 
-/// One GitHub URL as the candidate list: the preferred mirror first when the
-/// check found one, then everything else in [`MIRRORS`] order. Wrapping is the
-/// whole proxy scheme: `<mirror>/<original-url>`.
-fn candidates(preferred: Option<&str>, url: &str) -> Vec<(String, String)> {
+/// One GitHub URL as the candidate list: direct first, then every mirror in
+/// [`MIRRORS`] order. Wrapping is the whole proxy scheme:
+/// `<mirror>/<original-url>`.
+fn candidates(url: &str) -> Vec<(String, String)> {
     let wrap = |prefix: &str| {
         if prefix.is_empty() {
             url.to_string()
@@ -384,58 +378,93 @@ fn candidates(preferred: Option<&str>, url: &str) -> Vec<(String, String)> {
             format!("{prefix}/{url}")
         }
     };
-    let mut out = Vec::new();
-    if let Some(name) = preferred {
-        if let Some((_, prefix)) = MIRRORS.iter().find(|(n, _)| *n == name) {
-            out.push((name.to_string(), wrap(prefix)));
-        }
-    }
-    for (name, prefix) in MIRRORS {
-        if Some(name) != preferred {
-            out.push((name.to_string(), wrap(prefix)));
-        }
-    }
-    out
+    // Note the leading direct entry: mirrors are a fallback, never a preference.
+    MIRRORS
+        .iter()
+        .map(|(name, prefix)| (name.to_string(), wrap(prefix)))
+        .collect()
 }
 
-/// `GET /releases/latest`, mirrors in order, first success wins. A
-/// `no-releases` answer short-circuits: it is the API speaking, and no other
-/// mirror can improve on it.
-async fn fetch_release_any() -> Result<(ReleaseInfo, Option<String>), String> {
+/// `GET /releases/latest`. Direct only — measured on 2026-09-17, the public
+/// prefix proxies (ghproxy.net, ghfast.top) refuse the API endpoint with 403
+/// while happily proxying release assets, so a mirror list here would be a
+/// list of known failures. A machine that cannot reach api.github.com at all
+/// is rare and gets an honest error.
+async fn fetch_release_any() -> Result<ReleaseInfo, String> {
     let client = outbound_client()?;
-    let mut errors: Vec<String> = Vec::new();
-    for (name, prefix) in MIRRORS {
-        match fetch_release(&client, prefix).await {
-            Ok(info) => return Ok((info, Some(name.to_string()))),
-            Err(err) if err == "no-releases" => return Err(err),
-            Err(err) => errors.push(format!("{name}: {err}")),
-        }
+    fetch_release(&client, "").await
+}
+
+/// The last-checked stamp, `<data dir>\update\last-check.txt`: one epoch-ms
+/// line. A file, not registry state, so a portable tree carries its own check
+/// history like every other fact it owns.
+fn last_check_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    layout::update_dir(data_dir).join("last-check.txt")
+}
+
+fn read_last_check(data_dir: &std::path::Path) -> u64 {
+    std::fs::read_to_string(last_check_path(data_dir))
+        .ok()
+        .and_then(|text| text.trim().parse().ok())
+        .unwrap_or(0)
+}
+
+fn write_last_check(data_dir: &std::path::Path, ms: u64) {
+    let _ = std::fs::create_dir_all(layout::update_dir(data_dir));
+    let _ = std::fs::write(last_check_path(data_dir), ms.to_string());
+}
+
+/// One sweep: a check, the timestamp recorded. Failures are silent here — this
+/// runs at boot and every six hours without a person watching, and a toast
+/// would punish an offline machine four times an hour. The panel's own check
+/// is the loud path.
+async fn sweep(app: &tauri::AppHandle) {
+    let data_dir = app.state::<Host>().data_dir.clone();
+    if update_check().await.is_ok() {
+        write_last_check(&data_dir, now_ms());
     }
-    Err(errors.join("；"))
+}
+
+/// Boot and heartbeat: check once shortly after startup, then every six hours.
+/// Nothing here talks to the UI, so a check while the panel is closed costs
+/// nothing and the next visit sees the fresh answer.
+pub fn start(app: tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // Give the machine a minute to settle its network before the first
+        // outbound call; a check that starts before Wi-Fi is up just fails.
+        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        loop {
+            sweep(&app).await;
+            tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
+        }
+    });
 }
 
 /// Is there a newer release? Answers with both ends of the comparison and the
-/// release itself, newer or not — the panel shows 最新版本 either way. The 404
-/// case is this project's real "nothing published yet", phrased as its own
-/// sentence rather than as a failure of all four mirrors.
+/// release itself, newer or not. The 404 case is this project's real "nothing
+/// published yet", phrased as its own sentence rather than as a failure.
 #[tauri::command]
-pub async fn update_check(preferred_mirror: Option<String>) -> Result<CheckOutcome, String> {
-    let _ = preferred_mirror; // the check itself walks the whole list; kept for symmetry
+pub async fn update_check() -> Result<CheckOutcome, String> {
     let current = env!("CARGO_PKG_VERSION").to_string();
-    let (release, via) = fetch_release_any().await.map_err(|err| {
+    let release = fetch_release_any().await.map_err(|err| {
         if err == "no-releases" {
             "GitHub 上还没有任何 release".to_string()
         } else {
-            format!("所有镜像都失败了 — {err}")
+            format!("检查失败 — {err}")
         }
     })?;
     Ok(CheckOutcome {
         update_available: is_newer(&release.version, &current),
         current,
         release,
-        mirrors: MIRRORS.to_vec(),
-        via,
     })
+}
+
+/// The timestamp a check last answered, for the idle row's last-checked fact.
+/// 0 means this install has never checked — its own fact, shown as such.
+#[tauri::command]
+pub async fn update_last_check(app: tauri::AppHandle) -> u64 {
+    read_last_check(&app.state::<Host>().data_dir)
 }
 
 /// Where the download is. Never fails: "nothing has happened yet" is the
@@ -453,11 +482,7 @@ pub async fn update_status(app: tauri::AppHandle) -> UpdateState {
 /// slot, like provision and training, and for the same reasons: two writers to
 /// one file, two progress bars for one download.
 #[tauri::command]
-pub async fn update_download(
-    app: tauri::AppHandle,
-    asset: AssetInfo,
-    preferred_mirror: Option<String>,
-) -> Result<(), String> {
+pub async fn update_download(app: tauri::AppHandle, asset: AssetInfo) -> Result<(), String> {
     let staged_path = {
         let host = app.state::<Host>();
         if host.update.snapshot().progress.active {
@@ -469,7 +494,7 @@ pub async fn update_download(
     };
 
     tauri::async_runtime::spawn(async move {
-        run_download(app, staged_path, asset, preferred_mirror).await;
+        run_download(app, staged_path, asset).await;
     });
     Ok(())
 }
@@ -477,12 +502,7 @@ pub async fn update_download(
 /// The transfer: candidates in order, the first one that yields a verified file
 /// wins. Every failure recorded and the next tried; the last error is what the
 /// panel shows when the list runs out.
-async fn run_download(
-    app: tauri::AppHandle,
-    staged_path: PathBuf,
-    asset: AssetInfo,
-    preferred: Option<String>,
-) {
+async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetInfo) {
     let host = app.state::<Host>();
     host.update.set(|state| {
         state.progress = DownloadProgress {
@@ -503,7 +523,7 @@ async fn run_download(
     };
 
     let mut last_error = String::from("没有可用镜像");
-    for (name, url) in candidates(preferred.as_deref(), &asset.url) {
+    for (name, url) in candidates(&asset.url) {
         match try_candidate(&client, &host, &staged_path, &asset, &url, &name).await {
             Ok(bytes) => {
                 host.update.set(|state| {

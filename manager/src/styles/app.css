@@ -635,14 +635,24 @@ code {
   align-items: center;
   justify-content: center;
   gap: var(--sp-3);
-  padding: var(--sp-4) var(--sp-5);
+  /* Fixed frame, not text-hugging: every button of a size is the same box, so a
+     label change never reshapes the row. text-overflow keeps a too-long label
+     from breaking the frame. */
+  box-sizing: border-box;
+  min-width: 88px;
+  max-width: 160px;
+  height: 28px;
+  padding: 0 var(--sp-4);
   border: 1px solid var(--line-strong);
   border-radius: var(--r-control);
   background: var(--bg-raised);
   color: var(--ink);
   font: inherit;
-  line-height: 1.2;
+  font-size: var(--fs-sm);
+  line-height: 1;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
   transition:
     background var(--dur-2) var(--ease),
@@ -704,12 +714,24 @@ code {
 }
 
 .btn--sm {
-  padding: var(--sp-3) var(--sp-4);
+  min-width: 64px;
+  max-width: 128px;
+  height: 24px;
+  padding: 0 var(--sp-3);
   font-size: var(--fs-sm);
 }
 
 .btn--icon {
-  padding: var(--sp-3);
+  min-width: 0;
+  max-width: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.btn--sm.btn--icon {
+  width: 24px;
+  height: 24px;
 }
 
 /* One caret glyph for both collapsed and expanded, rotated rather than swapped. */
@@ -3429,15 +3451,6 @@ select.input {
   to {
     transform: rotate(360deg);
   }
-}
-
-/* The failure sentence: its own full-width row below the fact list, outside it. */
-.update__errorline {
-  display: block;
-  color: var(--st-fail);
-  font-size: var(--fs-sm);
-  overflow-wrap: anywhere;
-  padding: var(--sp-2) 0 0;
 }
 
 /* The in-row download bar: replaces the channel picker while a download runs,

@@ -490,6 +490,9 @@ export function createSettingsScreen(): HTMLElement {
   let lastCheckMs = 0;
   /** True between pressing 检查更新 and the answer landing. */
   let checkInFlight = false;
+  /** The failed state's sentence is announced once per failure, not once per
+   *  render — the flag resets the moment the download leaves the state. */
+  let failureAnnounced = false;
   /** The last polled download state. */
   let state: UpdateState | null = null;
 
@@ -589,16 +592,14 @@ export function createSettingsScreen(): HTMLElement {
       value.appendChild(chip(release.version, "run"));
     }
     value.appendChild(updateAction());
-    fill(
-      update.body,
-      factRow(t.settings.updateAvailable, value),
-      // The failure sentence renders as its own full-width row below — a sibling,
-      // never content inside the fact row, which is what squeezed it into a
-      // two-line badge last round.
-      state?.progress.failed === true && state.progress.error !== ""
-        ? el("div", { class: "update__errorline", text: state.progress.error })
-        : null,
-    );
+    fill(update.body, factRow(t.settings.updateAvailable, value));
+    // A download failure is an app-level event: it arrives as a toast once, on
+    // the transition into the failed state, and the row just shows 重试. Nothing
+    // error-shaped lives in the panel itself.
+    if (state?.progress.failed === true && state.progress.error !== "" && !failureAnnounced) {
+      failureAnnounced = true;
+      toast(state.progress.error, "fail");
+    }
   }
 
   /** The single action the current download state allows — nothing else renders
@@ -716,6 +717,7 @@ export function createSettingsScreen(): HTMLElement {
       return; // a poll that raced a shutdown is not a user-facing failure
     }
     if (state.progress.active === false) stopTicker();
+    if (state.progress.failed !== true) failureAnnounced = false;
     renderUpdate();
   }
 

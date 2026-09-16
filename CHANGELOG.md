@@ -8,6 +8,28 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.0] - 2026-09-17
+
+### Changed
+
+- **The update panel, reworked through six rounds of acceptance.** A two-column fact
+  list — label left, value right, the one allowed action trailing the value; the
+  up-to-date verdict and version share one chip; the channel picker is gone (the
+  backend picks direct-first with mirrors as download-only fallback, measured:
+  ghproxy.net and ghfast.top refuse the API endpoint but proxy assets); download
+  failures announce as a toast instead of an inline error row; buttons are fixed-frame
+  (28px/24px, ellipsis on overflow) so label changes never reshape a row; the panel
+  body hugs its content; and the installer-wait state spins with 正在重启.
+- **Checks now happen without the panel**: one sweep 60 s after boot, then every six
+  hours, timestamped in `data\update\last-check.txt` — the idle row shows 上次检查
+  instead of a dash. The check itself is direct-only for the same measured reason.
+
+### Fixed
+
+- The dev-server preview (`?vcPreview=update`) no longer crashes in
+  `transformCallback`: `listen` and `invoke` degrade gracefully outside the Tauri
+  webview, so every panel state is debuggable in a plain browser.
+
 ## [1.8.0] - 2026-09-16
 
 ### Added

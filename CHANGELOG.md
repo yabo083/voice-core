@@ -8,6 +8,13 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.2] - 2026-09-17
+
+### Changed
+
+- Version-only release: a clean point for re-running the self-update flow end to
+  end (1.9.1 → 1.9.2) after the five fixes in 1.9.1. No code changes.
+
 ## [1.9.1] - 2026-09-17
 
 ### Fixed

@@ -510,10 +510,13 @@ export function createSettingsScreen(): HTMLElement {
     return withTip(control, t.settings.updateMirrorHint);
   }
 
-  /** One fact as the draft draws it: the label at the left edge, the value at the
-   *  right. The panel is a list of these; nothing else. */
+  /** One fact as the draft draws it: the label at the left edge, the value hard
+   *  against the right. Extra slots (a chip, a button) trail after the value, so
+   *  `space-between` never spreads three items into a middle column — the ugly
+   *  centered number came from exactly that. */
   function factRow(label: string, value: Child, ...rest: Child[]): HTMLElement {
-    return el("div", { class: "update__fact" }, el("span", { text: label }), el("span", { class: "update__value" }, value), rest);
+    const right = el("span", { class: "update__value" }, value, rest);
+    return el("div", { class: "update__fact" }, el("span", { text: label }), right);
   }
 
   /** One render per state, and every state renders the whole truth: what this
@@ -564,17 +567,21 @@ export function createSettingsScreen(): HTMLElement {
     }
 
     const { release, update_available: available } = check;
-    const rows: HTMLElement[] = [factRow(t.settings.updateCurrent, check.current)];
 
     if (!available) {
-      // Up to date: the version line carries the word, no second row, no chip.
-      rows[0].appendChild(
-        el("span", { class: "update__actions" }, chip(t.settings.updateIsNewest, "ok", "check-circle")),
+      // Up to date: version and verdict are one fact, one unit on the right —
+      // a number hanging at the edge with a chip after it read as two loose ends.
+      fill(
+        update.body,
+        factRow(
+          t.settings.updateCurrent,
+          chip(`${check.current} · ${t.settings.updateIsNewest}`, "ok", "check-circle"),
+        ),
       );
-      fill(update.body, ...rows);
       return;
     }
 
+    const rows: HTMLElement[] = [factRow(t.settings.updateCurrent, check.current)];
     rows.push(factRow(t.settings.updateAvailable, release.version));
 
     const actionRow = factRow(t.settings.updateMirror, mirrorPicker());
@@ -593,11 +600,11 @@ export function createSettingsScreen(): HTMLElement {
       // this panel is about to be closed by it — the row says so instead of
       // offering a second install; anything else offers 安装, on the right.
       if (state.launched !== null) {
-        actionRow.appendChild(
-          el("span", { class: "update__actions" }, chip(t.settings.updateLaunched, "ok", "check-circle")),
+        actionRow.querySelector(".update__value")!.appendChild(
+          chip(t.settings.updateLaunched, "ok", "check-circle"),
         );
       } else {
-        actionRow.appendChild(
+        actionRow.querySelector(".update__value")!.appendChild(
           el("span", { class: "update__actions" },
             button({
               label: t.settings.updateInstall,
@@ -624,7 +631,7 @@ export function createSettingsScreen(): HTMLElement {
       return;
     }
     if (state?.progress.failed === true) {
-      actionRow.appendChild(
+      actionRow.querySelector(".update__value")!.appendChild(
         el("span", { class: "update__actions" },
           el("span", { class: "update__error", text: state.progress.error }),
           button({
@@ -639,7 +646,7 @@ export function createSettingsScreen(): HTMLElement {
       return;
     }
     // A check has answered, a download is available, nothing is in flight.
-    actionRow.appendChild(
+    actionRow.querySelector(".update__value")!.appendChild(
       el("span", { class: "update__actions" },
         button({
           label: t.settings.updateDownload,

@@ -3392,7 +3392,7 @@ select.input {
   font-variant-numeric: tabular-nums;
   display: flex;
   align-items: center;
-  gap: var(--sp-3);
+  gap: var(--sp-4);
   min-width: 0;
 }
 

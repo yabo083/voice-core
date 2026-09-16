@@ -8,6 +8,34 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.8] - 2026-09-17
+
+### Fixed
+
+- **The panel an update brings back is the panel of a fresh boot no longer**
+  (measured): the installer's [Run] relaunch opened onto a stopped service and,
+  one probing race later, a 部署 screen — while the second manual launch of the
+  same day came up with everything running. The install now records its intent
+  in `data\update\restart.json` (stack was running, restart it), and the next
+  boot consumes the marker and starts the stack before the first paint. One
+  launch consumes it once; a stale marker cannot become a crash loop. An update
+  restart and a double-click of the shortcut are now the same event.
+
+### Changed
+
+- **The install window is unclickable by construction**: pressing 确认安装 now
+  raises a full-window mask — dark scrim, 正在更新, spinner — for the seconds
+  before the installer closes the process, and it returns whenever a poll
+  reports the installer as launched. Nothing under it is pressable, so the
+  double-click that once re-entered a half-live page has nothing to land on. A
+  failed launch takes the mask back down and the row is honest again.
+- **The hover flicker is gone at the root** (follow-up to the 1.9.1 fix):
+  `transform` was still in the button transition list, promoting each button to
+  its own composite layer whose first hover frame re-rasterized visibly. The
+  transition is background-only now; the `:active` press nudge is deliberately
+  instant, because a press displacement reads as feedback precisely when it
+  does not fade.
+
 ## [1.9.7] - 2026-09-17
 
 ### Fixed

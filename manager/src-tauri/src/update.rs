@@ -402,6 +402,58 @@ fn last_check_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     layout::update_dir(data_dir).join("last-check.txt")
 }
 
+/// The restart marker, `<data dir>\update\restart.json`: proof that the next
+/// panel to come up is the one an installer's [Run] relaunch brought back, not a
+/// fresh boot by a user who never asked the stack to run.
+///
+/// Written by [`update_install`] after the stack is stopped, consumed and
+/// deleted by [`crate::resume_after_update`] at boot. A file, not memory, because
+/// the process that set the intent is the process the installer kills — the only
+/// thing that survives the update is the data directory.
+fn restart_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    layout::update_dir(data_dir).join("restart.json")
+}
+
+/// Consume the marker and restart the stack if it names this install as
+/// update-restarted. Runs once at boot, before the first paint, so the panel the
+/// installer brings back is indistinguishable from the panel a second manual
+/// launch brings back: service up, model warmable, no 部署 screen in between.
+pub fn resume_after_update(app: tauri::AppHandle) {
+    let data_dir = app.state::<Host>().data_dir.clone();
+    let marker = restart_marker_path(&data_dir);
+    let Ok(raw) = std::fs::read_to_string(&marker) else {
+        return;
+    };
+    // The marker is ours and one launch consumes it, however this panel ends:
+    // the restart it asks for happens exactly once, and a crash loop that
+    // re-reads a stale marker every boot is exactly what deleting it prevents.
+    let _ = std::fs::remove_file(&marker);
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    let wants = value
+        .get("restartStack")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let was_running = value
+        .get("wasRunning")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if !wants || !was_running {
+        app.state::<Host>()
+            .log("update: restart marker present but the stack was not running before the update; leaving the stack down");
+        return;
+    }
+    let host = app.state::<Host>();
+    host.log("update: relaunching the stack this installer's [Run] interrupted");
+    tauri::async_runtime::spawn(async move {
+        if let Err(err) = crate::supervise::start(&app).await {
+            app.state::<Host>()
+                .log(&format!("update: auto-restart failed: {err}"));
+        }
+    });
+}
+
 fn read_last_check(data_dir: &std::path::Path) -> u64 {
     std::fs::read_to_string(last_check_path(data_dir))
         .ok()
@@ -652,6 +704,15 @@ fn finish_failed(host: &Host, message: String) {
     });
 }
 
+/// Is the backend API answering right now? Read before the stack stops, so the
+/// restart marker records what the user actually had, not what this command
+/// just tore down.
+async fn probe_running(app: &tauri::AppHandle) -> bool {
+    let host = app.state::<Host>();
+    let url = format!("{}/api/health", host.base_url);
+    matches!(host.http.get(url).send().await, Ok(response) if response.status().is_success())
+}
+
 /// Hand the staged installer to Windows and get out of the way.
 ///
 /// `cmd /c start` exists so the installer is not this process's child: the panel
@@ -683,7 +744,22 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     // exit 1, 'Setup has detected that voice-core is currently running'). The
     // runtime goes through the supervisor; the panel schedules its own exit —
     // after this command returns, so the IPC response is delivered first.
-    let _ = crate::supervise::stop_stack(app.clone()).await;
+    //
+    // The marker is written only after the stop answers, so `wasRunning` means
+    // "the stack was genuinely up when the user pressed 安装" and not "was
+    // running until we stopped it a millisecond ago". A panel that comes back
+    // from this install restores the stack; a fresh boot after an update does
+    // not — the same rule a plain reboot follows.
+    let was_running = {
+        let snapshot = probe_running(&app).await;
+        let _ = crate::supervise::stop_stack(app.clone()).await;
+        snapshot
+    };
+    let _ = std::fs::create_dir_all(layout::update_dir(&host.data_dir));
+    let _ = std::fs::write(
+        restart_marker_path(&host.data_dir),
+        serde_json::json!({ "restartStack": true, "wasRunning": was_running }).to_string(),
+    );
 
     // Drop the interpreter probe. The installer is about to replace the venv's
     // files, and a detect() that runs inside that window (the panel's own

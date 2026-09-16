@@ -53,6 +53,11 @@ fn main() {
         .setup(|app| {
             app.manage(Host::new());
             build_tray(app.handle())?;
+            // First: an update's [Run] relaunch must come back looking exactly
+            // like the second boot of an ordinary day — service already up —
+            // so the marker is consumed before the supervisor's watcher and the
+            // panel's own boot checks ever run. It deletes itself either way.
+            update::resume_after_update(app.handle().clone());
             supervise::watch(app.handle().clone());
             watch::start(app.handle().clone());
             // Self-update heartbeat: one check shortly after boot, one every six

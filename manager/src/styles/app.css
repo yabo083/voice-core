@@ -654,12 +654,13 @@ code {
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
-  /* Hover changes the fill only. Animating border-color on a 1px hairline is
-     what made the frame flicker on hover: the transition repaints the border
-     arc and WebView2 drops a frame between the two colors. */
-  transition:
-    background var(--dur-2) var(--ease),
-    transform var(--dur-1) var(--ease);
+  /* Hover changes the fill only. Two things flickered in WebView2 and both are
+     gone: animating border-color on a 1px hairline repaints the border arc and
+     drops a frame between the two colors, and a transform in the transition list
+     promotes the button to its own composite layer whose first hover frame
+     re-rasterizes visibly. The :active nudge below is deliberately instant — a
+     press displacement reads as feedback precisely because it does not fade. */
+  transition: background var(--dur-2) var(--ease);
 }
 
 .btn:hover:not(:disabled) {
@@ -3446,6 +3447,42 @@ select.input {
 .update__spinlabel {
   color: var(--ink-muted);
   font-size: var(--fs-sm);
+}
+
+/* The install overlay. The gap between 确认安装 and the installer closing this
+   window is seconds wide and full of buttons that still look live — the row
+   itself, the nav, every panel. A heartbroken double-click in that gap is how
+   one update became three. The mask goes up the moment the install is
+   confirmed and stays until the process dies, so nothing on screen is
+   pressable while it cannot be honoured. Same look as the language crossfade's
+   mask (one overlay grammar in this app), darker, because here the honest
+   message is that the page is gone even though its pixels linger. */
+.update-mask {
+  position: fixed;
+  inset: 0;
+  z-index: 999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-4);
+  background: rgba(0, 0, 0, 0.72);
+  backdrop-filter: blur(6px);
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+.update-mask .icon {
+  width: 28px;
+  height: 28px;
+  color: var(--ink);
+}
+
+.update-mask__title {
+  color: var(--ink);
+  font-family: var(--font-display);
+  font-size: var(--fs-md);
+  font-weight: 600;
 }
 
 @keyframes spin {

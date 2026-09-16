@@ -31,6 +31,8 @@ export const settingsZh = {
   updatePage: "前往 Releases 页面",
   updateConfirmInstall: "即将关闭后端并运行安装程序，完成后面板会自动重新打开。继续吗？",
   updateConfirmInstallShort: "确认安装",
+  updateMaskTitle: "正在更新",
+  updateMaskTail: "安装完成后面板会自动回来，此窗口即将关闭。",
   updatePublishedNever: "发布时间未知",
 
   annotationAboveLabel: "原文置于上方",
@@ -98,6 +100,8 @@ export const settingsEn: typeof settingsZh = {
   updatePage: "Open the Releases page",
     updateConfirmInstall: "The backend will be stopped and the installer will run; the panel reopens afterwards. Continue?",
   updateConfirmInstallShort: "Confirm install",
+  updateMaskTitle: "Updating",
+  updateMaskTail: "The panel comes back on its own when the install finishes; this window closes now.",
   updatePublishedNever: "Publication date unknown",
 
   annotationAboveLabel: "Source line above",

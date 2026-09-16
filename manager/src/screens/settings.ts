@@ -509,6 +509,30 @@ export function createSettingsScreen(): HTMLElement {
     return icon("circle-dashed", "update__spin");
   }
 
+  /** The full-window mask for the install window: from 确认安装 to the moment the
+   *  installer closes this process, and — because the panel may be seen again on
+   *  a machine where the installer's [Run] relaunch raced its own exit — also
+   *  whenever a poll reports `launched`. Idempotent: renders one overlay no
+   *  matter how many polls call it. Nothing under it is pressable, which is the
+   *  contract: every visible button must be one the answer will honour. */
+  let updateMask: HTMLElement | null = null;
+  function showUpdateMask(): void {
+    if (updateMask !== null) return;
+    updateMask = el(
+      "div",
+      { class: "update-mask", role: "status" },
+      icon("spinner-gap", "update__spin"),
+      el("p", { class: "update-mask__title", text: t.settings.updateMaskTitle }),
+      el("p", { text: t.settings.updateMaskTail }),
+    );
+    document.body.appendChild(updateMask);
+  }
+
+  function removeUpdateMask(): void {
+    updateMask?.remove();
+    updateMask = null;
+  }
+
   /** When a check last answered — boot, the periodic sweep or the button all
    *  write it. Never checked: an em dash, a fact in itself. */
   function lastChecked(): string {
@@ -606,13 +630,10 @@ export function createSettingsScreen(): HTMLElement {
       // this panel is about to be closed by it — a spinner carries the wait, and
       // the installer's own [Run] brings the panel back when it is done.
       if (state.launched !== null) {
+        showUpdateMask();
         container.appendChild(spinner());
         container.appendChild(el("span", { class: "update__spinlabel", text: t.settings.updateRestarting }));
       } else {
-        // The point of no return gets one confirmation, as a two-step button —
-        // the same pattern the train screen's delete-confirm uses. `window.confirm`
-        // maps to the dialog plugin's command, which this app grants to nobody, so
-        // a native confirm here dies with `not allowed by ACL`.
         const install = button({
           label: t.settings.updateInstall,
           glyph: "download-simple",
@@ -623,11 +644,21 @@ export function createSettingsScreen(): HTMLElement {
               glyph: "warning",
               kind: "danger",
               onClick: () => {
+                // The mask goes up BEFORE the command, not after the answer:
+                // the window between 确认安装 and the installer closing this
+                // process is exactly where a second click would land, and the
+                // whole point is that nothing there is pressable anymore. If
+                // the launch fails, take the mask down — the row is honest
+                // again and 重试 is reachable.
+                showUpdateMask();
                 void updateInstall()
                   .then(() => {
                     void pollOnce();
                   })
-                  .catch((err: unknown) => toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail"));
+                  .catch((err: unknown) => {
+                    removeUpdateMask();
+                    toast(`${t.settings.updateLaunchFailed}：${ipcMessage(err)}`, "fail");
+                  });
               },
             });
             install.replaceWith(confirmed);

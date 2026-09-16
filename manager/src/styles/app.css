@@ -3364,7 +3364,15 @@ select.input {
 /* 更新: the self-update panel on 设置, drawn as a list of facts - label at the
    left edge, value at the right, the one allowed action on the last row's right.
    The panel's other sections are forms over files; this one is a state machine,
-   and each state is the same list with one row different. */
+   and each state is the same list with one row different. The body is pinned to
+   the tallest legal state's height (fact row + error line, measured 96px) and
+   content is top-aligned inside it: a state switch swaps rows, never geometry -
+   the panel that grows and shrinks per state was the whole complaint. */
+.panel__body:has(.update__fact) {
+  min-height: 96px;
+  align-content: start;
+}
+
 .update__fact {
   display: flex;
   align-items: center;

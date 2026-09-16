@@ -43,7 +43,7 @@ import {
   type UpdateState,
 } from "../ipc";
 import { toast } from "../toast";
-import { button, chip, emptyState, note, panel, pathText } from "../ui";
+import { button, chip, emptyState, note, panel, pathText, withTip } from "../ui";
 
 // IPC — hoisted into ipc.ts by the integrator
 
@@ -192,7 +192,6 @@ export function createSettingsScreen(): HTMLElement {
   const language = panel({ title: t.settings.language });
   const update = panel({
     title: UPDATE,
-    hint: t.settings.updateMirrorHint,
     actions: [
       button({
         label: t.settings.updatePage,
@@ -505,6 +504,24 @@ export function createSettingsScreen(): HTMLElement {
     return rtf.format(Math.round(hours / 24), "day");
   }
 
+  /** The compact mirror picker: a bare control, its label spoken by the shared
+   *  tooltip (hover and keyboard focus). Lives on the version row, not in a form
+   *  of its own — one fact, one control. */
+  function mirrorPicker(): HTMLElement {
+    const control = el(
+      "select",
+      { class: "select select--bare", "aria-label": t.settings.updateMirror },
+      el("option", { value: "", text: t.settings.updateMirrorAuto }),
+      ...(check?.mirrors ?? [])
+        .filter(([name]) => name !== "direct")
+        .map(([id]) => el("option", { value: id, text: id, selected: preferredMirror === id })),
+    );
+    control.addEventListener("change", () => {
+      preferredMirror = control.value === "" ? null : control.value;
+    });
+    return withTip(control, t.settings.updateMirrorHint);
+  }
+
   function renderUpdate(): void {
     if (check === null && state === null) {
       fill(
@@ -548,21 +565,22 @@ export function createSettingsScreen(): HTMLElement {
       );
     } else {
       const { release, update_available: available } = check;
+      const facts = el(
+        "div",
+        { class: "update__facts" },
+        el("span", { class: "update__date", text: published(release.published_ms) }),
+        mirrorPicker(),
+      );
       rows.push(
         el(
           "div",
           { class: "update__row" },
           currentLine,
-          el(
-            "span",
-            { class: "update__latest" },
-            el("span", { text: `${t.settings.updateLatest}: ${release.version || release.tag}` }),
-            available
-              ? chip(t.settings.updateAvailable, "run", "download-simple")
-              : chip(t.settings.updateIsNewest, "ok", "check-circle"),
-          ),
+          available
+            ? chip(t.settings.updateAvailable, "run", "download-simple")
+            : chip(t.settings.updateIsNewest, "ok", "check-circle"),
         ),
-        el("div", { class: "update__meta", text: `${release.name} · ${published(release.published_ms)}${check.via ? ` · ${t.settings.updateVia(check.via)}` : ""}` }),
+        facts,
         el("div", { class: "update__actions" }, updateControls(release, available)),
       );
     }
@@ -576,29 +594,14 @@ export function createSettingsScreen(): HTMLElement {
     fill(update.body, ...rows);
   }
 
-  /** The action row under the version line: what is possible right now, and only
-   *  that. Download while an update exists, install while one is staged, retry
-   *  after a failure — never two of these at once. */
+  /** The action row: what is possible right now, and only that. Download while an
+   *  update exists, install while one is staged, retry after a failure — never two
+   *  of these at once. */
   function updateControls(release: CheckOutcome["release"], available: boolean): HTMLElement[] {
-    const mirror = select({
-      key: "set-update-mirror",
-      label: t.settings.updateMirror,
-      hint: t.settings.updateMirrorHint,
-      value: preferredMirror,
-      options: [
-        { value: "", label: t.settings.updateMirrorAuto },
-        ...(check?.mirrors ?? []).filter(([name]) => name !== "direct").map(([id, label]) => ({ value: id, label })),
-      ],
-      save: (value) => {
-        preferredMirror = value;
-        return Promise.resolve();
-      },
-    });
-
-    const controls: HTMLElement[] = [mirror];
+    const controls: HTMLElement[] = [];
     if (state?.progress.failed === true) {
       controls.push(
-        el("span", { class: "update__error", text: `${t.settings.updateReadyFailed}：${state.progress.error}` }),
+        el("span", { class: "update__error", text: state.progress.error }),
         button({
           label: t.settings.updateRetry,
           glyph: "arrow-clockwise",
@@ -608,15 +611,8 @@ export function createSettingsScreen(): HTMLElement {
       );
       return controls;
     }
-    if (state?.progress.active === true) {
-      controls.push(
-        el("span", { class: "update__bartext", text: t.settings.updateDownloading }),
-      );
-      return controls;
-    }
     if (state?.progress.done === true && state.staged !== null) {
       controls.push(
-        el("span", { class: "update__staged", text: t.settings.updateStaged }),
         button({
           label: t.settings.updateInstall,
           glyph: "download-simple",
@@ -646,10 +642,6 @@ export function createSettingsScreen(): HTMLElement {
           onClick: () => void beginDownload(release),
         }),
       );
-    } else if (release.asset === null) {
-      controls.push(
-        note("warn", t.settings.updateNoReleases),
-      );
     }
     return controls;
   }
@@ -670,7 +662,7 @@ export function createSettingsScreen(): HTMLElement {
             ? t.settings.updateDownloadedOf(mib(progress.downloaded), progress.total > 0 ? t.settings.updateSizeUnit(mib(progress.total)) : "…")
             : progress.done
               ? t.settings.updateStaged
-              : `${t.settings.updateReadyFailed}：${progress.error}`,
+              : progress.error,
         }),
         current.launched !== null
           ? chip(t.settings.updateLaunched, "ok", "check-circle")

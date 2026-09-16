@@ -9,8 +9,31 @@
 //     change its casing would be a second source of truth for the same JSON;
 //   - every Pack field is a single word, so both conventions are byte-identical.
 
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
+
+/** True when running inside the Tauri webview. The dev-server preview
+ *  (`?vcPreview=…` in a plain browser) has no IPC bridge: every `invoke`
+ *  rejects and every `listen` would crash inside `transformCallback`. The
+ *  guards below let the preview render from fixtures instead of dying at boot. */
+const IN_TAURI = "__TAURI_INTERNALS__" in window;
+
+/** `invoke`, or a pending-forever stub outside Tauri. Preview call sites are
+ *  all either awaited (their catch renders the panel's own empty state) or
+ *  fire-and-forget (a rejected promise would surface as an unhandled-rejection
+ *  toast); a promise that never settles keeps both silent without pretending
+ *  any command succeeded. */
+export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  if (!IN_TAURI) return new Promise<T>(() => undefined);
+  return tauriInvoke<T>(cmd, args);
+}
+
+/** `listen`, or a no-op subscription outside Tauri. The no-op never fires and
+ *  its unlisten is a plain function, so callers cannot tell the difference. */
+export function listen<T>(event: string, handler: (ev: { payload: T }) => void): Promise<UnlistenFn> {
+  if (!IN_TAURI) return Promise.resolve(() => undefined);
+  return tauriListen<T>(event, handler);
+}
 
 export type PackKind = "lora-adapter" | "speaker-embedding" | "reference-audio";
 

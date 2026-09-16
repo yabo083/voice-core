@@ -813,6 +813,11 @@ export function createSettingsScreen(): HTMLElement {
       case "failed":
         check!.update_available = true;
         state!.progress = { active: false, downloaded: 8_388_608, total: 47_185_920, done: false, failed: true, error: "ghproxy.net: 连接停滞超过 30 秒" };
+        // In preview the panel can be entered directly in the failed state, so
+        // the transition-based announcement never had a "before". Fire it here;
+        // toast() dedupes, and the 12 s hold outlives the screenshot budget.
+        failureAnnounced = true;
+        toast(state!.progress.error, "fail");
         break;
       // The state this panel cannot poll for: the installer is out, the panel is
       // about to be closed by it. Rendered from `launched` being set.

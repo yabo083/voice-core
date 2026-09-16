@@ -685,6 +685,13 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     // after this command returns, so the IPC response is delivered first.
     let _ = crate::supervise::stop_stack(app.clone()).await;
 
+    // Drop the interpreter probe. The installer is about to replace the venv's
+    // files, and a detect() that runs inside that window (the panel's own
+    // bootstrap -CheckOnly did exactly this, measured) races the extract, fails
+    // with 'uv trampoline failed to spawn', and the failure would sit in the
+    // process-lifetime cache as 需重建 for an environment that is fine.
+    *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = None;
+
     let mut command = std::process::Command::new("cmd");
     command
         .arg("/C")

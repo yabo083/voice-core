@@ -8,6 +8,18 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.5] - 2026-09-17
+
+### Fixed
+
+- **A successful update showed 需重建** (measured on this machine): the panel's
+  own bootstrap -CheckOnly probe ran inside the installer's file-swap window,
+  the venv's uv trampoline failed with 'entity not found' mid-extract, and the
+  failure was cached for the process lifetime — an environment that was fine
+  presented as needing a rebuild. `update_install` now clears the probe cache
+  when it schedules the installer, the same invalidation a provision run has
+  always applied.
+
 ## [1.9.4] - 2026-09-17
 
 ### Changed

@@ -24,7 +24,9 @@ import { settleLanguageTransition, t } from "./i18n";
 import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, updateCheck, type Inventory } from "./ipc";
 import {
+  envComplete,
   inventory,
+  previewInventory,
   refreshInventory,
   stack,
   startConfigWatcher,
@@ -61,6 +63,14 @@ const NAV: NavSpec[] = [
   { id: "settings", label: t.common.navSettings, glyph: "gear" },
 ];
 
+/** The two browser preview modes. The update one (`?vcPreview=update`) exists to
+ *  put 更新 on screen in a plain browser; the deploy one (`?vcPreview=deploy`)
+ *  renders the deploy screen from the state.ts fixtures. Both skip every backend
+ *  touch — no detect, no pollers, no GitHub — so UI iteration costs no releases. */
+const PREVIEW_MODE = new URLSearchParams(window.location.search).get("vcPreview") ?? "";
+const previewUpdate = PREVIEW_MODE === "update";
+const previewDeploy = PREVIEW_MODE === "deploy";
+
 function mount(app: HTMLElement): void {
   const deploy: DeployScreen = createDeployScreen();
   const train: TrainingScreen = createTrainingScreen();
@@ -79,14 +89,18 @@ function mount(app: HTMLElement): void {
   const bar = el("div", { class: "cmdslot" });
 
   let active: ScreenId | null = null;
-  /** Set by the boot-time update check; cleared the first time 设置 is opened, because
-   *  a badge that survives its own visit is a badge that trains people to ignore it. */
+  /** Set by the boot-time update check and by the install flow; cleared when the
+   *  installer is launched (the panel that comes back is the newer version, so the
+   *  fact has expired) or when the check answers "no newer release". A badge that
+   *  survives the update it announced is a badge that trains people to ignore it. */
   let updateAvailable = false;
 
-  /** True once the engine is installed, which is what retires the Deploy tab. */
+  /** True once the whole environment passes `envComplete` - working Python, the
+   *  engine's interpreter, every model weight on disk - which is what retires the
+   *  Deploy tab and what the deploy screen's own final page waits for. One
+   *  predicate, so the rail, the landing screen and the pager cannot disagree. */
   function provisioned(): boolean {
-    const inv = inventory.value;
-    return inv !== null && inv.engine_python !== null && inv.python_ok;
+    return envComplete(inventory.value);
   }
 
   /** `focus` is false only for the screen the window opens on: nothing has been
@@ -253,21 +267,37 @@ function mount(app: HTMLElement): void {
 
   document.addEventListener("app:navigate", (ev: Event) => {
     const { to, focus } = (ev as CustomEvent<{ to: ScreenId; focus: boolean }>).detail;
-    if (to === "settings" && updateAvailable) {
-      updateAvailable = false;
-      renderRail();
-    }
     if (NAV.some((item) => item.id === to)) show(to, focus);
+  });
+
+  // The install flow announces itself: once the installer is launched, this panel
+  // is by definition outdated — the one that comes back is the newer version, so
+  // the 可更新 badge has said everything it will ever say.
+  document.addEventListener("app:update-launched", () => {
+    updateAvailable = false;
+    renderRail();
   });
 
   // Where the window opens is a statement about what is left to do: an unprovisioned
   // tree opens on Deploy, a provisioned one without voices opens on Voices, and a
-  // finished install opens on Status. The update-preview URL skips the statement:
-  // it exists to put 更新 on screen in a plain browser, nothing else.
-  const previewUpdate = new URLSearchParams(window.location.search).get("vcPreview") === "update";
+  // finished install opens on Status. The preview URLs skip the statement.
   function landing(inv: Inventory | null): ScreenId {
     if (previewUpdate) return "settings";
-    if (inv === null || inv.engine_python === null || !inv.python_ok) return "deploy";
+    if (previewDeploy) {
+      // The deploy preview lands where the fixture says: the default inventory is
+      // provisioned, so the screen opens as its transient sub-page of 状态 — the
+      // shape a real post-install visit has; `#inv=missing` lands on the rail's own
+      // deploy tab. `screen=` picks the landing directly.
+      const screen = new URLSearchParams(window.location.search).get("screen");
+      if (screen === "status" || screen === "deploy" || screen === "voices" || screen === "train" || screen === "settings") {
+        return screen;
+      }
+      return envComplete(inv) ? "status" : "deploy";
+    }
+    // `envComplete` is a boolean, not a type predicate, so the null check is its own
+    // line: envComplete(null) is false, and the deploy page is exactly the
+    // no-answer-yet landing.
+    if (inv === null || !envComplete(inv)) return "deploy";
     return inv.packs.length === 0 ? "voices" : "status";
   }
 
@@ -284,6 +314,16 @@ function mount(app: HTMLElement): void {
   });
 
   show(landing(inventory.value), false);
+
+  if (previewDeploy) {
+    // The state switch without a reload — the update preview's contract: edit the
+    // hash, the store follows, every subscriber re-renders. The screen param rides
+    // the same hash so a `#screen=` landing survives the change too.
+    window.addEventListener("hashchange", () => {
+      inventory.set(previewInventory());
+      show(landing(inventory.value), false);
+    });
+  }
 }
 
 async function boot(): Promise<void> {
@@ -299,6 +339,15 @@ async function boot(): Promise<void> {
   });
 
   void onStackState((next) => stack.set(next));
+
+  // The deploy preview feeds the fixture into the store once and stops: no pollers,
+  // no backend — the panel renders exactly what the fixture says, and the hash is
+  // the switch. The update preview's own check stays skipped in the same spirit.
+  if (previewDeploy) {
+    inventory.set(previewInventory());
+    mount(app);
+    return;
+  }
 
   // detect() decides which screen opens, so the first paint waits for it - but never
   // for long: a host that cannot answer must not leave a blank window behind.

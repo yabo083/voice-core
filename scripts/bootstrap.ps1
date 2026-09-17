@@ -107,7 +107,7 @@ param(
   # Pinned engine revision. NOT a moving branch: the worker talks to the engine through
   # `irodori_tts.inference_runtime`, and an engine that changes shape silently breaks
   # synthesis with no version to blame. Bump deliberately, then re-run the smoke test.
-  [string]$EngineRef = 'main'
+  [string]$EngineRef = 'voice-core'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -118,7 +118,7 @@ $StageOrder = @('preflight', 'engine', 'codec', 'venv', 'models', 'layout', 'smo
 
 $StageIntro = @{
   preflight = 'checking this machine'
-  engine    = 'engine source (Irodori-TTS, MIT)'
+  engine    = 'engine source (Irodori-TTS voice-core fork of Aratako/Irodori-TTS, MIT)'
   codec     = 'audio codec (DACVAE, Apache-2.0, Meta)'
   venv      = "the engine's Python environment"
   models    = 'model weights'
@@ -127,8 +127,12 @@ $StageIntro = @{
 }
 
 # Upstream sources. Both MIT/Apache-2.0 and both redistributable, but we fetch rather than
-# vendor so the user gets the real upstream and its licence file.
-$EngineGit = 'https://github.com/Aratako/Irodori-TTS.git'
+# vendor so the user gets the real upstream and its licence file. The engine is our own
+# fork of Aratako/Irodori-TTS (branch voice-core): same tree, same MIT, plus two
+# latency patches (conditional-encoding dedup, CUDA Graph replay) the upstream tree
+# does not carry. FORK.md inside the clone explains the remotes layout; origin stays
+# pristine upstream.
+$EngineGit = 'https://github.com/yabo083/Irodori-TTS.git'
 $DacvaeGit = 'https://github.com/facebookresearch/dacvae.git'
 
 # The three repos the Irodori backend loads. `Payload` is deliberately per-repo: the codec

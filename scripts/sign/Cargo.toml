@@ -1,0 +1,9 @@
+[package]
+name = "vc-sign"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Release signing helper: minisign keygen + signing for voice-core updates."
+
+[dependencies]
+minisign = "0.9.1"

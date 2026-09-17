@@ -229,9 +229,15 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 ; 安装 in came back afterwards" is the whole contract of that flow — a silent upgrade that ends
 ; with nothing running reads as the app having vanished. Interactive installs see the checkbox
 ; exactly as before; only silent ones change behaviour.
-Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; \
+;
+; The marker file: a panel born of this entry runs in the installer's poisoned environment
+; (measured: the interpreter probe's child fails instantly with 'uv trampoline: entity not
+; found', or hangs the full 90 s deadline). resume_after_update sees the marker, retries the
+; probe inside a grace window, and relaunches the panel through Explorer into a clean one.
+; The updater's own chain writes the same file before it drives the relaunch itself.
+Filename: "{cmd}"; Parameters: "/C if not exist ""{app}\data\update"" mkdir ""{app}\data\update"" & type nul > ""{app}\data\update\restart.json"" & start """" ""{app}\{#AppExeName}"""; WorkingDir: "{app}"; \
   Description: "{cm:LaunchAppDescription}"; \
-  Flags: postinstall nowait; Check: GuiPresent
+  Flags: postinstall nowait runhidden; Check: GuiPresent and not UpdaterDrivesRelaunch
 
 [UninstallRun]
 ; Ask the running voice-core runtime service to stop gracefully before deleting binaries.
@@ -257,6 +263,17 @@ const
 function GuiPresent: Boolean;
 begin
   Result := FileExists(ExpandConstant('{app}\{#AppExeName}'));
+end;
+
+{ True when the panel's updater pre-consumed the relaunch hand-off: it wrote
+  data\update\resume.json before launching this Setup, and its cmd chain starts
+  the panel through Explorer after Setup exits. The [Run] entry must then stay
+  out of the way — launching here would put a second (installer-chain) window
+  on screen that the hand-off design exists to avoid. A manual install has no
+  such file and gets the [Run] checkbox as always. }
+function UpdaterDrivesRelaunch: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\data\update\resume.json'));
 end;
 
 function WebView2Present: Boolean;

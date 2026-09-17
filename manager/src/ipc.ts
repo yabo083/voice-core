@@ -18,12 +18,50 @@ import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
  *  guards below let the preview render from fixtures instead of dying at boot. */
 const IN_TAURI = "__TAURI_INTERNALS__" in window;
 
-/** `invoke`, or a pending-forever stub outside Tauri. Preview call sites are
+/** A preview page renders from fixtures and must never touch the machine. The
+ *  guards below already keep a plain browser inert (no bridge to call through),
+ *  but a preview URL opened inside a real webview WOULD have a bridge — so the
+ *  preview flag itself is the second lock: every state-changing command refuses
+ *  here, whatever bridge is present. Read-only commands never run in a preview
+ *  either: the fixtures are the answers, and a probe against the real machine
+ *  would mix two worlds in one screen. */
+const PREVIEW = new URLSearchParams(window.location.search).has("vcPreview");
+
+/** Commands a preview may never dispatch, whatever the buttons on screen claim.
+ *  Anything that installs, starts, stops, fetches or writes would act on the
+ *  real install behind the browser window; a preview is a photograph, not a
+ *  remote control. */
+const PREVIEW_BLOCKED: Record<string, true> = {
+  provision: true,
+  cancel_provision: true,
+  start_stack: true,
+  stop_stack: true,
+  update_check: true,
+  update_download: true,
+  update_cancel: true,
+  update_install: true,
+  register_pack: true,
+  remove_pack: true,
+  import_avatar: true,
+  open_path: true,
+  pick_folder: true,
+  pick_file: true,
+};
+
+/** `invoke`, or a preview/inert stub outside Tauri. Preview call sites are
  *  all either awaited (their catch renders the panel's own empty state) or
  *  fire-and-forget (a rejected promise would surface as an unhandled-rejection
  *  toast); a promise that never settles keeps both silent without pretending
- *  any command succeeded. */
+ *  any command succeeded. A *blocked* command refuses immediately instead, so
+ *  a stray click cannot leave a spinner running forever. */
 export function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+  // Preview first, bridge second: in a plain browser there is no bridge and the
+  // pending-forever stub below is the documented behaviour, but a *blocked*
+  // command must refuse everywhere — including a preview opened inside a real
+  // webview, where a bridge exists and the old order would have dispatched it.
+  if (PREVIEW && PREVIEW_BLOCKED[cmd]) {
+    return Promise.reject(new Error(`预览模式不执行真实操作：${cmd}`));
+  }
   if (!IN_TAURI) return new Promise<T>(() => undefined);
   return tauriInvoke<T>(cmd, args);
 }
@@ -292,13 +330,15 @@ export interface CheckOutcome {
 }
 
 /** Where the one download is. `active` covers everything between the first byte
- *  and the end; `done`/`failed` are the terminal states the panel renders. */
+ *  and the end; `done`/`failed`/`cancelled` are the terminal states the panel
+ *  renders — a cancel is not a failure, the retry continues from the partial. */
 export interface DownloadProgress {
   active: boolean;
   downloaded: number;
   total: number;
   done: boolean;
   failed: boolean;
+  cancelled: boolean;
   error: string;
 }
 
@@ -325,6 +365,10 @@ export const updateStatus = (): Promise<UpdateState> => invoke("update_status");
  *  backend picks the endpoint: direct first, mirrors as fallback. */
 export const updateDownload = (asset: ReleaseAsset): Promise<void> =>
   invoke("update_download", { asset });
+
+/** Stops the running download; the partial stays as a resume point. Resolves
+ *  at once — the transfer loop reports its own terminal state by polling. */
+export const updateCancel = (): Promise<boolean> => invoke("update_cancel");
 
 /** Hands the staged installer to Setup and gets out of the way. */
 export const updateInstall = (): Promise<void> => invoke("update_install");

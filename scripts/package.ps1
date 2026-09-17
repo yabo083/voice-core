@@ -583,8 +583,34 @@ Remedy:
     $size = Format-Size (Get-Item $expectedSetupExe).Length
     Step "installer ready: $expectedSetupExe ($size)"
     Write-Host "    SHA256: $hash" -ForegroundColor Green
-    Write-Host "    NOTE: The setup executable is UNSIGNED and will trigger Windows Defender SmartScreen." -ForegroundColor Yellow
-    Write-Host "          Publish the SHA256 in GitHub Release notes for user integrity verification." -ForegroundColor Yellow
+
+    # Sign with the release key when it is present. The panel fetches
+    # `<asset>.sig` from the release (never from a mirror) and verifies it
+    # against the public key embedded in update.rs, so a tampered mirror fails
+    # closed even if GitHub metadata were faked. No key file = unsigned release,
+    # which the verifier accepts only while the migration is young.
+    $releaseKey = "$env:USERPROFILE\.voice-core\release.key"
+    $sigPath = "$expectedSetupExe.sig"
+    if (Test-Path $releaseKey) {
+      $vcSign = Join-Path $PSScriptRoot "sign\target\release\vc-sign.exe"
+      if (-not (Test-Path $vcSign)) {
+        Push-Location (Join-Path $PSScriptRoot "sign")
+        try { cargo build --release 2>&1 | Out-Null } finally { Pop-Location }
+      }
+      if (Test-Path $vcSign) {
+        & $vcSign sign $releaseKey $expectedSetupExe $sigPath
+        if ($LASTEXITCODE -eq 0) {
+          Write-Host "    Signed: $sigPath (upload beside the installer)" -ForegroundColor Green
+        } else {
+          Warn "vc-sign failed (exit $LASTEXITCODE); publishing UNSIGNED"
+        }
+      } else {
+        Warn "vc-sign not built (scripts\sign); publishing UNSIGNED"
+      }
+    } else {
+      Write-Host "    UNSIGNED: no release key at $releaseKey (SmartScreen will warn)" -ForegroundColor Yellow
+      Write-Host "          Publish the SHA256 in GitHub Release notes for user integrity verification." -ForegroundColor Yellow
+    }
   } else {
     Warn "ISCC succeeded but expected setup executable was not found at $expectedSetupExe"
   }

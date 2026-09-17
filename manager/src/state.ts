@@ -50,6 +50,77 @@ class Store<T> {
 /** null means "detect() has not answered yet", which is a different screen state
  *  from "detect() found nothing". */
 export const inventory = new Store<Inventory | null>(null);
+
+// --- deploy preview fixtures --------------------------------------------------
+//
+// Outside Tauri (`?vcPreview=deploy` in a plain browser) `detect()` rejects, and
+// the deploy screen would sit on skeletons forever — the update panel solved the
+// same problem with `?vcPreview=update` and its own fixture. These are the deploy
+// twin: two inventories covering the two renders the screen exists for, switched
+// by `#inv=` (default `ready`). Numbers are fixed so screenshots compare; paths
+// mirror the portable install layout. main.ts feeds the fixture into the store
+// when the preview is on, and every screen keeps reading the real code paths.
+export const PREVIEW_INVENTORIES: Record<"ready" | "missing", Inventory> = {
+  ready: {
+    engine_root: "E:\\NewToolBox\\voice-core\\runtime\\engine",
+    engine_python: "E:\\NewToolBox\\voice-core\\runtime\\python\\Scripts\\python.exe",
+    python_ok: true,
+    cuda: "12.8",
+    hf_cache: "E:\\NewToolBox\\voice-core\\models\\huggingface",
+    models: [
+      { repo: "Aratako/Irodori-TTS-v4.1-Small", present: true, gib: 2.86 },
+      { repo: "sbintuitions/modernbert-ja-310m", present: true, gib: 1.18 },
+      { repo: "Aratako/Semantic-DACVAE-Japanese-32dim", present: true, gib: 0.4 },
+    ],
+    packs: [
+      { id: "preview-miyu", name: "霞沢美游", kind: "lora-adapter", path: "voicepacks/miyu", engine: "irodori", languages: ["ja"], character: "霞沢美游", avatar: null },
+      { id: "preview-shun", name: "幼年瞬", kind: "lora-adapter", path: "voicepacks/shun", engine: "irodori", languages: ["ja"], character: "幼年瞬", avatar: null },
+    ],
+    runtime_json: "E:\\NewToolBox\\voice-core\\data\\runtime.json",
+    disk_free_gib: 382.5,
+    needs_gib: 0,
+  },
+  missing: {
+    engine_root: null,
+    engine_python: null,
+    python_ok: false,
+    cuda: "12.8",
+    hf_cache: null,
+    models: [
+      { repo: "Aratako/Irodori-TTS-v4.1-Small", present: false, gib: 2.86 },
+      { repo: "sbintuitions/modernbert-ja-310m", present: false, gib: 1.18 },
+      { repo: "Aratako/Semantic-DACVAE-Japanese-32dim", present: false, gib: 0.4 },
+    ],
+    packs: [],
+    runtime_json: "E:\\NewToolBox\\voice-core\\data\\runtime.json",
+    disk_free_gib: 382.5,
+    needs_gib: 4.44,
+  },
+};
+
+/** Which fixture `#inv=` names, defaulting to the provisioned tree — the state a
+ *  post-install panel actually opens on. */
+export function previewInventory(): Inventory {
+  const name = window.location.hash.replace(/^#inv=/, "");
+  return name === "missing" ? PREVIEW_INVENTORIES.missing : PREVIEW_INVENTORIES.ready;
+}
+
+/** The one definition of "this install is done": a working Python, the engine's
+ *  interpreter beside it, and every model weight the manifest expects on disk. The
+ *  rail's retire-deploy rule, the landing screen and the deploy screen's final page
+ *  all read this one predicate, so they cannot disagree about whether work remains.
+ *  An empty model manifest keeps this false - detect() always reports the engine's
+ *  weight manifest, so an empty list means the answer did not arrive in full. */
+export function envComplete(inv: Inventory | null): boolean {
+  return (
+    inv !== null &&
+    inv.engine_python !== null &&
+    inv.python_ok &&
+    inv.models.length > 0 &&
+    inv.models.every((model) => model.present)
+  );
+}
+
 export const voices = new Store<Pack[] | null>(null);
 export const status = new Store<Status>({ reachable: false, error: null, body: null });
 export const stack = new Store<StackState>({ runtime: false, presenter: false, model_loaded: false });

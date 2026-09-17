@@ -1,23 +1,25 @@
 // Deploy: the screen that answers "do I have to download 4.8 GiB again?" with no.
 //
-// One card for the environment, one for the seven bootstrap stages, and the primary
-// actions in the shell's command bar so they cannot scroll away mid-download.
+// Three pages on one horizontal track, switched with a transform transition:
 //
-// The environment card is a single list rather than the old "what we found" plus
-// "point at what you already have" pair. Those two panels described one thing - the
-// state of each dependency - and splitting them forced a paragraph of prose to
-// explain how they related. Merged, every row carries its own outcome on the right:
-// a chip when the runtime handles it, a button when the user has to. Scanning the
-// right edge is the whole instruction set.
-//
-// The stage list is a spotlight: pending rows are one muted line, the running row is
-// the only one with a message and a bar, finished rows collapse to a chip. Seven rows
-// each showing a description, a state, a bar and a re-run button is a wall, and a
-// wall is where a failure hides.
+//   准备    - the environment list. What is on this machine, what is missing, and
+//             where an existing copy can be pointed at instead of downloaded.
+//   需下载   - what an install would fetch, item by item with sizes, and - once a
+//             run starts - the seven bootstrap stages and the log. The whole
+//             provision flow lives here: nothing about the event stream moved.
+//   完成    - the handoff. It exists for the moment the environment passes
+//             envComplete(); the page says so and the screen routes itself to
+//             状态. There is nothing to press and nothing left to do here.
 //
 // The stage rows and the log head are built once and mutated in place. Rebuilding
 // them per event would move focus off a control the user was about to press, and
-// during the models stage there is roughly one event per second for an hour.
+// during the models stage there is roughly one event per second for an hour. The
+// same rule holds the pager together: switching a stage flips one attribute and
+// re-renders nothing, so a detect() answer landing mid-transition cannot flash.
+//
+// Each stage owns its own actions in the shell's pinned command bar - the bar's
+// slot is the shell's, the buttons are the page's. They cannot scroll away
+// mid-download, which is the whole reason they live below the scroll region.
 
 import { el, fill, type Child } from "../dom";
 import { t } from "../i18n";
@@ -34,13 +36,12 @@ import {
   type Inventory,
   type Stage,
 } from "../ipc";
-import { inventory, refreshInventory, refreshVoices } from "../state";
+import { envComplete, inventory, refreshInventory, refreshVoices } from "../state";
 import { toast } from "../toast";
 import {
   blockedButton,
   button,
   chip,
-  expander,
   navigate,
   note,
   panel,
@@ -50,6 +51,16 @@ import {
 } from "../ui";
 
 type StageState = "pending" | "running" | "ok" | "skip" | "fail";
+
+/** The screen's three pages, in walking order. Named apart from the bootstrap
+ *  `Stage`s, which belong to the run panel on the second page. */
+const STEPS = ["prepare", "download", "done"] as const;
+type Step = (typeof STEPS)[number];
+
+/** How long the 完成 page stays readable before the screen hands off to 状态.
+ *  Long enough to register "done", short enough that it reads as the same
+ *  motion, not as a page the user has to dismiss. */
+const HANDOFF_DELAY = 1200;
 
 /** Result-oriented, and free of the engine's vocabulary: "DACVAE" and
  *  "runtime.json" belong in the log, where someone who needs them is already
@@ -70,6 +81,13 @@ const STATE_LABEL: Record<StageState, () => string> = {
   ok: () => t.deploy.stateOk,
   skip: () => t.deploy.stateSkip,
   fail: () => t.deploy.stateFail,
+};
+
+/** The screen's own three stages, for the stepper and the pages' labels. */
+const STEP_LABEL: Record<Step, () => string> = {
+  prepare: () => t.deploy.stepPrepare,
+  download: () => t.deploy.stepDownload,
+  done: () => t.deploy.stepDone,
 };
 
 const STATE_TONE: Record<StageState, Tone> = {
@@ -154,16 +172,27 @@ export function createDeployScreen(): DeployScreen {
 
   let running = false;
   let ticker = 0;
-  let logCount = 0;
   let autoScroll = true;
   let finished = false;
+  /** True while a manual 重新检测 is in flight. The probe behind detect() costs
+   *  about five seconds, and when the answer matches what is already on screen
+   *  the re-render is pixel-identical — without a busy state the button reads
+   *  as dead. Blocked styling plus the skeleton list say "working" instead. */
+  let detecting = false;
   let transient = false;
+  let step: Step = "prepare";
+  let routeTimer = 0;
+  /** Reused steps of the last run, for the final page's meta line. */
+  let lastReused = 0;
 
-  // ------------------------------------------------------------- environment
-  const env = expander({ title: t.deploy.envCard, id: "deploy-env", open: true });
+  // ------------------------------------------------------------- page 1: prepare
+  const envPanel = panel({ title: t.deploy.envCard, hint: t.deploy.prepareHint, id: "deploy-env" });
+  const envTail = el("span", { class: "panel__tail" });
+  envPanel.root.querySelector(".panel__head")?.appendChild(envTail);
 
   /** One row, one outcome. `right` is a chip when nothing is expected of the user
-   *  and a button when something is. */
+   *  and a button when something is. Shared by both list pages: the same row
+   *  grammar on 准备 and on 需下载 is what makes them read as one conversation. */
   function envRow(glyph: IconName, label: string, body: Child[], right: Child): HTMLElement {
     return el(
       "div",
@@ -228,9 +257,9 @@ export function createDeployScreen(): DeployScreen {
 
   function renderEnv(inv: Inventory | null): void {
     if (inv === null) {
-      env.tail.textContent = t.deploy.detecting;
+      envTail.textContent = t.deploy.detecting;
       fill(
-        env.body,
+        envPanel.body,
         el(
           "div",
           { class: "skeletons", "aria-hidden": "true" },
@@ -246,16 +275,16 @@ export function createDeployScreen(): DeployScreen {
     const short = inv.needs_gib > inv.disk_free_gib;
     const pythonReady = inv.engine_python !== null && inv.python_ok;
 
-    // The tail is what makes collapsing this card safe: the one sentence worth
-    // keeping is that nothing has to be downloaded twice.
+    // The tail is what makes scanning the page fast: the one fact worth carrying is
+    // that nothing has to be downloaded twice - or that the disk cannot hold it.
     fill(
-      env.tail,
+      envTail,
       reusableGiB > 0 ? chip(t.deploy.reusable(formatGiB(reusableGiB)), "reuse", "recycle") : null,
       short ? chip(t.deploy.diskShort, "fail", "warning-circle") : null,
     );
 
     fill(
-      env.body,
+      envPanel.body,
       pickRow(
         "engine_root",
         "folder-open",
@@ -364,7 +393,7 @@ export function createDeployScreen(): DeployScreen {
     );
   }
 
-  // ------------------------------------------------------------------- stages
+  // ----------------------------------------------------------------- run stages
   const stagesPanel = panel({ title: t.deploy.stepsTitle });
   const stagesTail = el("span", { class: "panel__tail" });
   stagesPanel.root.querySelector(".panel__head")?.appendChild(stagesTail);
@@ -569,11 +598,117 @@ export function createDeployScreen(): DeployScreen {
         el("span", { class: "logline__text", text: event.message }),
       ),
     );
-    logCount += 1;
     while (logList.childElementCount > LOG_CAP && logList.firstChild !== null) {
       logList.removeChild(logList.firstChild);
     }
     if (autoScroll && !logBody.hidden) logScroll.scrollTop = logScroll.scrollHeight;
+  }
+
+  // ------------------------------------------------------------------ page 2: download
+  const installPanel = panel({ title: t.deploy.installTitle, hint: t.deploy.installHint });
+
+  function renderInstall(inv: Inventory | null): void {
+    if (inv === null) {
+      fill(
+        installPanel.body,
+        el(
+          "div",
+          { class: "skeletons", "aria-hidden": "true" },
+          [1, 2, 3].map(() => el("div", { class: "skeleton" })),
+        ),
+        el("p", { class: "sr-only", role: "status", text: t.deploy.detectingAria }),
+      );
+      return;
+    }
+
+    const missingModels = inv.models.filter((model) => !model.present);
+    const engineMissing = inv.engine_python === null;
+    const pythonMissing = engineMissing || !inv.python_ok;
+
+    fill(
+      installPanel.body,
+      engineMissing
+        ? envRow(
+            "folder-open",
+            t.deploy.engineSource,
+            [el("p", { class: "inv__miss", text: t.deploy.willFetchEngine })],
+            chip(t.deploy.notInstalled, "idle", "circle-dashed"),
+          )
+        : null,
+      pythonMissing
+        ? envRow(
+            "cpu",
+            t.deploy.pythonCuda,
+            [el("p", { class: "inv__miss", text: t.deploy.willBuildPython })],
+            engineMissing
+              ? chip(t.deploy.notInstalled, "idle", "circle-dashed")
+              : chip(t.deploy.rebuild, "warn", "warning"),
+          )
+        : null,
+      missingModels.length > 0
+        ? el(
+            "ul",
+            { class: "models" },
+            missingModels.map((model) =>
+              el(
+                "li",
+                { class: "models__item" },
+                icon("circle-dashed", "models__icon"),
+                el("code", { class: "models__repo", dir: "ltr", text: model.repo }),
+                el("span", { class: "models__size", text: formatGiB(model.gib) }),
+              ),
+            ),
+          )
+        : null,
+      // The one number the list cannot carry per row: what the whole fetch adds up
+      // to, against nothing - the free-space question stays on 准备, where the track
+      // lives.
+      inv.needs_gib > 0
+        ? el("p", { class: "disk__line", text: t.deploy.installTotal(formatGiB(inv.needs_gib)) })
+        : null,
+      engineMissing || pythonMissing || missingModels.length > 0
+        ? null
+        : note("reuse", t.deploy.nothingToFetch),
+    );
+  }
+
+  // ------------------------------------------------------------------- done page
+  const donePanel = panel({ title: t.deploy.stepDone });
+
+  function renderDone(inv: Inventory | null): void {
+    if (inv === null) {
+      fill(
+        donePanel.body,
+        el(
+          "div",
+          { class: "skeletons", "aria-hidden": "true" },
+          [1, 2, 3].map(() => el("div", { class: "skeleton" })),
+        ),
+      );
+      return;
+    }
+    if (!envComplete(inv)) {
+      // Reachable only on foot - the rail retires this screen once the environment
+      // completes, and the automatic handoff never fires early. Say what is open.
+      fill(donePanel.body, note("warn", t.deploy.stepDoneBlocked));
+      return;
+    }
+    fill(
+      donePanel.body,
+      el(
+        "div",
+        { class: "banner" },
+        icon("check-circle", "banner__icon"),
+        el("p", { class: "banner__text", text: finished ? t.deploy.doneBanner : t.deploy.envReady }),
+        el("span", {
+          class: "banner__meta",
+          text: finished && lastReused > 0 ? t.deploy.reusedCount(lastReused) : "",
+        }),
+      ),
+      // The handoff says itself: without this line, an automatic route reads as the
+      // panel acting on its own.
+      transient ? null : el("p", { class: "dpager__hint", text: t.deploy.doneHint }),
+    );
   }
 
   // --------------------------------------------------------------- command bar
@@ -582,7 +717,11 @@ export function createDeployScreen(): DeployScreen {
   const commandBar = el("div", { class: "cmdbar" }, cmdLeft, cmdRight);
 
   function renderControls(): void {
+    // Retry buttons grey out while a run is in flight, whichever page is showing.
+    for (const stage of STAGES) renderRow(stage);
+
     if (running) {
+      commandBar.hidden = false;
       fill(
         cmdLeft,
         button({
@@ -595,39 +734,74 @@ export function createDeployScreen(): DeployScreen {
       // The hint that used to be a paragraph under the stage list. It is one sentence
       // and it is only true while a run is in flight, which is exactly a tooltip.
       fill(cmdRight, blockedButton({ label: t.deploy.runningNow }, t.deploy.backgroundHint));
-    } else if (finished) {
+      return;
+    }
+
+    if (step === "done") {
+      // The normal visit's exit is the automatic handoff to 状态; a permanent
+      // button beside it would be a second answer to "what now". A transient
+      // visit (entered from 状态 after provisioning) fires no handoff by
+      // design - the user came to look, not to be routed - so its one exit is
+      // an explicit button, not a timer that never runs.
+      const exitable = transient && envComplete(inventory.value);
+      commandBar.hidden = !exitable;
       fill(cmdLeft, null);
       fill(
         cmdRight,
-        button({
-          label: t.deploy.finish,
-          kind: "primary",
-          glyph: "check",
-          onClick: (ev: MouseEvent) => navigate("status", ev),
-        }),
+        exitable
+          ? button({
+              label: t.deploy.backToStatus,
+              kind: "primary",
+              glyph: "pulse",
+              onClick: (ev: MouseEvent) => navigate("status", ev),
+            })
+          : null,
       );
-    } else {
+      return;
+    }
+
+    commandBar.hidden = false;
+    if (step === "prepare") {
       fill(
         cmdLeft,
-        button({ label: t.deploy.checkOnly, glyph: "check", onClick: () => void run(null, true) }),
-        button({
-          label: t.deploy.reDetect,
-          glyph: "arrow-clockwise",
-          kind: "quiet",
-          onClick: () => void refreshInventory(),
-        }),
+        detecting
+          ? blockedButton({ label: t.deploy.reDetect, glyph: "arrow-clockwise" }, t.deploy.detecting)
+          : button({
+              label: t.deploy.reDetect,
+              glyph: "arrow-clockwise",
+              kind: "quiet",
+              onClick: () => void recheck(),
+            }),
       );
       fill(
         cmdRight,
         button({
-          label: transient ? t.deploy.redeploy : t.deploy.startDeploy,
+          label: t.deploy.nextStage,
           kind: "primary",
-          glyph: "download-simple",
-          onClick: () => void run(null, false),
+          glyph: "caret-right",
+          onClick: () => setStep("download"),
         }),
       );
+      return;
     }
-    for (const stage of STAGES) renderRow(stage);
+
+    // The download page carries exactly one action: install what is missing.
+    // 仅检测 lives on 准备 — detection is that page's job, and re-running it
+    // here would redo the previous stage. While detect() has not answered the
+    // primary action blocks with the reason.
+    const inv = inventory.value;
+    fill(cmdLeft, null);
+    fill(
+      cmdRight,
+      inv === null
+        ? blockedButton({ label: t.deploy.installNow, glyph: "download-simple" }, t.deploy.detecting)
+        : button({
+            label: t.deploy.installNow,
+            kind: "primary",
+            glyph: "download-simple",
+            onClick: () => void run(null, false),
+          }),
+    );
   }
 
   function tick(): void {
@@ -704,6 +878,7 @@ export function createDeployScreen(): DeployScreen {
     const done = STAGES.filter((stage) => stages.get(stage)?.state === "ok").length;
     const reused = STAGES.filter((stage) => stages.get(stage)?.state === "skip").length;
     const failed = STAGES.filter((stage) => stages.get(stage)?.state === "fail");
+    lastReused = reused;
 
     if (failed.length > 0) {
       fill(
@@ -744,6 +919,10 @@ export function createDeployScreen(): DeployScreen {
     if (running) return;
     running = true;
     finished = false;
+    if (routeTimer !== 0) {
+      window.clearTimeout(routeTimer);
+      routeTimer = 0;
+    }
     fill(summary, null);
 
     // A -Only run emits events for that stage alone, so every other row must keep
@@ -753,8 +932,9 @@ export function createDeployScreen(): DeployScreen {
     } else {
       stages.set(only, blankStage());
     }
-    // The checklist did its job; the spotlight belongs on the steps now.
-    if (only === null && !checkOnly) env.setOpen(false);
+    // The run's machinery belongs to the download page; once it has started, the
+    // seven rows and the log stay there for the rest of the visit.
+    stagesPanel.root.hidden = false;
     renderControls();
     renderStagesTail();
     if (ticker === 0) ticker = window.setInterval(tick, 250);
@@ -791,15 +971,32 @@ export function createDeployScreen(): DeployScreen {
         const state = stages.get(stage)?.state;
         return state === "ok" || state === "skip";
       });
-      // "完成" is offered only for a real deployment that really finished: after a
-      // check-only pass nothing changed, so there is nothing to move on from.
+      // The handoff page is earned only by a real deployment that really finished:
+      // after a check-only pass nothing changed, so there is nothing to move on from.
       finished = ok && !checkOnly && only === null;
       renderControls();
       renderStagesTail();
-      // The run changed what is on disk; the environment card above and the Voices
-      // screen must not keep showing the pre-run picture.
+      // The run changed what is on disk; the environment page and the Voices screen
+      // must not keep showing the pre-run picture. When the answer completes the
+      // environment, the inventory subscriber below walks the screen to 完成.
       void refreshInventory();
       void refreshVoices();
+    }
+  }
+
+  /** A manual recheck: the button blocks and the environment list shows its
+   *  skeletons for the ~5 s the interpreter probe costs, then the answer —
+   *  identical or not — replaces the page. */
+  async function recheck(): Promise<void> {
+    if (detecting) return;
+    detecting = true;
+    renderControls();
+    renderEnv(null);
+    try {
+      await refreshInventory();
+    } finally {
+      detecting = false;
+      renderControls();
     }
   }
 
@@ -809,16 +1006,130 @@ export function createDeployScreen(): DeployScreen {
     stageList,
     el("div", { class: "logpane" }, el("div", { class: "logpane__head" }, logToggle, bottomBtn), logBody),
   );
+  stagesPanel.root.hidden = true;
 
+  // ----------------------------------------------------------------- the pager
+  const pages: Record<Step, HTMLElement> = {
+    prepare: el("section", { class: "dpager__page", tabindex: "-1", "aria-label": STEP_LABEL.prepare() }, envPanel.root),
+    download: el(
+      "section",
+      { class: "dpager__page", tabindex: "-1", "aria-label": STEP_LABEL.download() },
+      installPanel.root,
+      stagesPanel.root,
+    ),
+    done: el("section", { class: "dpager__page", tabindex: "-1", "aria-label": STEP_LABEL.done() }, donePanel.root),
+  };
+
+  const track = el("div", { class: "dpager__track" }, pages.prepare, pages.download, pages.done);
+  const viewport = el("div", { class: "dpager", "data-stage": "prepare" }, track);
+
+  /** Only the visible page takes focus and pointers; the off-screen pages must not
+   *  be reachable by Tab from behind the clip. */
+  function applyInert(): void {
+    for (const name of STEPS) {
+      if (name === step) pages[name].removeAttribute("inert");
+      else pages[name].setAttribute("inert", "");
+    }
+  }
+
+  /** The viewport pins itself to the active page's height, so the short final page
+   *  does not inherit the env list's and the window does not jump when a page's
+   *  content changes under a live detect. The ResizeObserver is what keeps this
+   *  true while skeletons are replaced by rows. */
+  function syncHeight(): void {
+    viewport.style.height = `${pages[step].offsetHeight}px`;
+  }
+  const pageObserver = new ResizeObserver(() => syncHeight());
+  for (const page of Object.values(pages)) pageObserver.observe(page);
+
+  const stepButtons = {} as Record<Step, HTMLButtonElement>;
+  const stepDots = {} as Record<Step, HTMLElement>;
+  const stepItems = {} as Record<Step, HTMLLIElement>;
+  const stepList = el(
+    "ol",
+    { class: "dpager__steps", "aria-label": t.deploy.title },
+    STEPS.map((name, index) => {
+      const dot = el("span", { class: "dpager__dot" }, String(index + 1));
+      const btn = el(
+        "button",
+        {
+          class: "dpager__step",
+          type: "button",
+          "data-step": name,
+          onclick: () => setStep(name),
+        },
+        dot,
+        el("span", { class: "dpager__label", text: STEP_LABEL[name]() }),
+      );
+      stepButtons[name] = btn;
+      stepDots[name] = dot;
+      stepItems[name] = el("li", {}, btn);
+      return stepItems[name];
+    }),
+  );
+
+  function renderSteps(): void {
+    // 需下载 is a conditional step, not a fixed stop: with nothing missing the
+    // page does not exist, and a chip whose only behaviour is to silently land
+    // on 完成 is a contradiction in the navigation itself. The stepper shows
+    // the stages that exist and numbers those; the page stays in the DOM and
+    // comes back the moment a detect says something is missing again.
+    const skipDownload = envComplete(inventory.value);
+    const visible: Step[] = skipDownload ? STEPS.filter((name) => name !== "download") : [...STEPS];
+    const current = visible.indexOf(step);
+    for (const name of STEPS) {
+      const pos = visible.indexOf(name);
+      stepItems[name].hidden = pos === -1;
+      if (pos === -1) continue;
+      const btn = stepButtons[name];
+      btn.classList.toggle("is-active", pos === current);
+      btn.classList.toggle("is-passed", pos < current);
+      if (pos === current) btn.setAttribute("aria-current", "step");
+      else btn.removeAttribute("aria-current");
+      fill(stepDots[name], pos < current ? icon("check") : String(pos + 1));
+    }
+  }
+
+  /** The one exit from the 完成 page: after a beat long enough to read the banner,
+   *  the screen asks the shell for 状态. Guarded against every way the moment could
+   *  have gone stale - the user moving on first, a transient visit, a new run. */
+  function beginHandoff(): void {
+    if (transient || routeTimer !== 0) return;
+    routeTimer = window.setTimeout(() => {
+      routeTimer = 0;
+      if (step === "done" && !running && !transient && !screen.hidden) navigate("status");
+    }, HANDOFF_DELAY);
+  }
+
+  function setStep(next: Step): void {
+    if (step === next) return;
+    // 需下载 is a conditional page, not a fixed stop: an environment with
+    // nothing missing has no download to offer, so walking forward from 准备
+    // lands directly on 完成. Walking backward from 完成 keeps it skipped the
+    // same way. The page only exists while something is actually missing.
+    if (next === "download" && envComplete(inventory.value)) next = "done";
+    step = next;
+    viewport.setAttribute("data-stage", next);
+    applyInert();
+    renderSteps();
+    renderControls();
+    // The slide is a CSS transition on the track; this function only moves state,
+    // so a mid-flight detect() answer cannot flash a half-built page.
+    syncHeight();
+    // Arriving at the final page with the environment already complete is the one
+    // arrival that schedules its own exit - the page carries the "going to 状态"
+    // line, so the promise has to be kept.
+    if (next === "done" && envComplete(inventory.value)) beginHandoff();
+    // Focus follows the page, not the control that caused the switch - the same
+    // rule the shell applies when a screen changes.
+    pages[next].focus({ preventScroll: true });
+  }
+
+  // -------------------------------------------------------------------- shell
   const backSlot = el("span", { class: "screen__back" });
   const title = el("h1", { class: "screen__title", tabindex: "-1", text: t.deploy.title });
 
-  void onBootstrapEvent(apply);
-  inventory.subscribe(renderEnv);
-  renderControls();
-  renderStagesTail();
-
-  const root = el(
+  const screen = el(
     "div",
     { class: "screen" },
     el(
@@ -826,8 +1137,8 @@ export function createDeployScreen(): DeployScreen {
       { class: "screen__head" },
       el("div", { class: "screen__titles" }, el("div", { class: "screen__titlerow" }, backSlot, title)),
     ),
-    env.root,
-    stagesPanel.root,
+    stepList,
+    viewport,
   );
 
   function setTransient(on: boolean): void {
@@ -847,14 +1158,45 @@ export function createDeployScreen(): DeployScreen {
         : null,
     );
     // Reopening from 状态 is a check, not a resumed deployment: the previous run's
-    // banner and its "完成" button do not belong to this visit.
+    // banner, its handoff timer and its stage do not belong to this visit.
     if (on) {
       finished = false;
+      if (routeTimer !== 0) {
+        window.clearTimeout(routeTimer);
+        routeTimer = 0;
+      }
       fill(summary, null);
-      env.setOpen(true);
+      setStep("prepare");
+      renderDone(inventory.value);
     }
     renderControls();
   }
 
-  return Object.assign(root, { commandBar, setTransient, isBusy: () => running || finished });
+  // ------------------------------------------------------------------- wiring
+  void onBootstrapEvent(apply);
+  inventory.subscribe((inv) => {
+    renderEnv(inv);
+    renderInstall(inv);
+    renderDone(inv);
+    renderControls();
+    // The download chip exists only while the answer says something is missing;
+    // the stepper must hear the same answer the pages did.
+    renderSteps();
+
+    // The environment just completed while this screen sits open - the normal shape
+    // of a run's last detect(). Walk to the final page; setStep starts the handoff.
+    // Never while a run is in flight (the run summary is still on screen), never in
+    // transient mode (the user came here from 状态 on purpose), never twice, and
+    // never while the screen is hidden - the shell's own landing() already routed
+    // the first detect() answer, and a second router would fight it.
+    if (inv === null || !envComplete(inv) || running || transient || screen.hidden || routeTimer !== 0) return;
+    setStep("done");
+  });
+  renderSteps();
+  applyInert();
+  syncHeight();
+  renderControls();
+  renderStagesTail();
+
+  return Object.assign(screen, { commandBar, setTransient, isBusy: () => running || finished });
 }

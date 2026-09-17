@@ -1,6 +1,6 @@
 [package]
 name = "voice-core-manager"
-version = "1.9.8"
+version = "0.1.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "VoiceCore desktop shell: the one launcher, owning the tray, the runtime and the subtitle presenter."
@@ -46,6 +46,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 sha2 = "0.10"
 # `fs` for the streamed write of the staged installer.
 tokio = { version = "1", features = ["time", "sync", "fs", "io-util"] }
+minisign-verify = "0.2.5"
 
 # Kernel-enforced process ownership, the same mechanism the runtime uses for its
 # engine worker: a job object with KILL_ON_JOB_CLOSE cannot leak a child and

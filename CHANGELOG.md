@@ -4,9 +4,169 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The HTTP surface carries its own version, `apiVersion`, which is bumped only on a breaking
-change to the public contract and is independent of the release version below
-(`src/service.rs:26-27`).
+## [0.1.1] - 2026-09-17
+
+### Note — version scheme reset
+
+The 1.x line is retired: history stays in the archived releases and in the changelog
+below, but the numbering starts over at 0.1.0. While the project is pre-1.0 the minor
+number is the release counter and the patch is for fixes; **bumps are conservative by
+policy** — a release has to earn its number. `0.1.0` was functionally 1.9.15 plus the
+download stop button, and the updater treated it as older than any 1.9.x, which is the
+point: installed 1.x panels will not see the 0.1.x line as an update, and this release
+is the migration point.
+
+### Added
+
+- **A download can be stopped.** The update panel's downloading state carries a
+  停止下载 button; the backend raises a flag the transfer loop checks between
+  body chunks (and before each 30 s idle window), keeps the partial on disk as a
+  resume point, and reports a `cancelled` terminal state that is not an error —
+  the retry continues from the bytes already on disk.
+
+### Fixed
+
+- **A manual install no longer opens on 部署 with a healthy environment.** The
+  installer's [Run] entry now writes a bare restart marker before launching the
+  panel, so the panel knows it was born in the installer's poisoned environment
+  and gives itself the probe grace window plus the clean Explorer relaunch —
+  the same treatment an updater-driven install always had. The 0.1.0 install
+  measured the stale-待部署 state reaching the screen within one second of boot
+  precisely because no marker file existed to vouch for the chain.
+
+## [1.9.15] - 2026-09-17
+
+### Changed
+
+- **The deploy stepper honours the conditional download page.** 需下载 is removed
+  from the steps (and the rest renumber) while the environment is complete, instead
+  of a chip whose only behaviour was to land silently on 完成; a detect that finds
+  something missing brings the chip back.
+- **The transient 完成 page gets its exit back.** A visit entered from 状态 after
+  provisioning fires no automatic handoff by design, which left the final page with
+  no exit but a small back arrow; it now carries an explicit 返回状态 button. The
+  non-transient visit keeps the automatic handoff and no button.
+- **A browser preview channel for the deploy screen** (`?vcPreview=deploy`,
+  `#inv=ready|missing`, `screen=` picks the landing): the deploy screen renders
+  from fixtures with no backend, no pollers and no GitHub calls — UI iteration no
+  longer costs a release. The update panel's `?vcPreview=update` got a sibling.
+
+## [1.9.14] - 2026-09-17
+
+### Changed
+
+- **New installs get the latency-optimized engine from setup.** bootstrap.ps1
+  now clones the fork (yabo083/Irodori-TTS, branch `voice-core` — the
+  conditional-encoding dedup + CUDA-Graph replay tree, measured 1511→636 ms
+  per utterance) instead of upstream `main`; the stage description and
+  THIRD-PARTY-NOTICES say so. `-EngineRoot` reuse and the preflight marker are
+  untouched: a user pointing at pristine upstream still installs, just slower.
+
+### Fixed
+
+- **The update download no longer stalls in bursts.** The outbound client
+  carried a 20 s total request timeout, which in reqwest covers the *body
+  stream* — every transfer past 20 s was cut mid-body and "resumed" on the
+  next mirror in further 20 s windows. That is the crawl/burst/stall cadence,
+  and a mid-body cut on a compressed stream surfaces as
+  `error decoding response body` (the ghfast.top failure was our own timeout).
+  The client now carries only a connect timeout; the asset stream is bounded
+  per-read by the 30 s idle timeout, and the two small fetches (release JSON,
+  `.sig`) set their own per-request totals.
+
+## [1.9.13] - 2026-09-17
+
+### Changed
+
+- **The deploy pages now form the one-way chain they claim to be.** 准备
+  carries a 下一阶段 button of its own; 仅检测 moved off 需下载 (detecting is
+  准备's job — redoing the previous stage's work in the next stage was a
+  loop, not a chain); and 需下载 itself is conditional: with nothing missing
+  the page does not exist, and walking forward from 准备 lands directly on
+  完成. It reappears only when the detect says something is actually missing.
+
+## [1.9.12] - 2026-09-17
+
+### Fixed
+
+- **An update no longer opens the panel three times.** The old flow let the
+  installer's [Run] bring a panel up, see the restart marker, relay itself
+  through Explorer and exit — an open-close-open flash. `update_install` now
+  pre-consumes the hand-off (`exitPid: 0`) and its cmd chain waits for the
+  installer to finish (`start /wait`) before handing the launch to Explorer;
+  the [Run] entry checks `resume.json` and skips itself for updater-driven
+  installs. One panel, born clean.
+- **重新检测 answered silently.** The probe behind `detect()` costs about five
+  seconds, and when the answer matches what is already on screen the re-render
+  is pixel-identical — the button read as dead. It now blocks with a spinner,
+  the environment list shows its skeletons for the wait, and the answer
+  replaces the page whether it changed or not.
+
+## [1.9.11] - 2026-09-17
+
+### Changed
+
+- **The deploy screen is a three-phase slide instead of one long page.**
+  准备 (what setup left on the machine, what is missing) → 需下载 (what the
+  install will bring, with 立即安装 and 仅检测 where the buttons belong) →
+  完成. A finished environment schedules its own handoff to 状态 after 1.2 s
+  and the deploy rail item retires until the environment breaks again. The
+  provision event flow — seven stage rows, cancel, log pane — moved whole.
+
+### Fixed
+
+- The 可更新 badge retired on the first visit to 设置, before any update had
+  been installed. It now retires when the install is confirmed — the moment
+  the running panel is by definition outdated and the one [Run] brings back
+  is the newer version.
+- A release without a published SHA256 is now refused, not silently accepted.
+  A hash we do not have is a hash we cannot check.
+- Downloads resume: a failed or interrupted transfer keeps a `.part` file with
+  a provenance sidecar (asset name, size, digest) and the next attempt sends
+  `Range` and re-hashes the prefix, so a resumed transfer passes the same
+  integrity gate as a fresh one.
+- An install that died mid-run (power loss, a taskkill racing the swap) no
+  longer vanishes: the restart marker records the target version, and a boot
+  short of it restores the staged package as a visible, retryable row.
+- Releases can now be signed: `scripts/sign` is a minisign keygen/signing
+  helper, package.ps1 signs when a release key is present, and the panel
+  verifies `<asset>.sig` — fetched from GitHub, never from a mirror — against
+  the embedded public key before staging. Trust moves from "GitHub said so"
+  to "only the release key could have".
+
+## [1.9.10] - 2026-09-17
+
+### Fixed
+
+- **A panel the installer's [Run] brought up spawned broken children for its
+  whole lifetime** (measured across 1.9.8 and 1.9.9 updates): the interpreter
+  probe's child failed instantly with `uv trampoline: entity not found` — and
+  with a bare interpreter substituted, hung for the probe's entire 90-second
+  deadline without ever running a line of Python. The same executable launched
+  normally probes fine in seconds; the environment, handle table, console,
+  job and injected modules of the failing process were all dumped and ruled
+  out. The poison follows the launch chain itself, so the panel now refuses to
+  live in it: a boot that consumes the update restart marker relaunches itself
+  once through Explorer — whose child is clean, measured — writes the stack's
+  resume intent to `resume.json`, and exits before its first paint. The
+  successor waits for the old pid before claiming the single-instance mutex,
+  then resumes like any second boot.
+
+## [1.9.9] - 2026-09-17
+
+### Fixed
+
+- **The first detect after an update still raced to a verdict** (measured on the
+  reference machine's 1.9.8 install): the installer's [Run] brought the panel
+  back while the machine was still settling, the first three interpreter probes
+  failed with `uv trampoline: entity not found` over twenty seconds — against a
+  venv the installer never touched — and that first failing answer routed the
+  panel to 部署 with a 需重建 badge. Caching had been fixed in 1.9.6; the
+  *routing* was still fed the raced sample. A boot that consumes the restart
+  marker now marks the moment, and probes failing within a sixty-second grace
+  window are retried (three samples, five seconds apart) before any verdict
+  reaches the screen. An environment that is genuinely broken still fails three
+  times and reports honestly; a healthy install stops lying.
 
 ## [1.9.8] - 2026-09-17
 

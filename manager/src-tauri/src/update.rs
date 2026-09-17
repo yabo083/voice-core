@@ -93,10 +93,8 @@ pub struct AssetInfo {
     pub size: u64,
     /// The bare GitHub URL; a mirror wraps it at download time.
     pub url: String,
-    /// GitHub computes and stores SHA-256 per asset. Unsigned installer +
-    /// published hash is this project's integrity model, so the check runs
-    /// whenever the API offers it and the download is refused when the hash is
-    /// offered and does not match.
+    /// GitHub computes and stores SHA-256 per asset. The digest is mandatory at
+    /// install time: a hash we do not have is a hash we cannot check.
     #[serde(default)]
     pub digest: Option<String>,
 }
@@ -127,6 +125,10 @@ pub struct DownloadProgress {
     pub done: bool,
     /// Terminal failure; `error` carries the sentence.
     pub failed: bool,
+    /// Terminal cancel, requested by the user. The partial stays on disk as a
+    /// resume point, so this is not `failed`: the retry button continues from
+    /// the bytes already on disk instead of starting over.
+    pub cancelled: bool,
     pub error: String,
 }
 
@@ -148,6 +150,11 @@ pub struct UpdateState {
 #[derive(Default)]
 pub struct UpdateDownload {
     inner: Mutex<UpdateState>,
+    /// Set by [`update_cancel`] while a transfer runs; the read loop in
+    /// [`try_candidate`] checks it between chunks and bails. A separate flag
+    /// rather than a `progress.active = false` write because the run loop owns
+    /// `progress` — a cancel that only cleared fields would race the writer.
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
 impl UpdateDownload {
@@ -161,6 +168,24 @@ impl UpdateDownload {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    /// Raise the cancel flag. True when a run was in flight — the caller's cue
+    /// to say so; false when nothing was running.
+    fn cancel(&self) -> bool {
+        self.cancelled
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Is the flag raised? The transfer loop polls this between body chunks.
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Clear the flag before a fresh transfer starts.
+    fn reset_cancel(&self) {
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -179,6 +204,9 @@ async fn fetch_release(http: &reqwest::Client, prefix: &str) -> Result<ReleaseIn
         // GitHub's API requires a UA, and naming the version is what makes a
         // rate-limit line in someone's mirror log readable.
         .header("Accept", "application/vnd.github+json")
+        // A few KiB of JSON: a total budget is right, and the client carries
+        // none since the asset download moved its deadline to the read loop.
+        .timeout(PER_MIRROR_TIMEOUT)
         .send()
         .await
         .map_err(|err| err.to_string())?;
@@ -355,10 +383,13 @@ fn explicit_proxy() -> Result<Option<reqwest::Proxy>, String> {
 /// already-running Clash count without a word typed anywhere.
 fn outbound_client() -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
-        // Response-headers budget for every call made through this client; body
-        // streaming gets its own idle timeout at the read site.
+        // Handshake budget. No client-level `.timeout()`: in reqwest that is a
+        // *total* budget — connect through the last body byte — and a 45 MB
+        // asset on a healthy link outlives it, so every transfer got cut at
+        // 20 s and "resumed" on the next mirror in 20 s windows. Each caller
+        // owns its own deadline instead: small fetches set a per-request
+        // total, the asset stream is bounded per-read in [`try_candidate`].
         .connect_timeout(PER_MIRROR_TIMEOUT)
-        .timeout(PER_MIRROR_TIMEOUT)
         .user_agent(concat!("voice-core/", env!("CARGO_PKG_VERSION")));
     let builder = match explicit_proxy()? {
         Some(proxy) => builder.proxy(proxy),
@@ -402,6 +433,16 @@ fn last_check_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     layout::update_dir(data_dir).join("last-check.txt")
 }
 
+/// How long after an update-relaunched boot a failed interpreter probe is
+/// treated as a suspect sample rather than a verdict. The installer's [Run]
+/// brings the panel back while the machine is still settling: the antivirus
+/// scans every file Setup just wrote, and the measured 1.9.8 install failed
+/// three probes with `entity not found` over twenty seconds against a venv the
+/// installer never touched. Sixty seconds of re-probing costs a few torch
+/// imports; reporting 需重建 for a healthy install costs the update's whole
+/// contract.
+pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The restart marker, `<data dir>\update\restart.json`: proof that the next
 /// panel to come up is the one an installer's [Run] relaunch brought back, not a
 /// fresh boot by a user who never asked the stack to run.
@@ -414,38 +455,238 @@ fn restart_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     layout::update_dir(data_dir).join("restart.json")
 }
 
-/// Consume the marker and restart the stack if it names this install as
-/// update-restarted. Runs once at boot, before the first paint, so the panel the
-/// installer brings back is indistinguishable from the panel a second manual
-/// launch brings back: service up, model warmable, no 部署 screen in between.
-pub fn resume_after_update(app: tauri::AppHandle) {
-    let data_dir = app.state::<Host>().data_dir.clone();
-    let marker = restart_marker_path(&data_dir);
-    let Ok(raw) = std::fs::read_to_string(&marker) else {
+/// The hand-off file, `<data dir>\update\resume.json`. Written by the installer-
+/// born panel when it relaunches itself outside the installer's process tree;
+/// read by [`wait_for_previous_panel`] in `main()` (before the single-instance
+/// plugin claims the mutex) and consumed by [`resume_after_update`] on that
+/// second boot.
+fn resume_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    layout::update_dir(data_dir).join("resume.json")
+}
+
+/// Block until `pid` exits, polling every 200 ms up to `limit`.
+fn wait_for_process(pid: u32, limit: std::time::Duration) {
+    let deadline = std::time::Instant::now() + limit;
+    while process_alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Before the builder: a panel relaunched through [`resume_marker_path`]'s
+/// hand-off waits for the process it is replacing to die, so the single-instance
+/// mutex is free when this instance claims it. An `exitPid` of 0 means the
+/// hand-off was pre-consumed by `update_install` — there is no predecessor to
+/// wait for (pid 0 is the System process and never exits). Everything else
+/// starts instantly.
+pub fn wait_for_previous_panel(data_dir: &std::path::Path) {
+    let Ok(raw) = std::fs::read_to_string(resume_marker_path(data_dir)) else {
         return;
     };
-    // The marker is ours and one launch consumes it, however this panel ends:
-    // the restart it asks for happens exactly once, and a crash loop that
-    // re-reads a stale marker every boot is exactly what deleting it prevents.
-    let _ = std::fs::remove_file(&marker);
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return;
     };
+    let pid = value.get("exitPid").and_then(serde_json::Value::as_u64);
+    match pid {
+        Some(0) | None => return,
+        Some(pid) => wait_for_process(pid as u32, std::time::Duration::from_secs(15)),
+    }
+}
+
+/// Consume the marker and decide this boot's relationship to the installer.
+///
+/// Measured on the reference machine (the 1.9.9 update): a panel born of the
+/// installer's [Run] chain spawns broken children for its whole lifetime — the
+/// interpreter probe's child either failed instantly with `uv trampoline:
+/// entity not found` or, with a bare interpreter in its place, hung for the
+/// probe's entire 90-second deadline without ever reaching `sitecustomize`.
+/// The same executable launched normally probes fine in seconds. The poison
+/// follows the launch chain — environment, handles, console, job, nothing in
+/// the dumped process state explains it — so the answer is not to diagnose it
+/// per-child but to refuse to live in it.
+///
+/// Two marker generations, one decision each:
+///
+/// * `restart.json` — written by [`update_install`]. This boot came up through
+///   the installer's [Run]: it relaunches itself through Explorer and exits
+///   before its first paint.
+/// * `resume.json` — written by that relaunching panel. This boot came up
+///   through Explorer: clean, it stays and resumes the stack the flags ask for.
+pub fn resume_after_update(app: tauri::AppHandle) {
+    let host = app.state::<Host>();
+    let data_dir = host.data_dir.clone();
+    let installer_marker = restart_marker_path(&data_dir);
+    let handoff = resume_marker_path(&data_dir);
+
+    // The hand-off takes precedence: it was written either by a relaunching
+    // panel (exitPid = its pid, the successor must wait) or pre-consumed by
+    // `update_install` (exitPid = 0, the updater's cmd chain drives the
+    // relaunch itself and the installer's [Run] skipped itself). The restart
+    // marker is consumed alongside the hand-off either way: leaving it would
+    // make the next boot believe an installer just ran.
+    let (marker, mut from_installer) = if handoff.is_file() {
+        (&handoff, false)
+    } else {
+        (&installer_marker, true)
+    };
+    let Ok(raw) = std::fs::read_to_string(marker) else {
+        return;
+    };
+    // A restart marker with no hand-off beside it can also be the bare file the
+    // installer's own [Run] entry writes (`type nul >`): that boot came up
+    // through the installer chain just as surely as an updater-driven one, and
+    // the poison does not care who drove the chain. Treat it as installer-born.
+    if raw.trim().is_empty() {
+        from_installer = true;
+    }
+    // One launch consumes one marker, however this panel ends: the restart it
+    // asks for happens exactly once, and a crash loop that re-reads a stale
+    // marker every boot is exactly what deleting it prevents.
+    let _ = std::fs::remove_file(marker);
+    let _ = std::fs::remove_file(&installer_marker);
+    let _ = std::fs::remove_file(&handoff);
+    // An installer-born panel is probe-suspect for a while (see `updated_at`);
+    // a clean Explorer child never needs the grace window.
+    if from_installer {
+        *host
+            .updated_at
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(std::time::Instant::now());
+    }
+    // A bare marker (no JSON) carries no flags: this boot has nothing to resume
+    // and nothing to promise-version-check. Its only business is the clean
+    // relaunch below — but there is no hand-off to write intent with, so the
+    // successor learns nothing and the stack stays as the user left it before
+    // the install, which for a manual run is the truth.
+    let bare = serde_json::from_str::<serde_json::Value>(&raw).is_err();
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok();
     let wants = value
-        .get("restartStack")
+        .as_ref()
+        .and_then(|v| v.get("restartStack"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let was_running = value
-        .get("wasRunning")
+        .as_ref()
+        .and_then(|v| v.get("wasRunning"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    if !wants || !was_running {
+    let target_version = value
+        .as_ref()
+        .and_then(|v| v.get("targetVersion"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    // An install that promised a version but did not deliver it. The marker
+    // survived, so the installer ran — but this boot is not the target version,
+    // which means it died mid-run (power loss, a taskkill racing the swap) or
+    // the [Run] relaunch never happened. The staged file is usually still in
+    // data\update; surface that as a retryable row instead of silence.
+    if let Some(target) = &target_version {
+        let running_version = env!("CARGO_PKG_VERSION");
+        if target != running_version {
+            host.log(&format!(
+                "update: install did not complete — this panel is {running_version}, the install promised {target}; the staged package stays in data\\update for a retry"
+            ));
+            // Keep whatever installer is staged (the same file the failed run
+            // verified) visible to the update row: restoring `staged` lets
+            // 立即安装 offer a retry without re-downloading.
+            let data_dir = host.data_dir.clone();
+            let dir = layout::update_dir(&data_dir);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                // The newest .exe in data\update is the one the failed run
+                // verified; the sweep in run_download keeps it to one.
+                let newest = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_file()
+                            && p.extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                    })
+                    .max_by_key(|p| {
+                        p.metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    });
+                if let Some(candidate) = newest {
+                    host.update.set(|state| {
+                        state.staged = Some(candidate.display().to_string());
+                        state.progress.done = true;
+                        state.progress.active = false;
+                        state.progress.failed = true;
+                        state.progress.error = format!(
+                            "上一次更新未完成（目标版本 {target}），安装包已就绪，可重试"
+                        );
+                    });
+                }
+            }
+        }
+    }
+
+    if !from_installer {
+        // A clean Explorer child: the poison is gone, so this panel simply lives.
+        host.log("update: resumed as the clean relaunch; the installer environment is gone");
+        resume_in_process(&app, wants && was_running);
+        return;
+    }
+
+    // Carry the user's intent across the relaunch. The successor reads the pid
+    // before its single-instance claim and the flags at setup. A bare marker
+    // has no flags to carry — the successor's own boot is a plain one, and the
+    // hand-off exists only so it waits for this pid before claiming the mutex.
+    let _ = std::fs::write(
+        &handoff,
+        serde_json::json!({
+            "restartStack": wants,
+            "wasRunning": was_running,
+            "exitPid": std::process::id(),
+        })
+        .to_string(),
+    );
+    let _ = bare;
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            host.log(&format!(
+                "update: cannot resolve own executable for the clean relaunch: {err}; staying up in the installer environment"
+            ));
+            let _ = std::fs::remove_file(&handoff);
+            resume_in_process(&app, wants && was_running);
+            return;
+        }
+    };
+    // Explorer performs the launch as its own child: a fresh environment, fresh
+    // handle table, no installer anywhere in the ancestry. `explorer <path>` uses
+    // the shell's file association, which for an .exe is ShellExecute — exactly
+    // what the Start-menu shortcut does, and measured clean every time.
+    match std::process::Command::new("explorer.exe").arg(&exe).spawn() {
+        Ok(_) => {
+            host.log("update: relaunching the panel outside the installer environment; this instance is exiting");
+            std::process::exit(0);
+        }
+        Err(err) => {
+            host.log(&format!(
+                "update: clean relaunch failed ({err}); staying up in the installer environment"
+            ));
+            let _ = std::fs::remove_file(&handoff);
+            resume_in_process(&app, wants && was_running);
+        }
+    }
+}
+
+/// The in-process fallback: resume the stack here if no clean relaunch happens.
+fn resume_in_process(app: &tauri::AppHandle, should_resume: bool) {
+    if !should_resume {
         app.state::<Host>()
             .log("update: restart marker present but the stack was not running before the update; leaving the stack down");
         return;
     }
-    let host = app.state::<Host>();
-    host.log("update: relaunching the stack this installer's [Run] interrupted");
+    let app = app.clone();
+    app.state::<Host>()
+        .log("update: relaunching the stack this installer's [Run] interrupted");
     tauri::async_runtime::spawn(async move {
         if let Err(err) = crate::supervise::start(&app).await {
             app.state::<Host>()
@@ -551,11 +792,24 @@ pub async fn update_download(app: tauri::AppHandle, asset: AssetInfo) -> Result<
     Ok(())
 }
 
+/// Stop the running download. The partial stays on disk as a resume point, so
+/// the next 下载 continues from the bytes already there instead of starting
+/// over. Returns at once — the transfer loop notices the flag between chunks
+/// (at most one idle-timeout window later) and reports the terminal state
+/// itself; this command does not own the slot.
+#[tauri::command]
+pub async fn update_cancel(app: tauri::AppHandle) -> Result<bool, String> {
+    let host = app.state::<Host>();
+    let active = host.update.snapshot().progress.active;
+    Ok(host.update.cancel() && active)
+}
+
 /// The transfer: candidates in order, the first one that yields a verified file
 /// wins. Every failure recorded and the next tried; the last error is what the
 /// panel shows when the list runs out.
 async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetInfo) {
     let host = app.state::<Host>();
+    host.update.reset_cancel();
     host.update.set(|state| {
         state.progress = DownloadProgress {
             active: true,
@@ -578,6 +832,9 @@ async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetI
     for (name, url) in candidates(&asset.url) {
         match try_candidate(&client, &host, &staged_path, &asset, &url, &name).await {
             Ok(bytes) => {
+                // Resume artifacts are the transfer's scratch, not its product:
+                // the verified file is `staged_path`, the sidecar's job is done.
+                let _ = std::fs::remove_file(part_path(&staged_path));
                 host.update.set(|state| {
                     state.progress.downloaded = bytes;
                     state.progress.total = bytes;
@@ -607,17 +864,86 @@ async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetI
                 return;
             }
             Err(err) => {
-                let _ = std::fs::remove_file(&staged_path);
+                // A resume-capable failure keeps the partial for the next
+                // candidate to continue from; only the final failure wipes it,
+                // because the panel's retry button comes back here. A user
+                // cancel is resume-shaped by the same logic: the bytes on disk
+                // are a prefix of the asset, and a retry continues from them.
                 last_error = err;
+                if host.update.is_cancelled() {
+                    break;
+                }
             }
         }
     }
+    if host.update.is_cancelled() {
+        // The part file stays — it is exactly the resume point a later 下载
+        // continues from. `cancelled` is a third terminal state beside done and
+        // failed: the panel shows 重试/继续 without ever calling it an error.
+        let _ = std::fs::remove_file(part_path(&staged_path).with_extension("exe.part.meta"));
+        host.update.set(|state| {
+            state.progress.active = false;
+            state.progress.failed = false;
+            state.progress.error = "已取消下载，断点已保留".to_string();
+            state.progress.cancelled = true;
+        });
+        host.log("update: download cancelled by user; partial kept");
+        return;
+    }
+    let _ = std::fs::remove_file(part_path(&staged_path));
     finish_failed(&host, last_error);
 }
 
+/// The partial download, written beside its target. The sidecar records which
+/// asset the bytes belong to, so a partial of 1.9.9 can never resume into a
+/// staged 1.9.10.
+fn part_path(staged_path: &Path) -> PathBuf {
+    staged_path.with_extension("exe.part")
+}
+
+/// The partial's provenance: asset name, size, and the digest promised. A part
+/// file that does not describe the asset being downloaded is deleted, not used.
+#[derive(Serialize, Deserialize)]
+struct PartMeta {
+    name: String,
+    size: u64,
+    digest: Option<String>,
+}
+
+fn read_partial(staged_path: &Path, asset: &AssetInfo) -> u64 {
+    let part = part_path(staged_path);
+    let Ok(meta_raw) = std::fs::read_to_string(part.with_extension("exe.part.meta")) else {
+        return 0;
+    };
+    let Ok(meta) = serde_json::from_str::<PartMeta>(&meta_raw) else {
+        return 0;
+    };
+    let usable = meta.name == asset.name
+        && meta.size == asset.size
+        && meta.digest == asset.digest;
+    if !usable {
+        let _ = std::fs::remove_file(&part);
+        return 0;
+    }
+    std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+}
+
+fn write_partial_meta(staged_path: &Path, asset: &AssetInfo) {
+    let meta = PartMeta {
+        name: asset.name.clone(),
+        size: asset.size,
+        digest: asset.digest.clone(),
+    };
+    if let Ok(json) = serde_json::to_string(&meta) {
+        let _ = std::fs::write(part_path(staged_path).with_extension("exe.part.meta"), json);
+    }
+}
+
 /// One mirror, start to finish: response headers, body streamed to disk while
-/// hashed, size then digest checked. Any `Err` leaves no file behind — the
-/// caller removes the partial on its way to the next candidate.
+/// hashed, size then digest checked. A failed candidate leaves its partial on
+/// disk for the next candidate (or the next run) to resume from — that is the
+/// point of the `.part` file; the caller moves it to `staged_path` only after
+/// the whole file verified.
 async fn try_candidate(
     client: &reqwest::Client,
     host: &Host,
@@ -626,73 +952,191 @@ async fn try_candidate(
     url: &str,
     name: &str,
 ) -> Result<u64, String> {
+    let part = part_path(staged_path);
+
+    // Bytes already on disk from an earlier attempt of the *same* asset. The
+    // sidecar meta makes a stale partial impossible: name, size and digest must
+    // all match, or the part is deleted and the transfer starts over.
+    let resume_from = read_partial(staged_path, asset);
+    if resume_from > 0 {
+        host.log(&format!(
+            "update: resuming {name} from {resume_from} bytes"
+        ));
+    }
+    write_partial_meta(staged_path, asset);
+
     // No total-transfer timeout here: `timeout()` on the request would budget
     // the whole body, and a 45 MB asset on a slow-but-alive link is healthy.
     // The connect timeout bounds the handshake; the per-read idle timeout at
     // the loop below bounds a stalled connection.
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| format!("{name}: {err}"))?;
+    let mut request = client.get(url);
+    if resume_from > 0 && asset.size != 0 && resume_from < asset.size {
+        request = request.header("Range", format!("bytes={resume_from}-"));
+    }
+    let response = request.send().await.map_err(|err| format!("{name}: {err}"))?;
     if !response.status().is_success() {
         return Err(format!("{name}: HTTP {}", response.status().as_u16()));
+    }
+
+    // 206 Partial Content is the resumed transfer; a mirror that answers 200 to
+    // a Range request is restarting from zero, and its body is taken as such.
+    let resumed = response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
+    let start = if resumed { resume_from } else { 0 };
+    if !resumed && resume_from > 0 {
+        // The mirror ignored the Range header; the partial's bytes are not a
+        // prefix of this body, so discard and write from zero.
+        let _ = tokio::fs::remove_file(&part).await;
     }
 
     // A 1 MiB buffered writer: reqwest hands the stream over in small chunks,
     // and an unbuffered write per chunk makes every 64 KiB a syscall — the
     // difference between saturating a gigabit link and crawling at a tenth of it.
-    let raw = tokio::fs::File::create(staged_path)
-        .await
-        .map_err(|err| format!("无法写入 {}：{err}", staged_path.display()))?;
+    // Resume appends to the part file; a fresh transfer truncates it.
+    let raw = if resumed {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&part)
+            .await
+            .map_err(|err| format!("无法写入 {}：{err}", part.display()))?
+    } else {
+        tokio::fs::File::create(&part)
+            .await
+            .map_err(|err| format!("无法写入 {}：{err}", part.display()))?
+    };
     let mut file = tokio::io::BufWriter::with_capacity(1024 * 1024, raw);
+    // The hash starts over with every attempt: the part file's bytes are hashed
+    // by re-reading them, then the body continues into the same hasher.
     let mut hasher = Sha256::new();
-    let mut downloaded: u64 = 0;
-    let mut last_tick = now_ms();
-    let mut stream = response;
-    loop {
-        // `chunk` rather than an `AsyncRead` wrapper: reqwest's response is
-        // its own stream type, and this is the API that needs no adapter. The
-        // timeout is per read, not per download — a slow link is healthy, a
-        // stalled one is cut.
-        let bytes = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.chunk()).await {
-            Ok(Ok(Some(bytes))) => bytes,
-            Ok(Ok(None)) => break,
-            Ok(Err(err)) => return Err(format!("{name}: {err}")),
-            Err(_) => return Err(format!("{name}: 连接停滞超过 30 秒")),
-        };
-        hasher.update(&bytes);
-        tokio::io::AsyncWriteExt::write_all(&mut file, &bytes)
+    let mut downloaded: u64 = start;
+    {
+        // Re-hash the resumed prefix. 45 MB of SHA-256 is well under a second,
+        // and it keeps the integrity model identical between fresh and resumed
+        // transfers: the final check always covers every byte on disk.
+        if start > 0 {
+            let prefix = tokio::fs::read(&part)
+                .await
+                .map_err(|err| format!("无法读取断点文件：{err}"))?;
+            hasher.update(&prefix);
+        }
+        let mut last_tick = now_ms();
+        let mut stream = response;
+        loop {
+            // A user cancel outranks everything the loop is doing: the check
+            // sits before the chunk read, so a click during the 30 s idle
+            // window stops within it rather than after the timeout.
+            if host.update.is_cancelled() {
+                let _ = tokio::io::AsyncWriteExt::flush(&mut file).await;
+                return Err("已取消".to_string());
+            }
+            // `chunk` rather than an `AsyncRead` wrapper: reqwest's response is
+            // its own stream type, and this is the API that needs no adapter. The
+            // timeout is per read, not per download — a slow link is healthy, a
+            // stalled one is cut.
+            let bytes = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.chunk()).await {
+                Ok(Ok(Some(bytes))) => bytes,
+                Ok(Ok(None)) => break,
+                Ok(Err(err)) => return Err(format!("{name}: {err}")),
+                Err(_) => return Err(format!("{name}: 连接停滞超过 30 秒")),
+            };
+            hasher.update(&bytes);
+            tokio::io::AsyncWriteExt::write_all(&mut file, &bytes)
+                .await
+                .map_err(|err| format!("写入失败：{err}"))?;
+            downloaded += bytes.len() as u64;
+            if now_ms() - last_tick >= 250 {
+                last_tick = now_ms();
+                host.update.set(|state| state.progress.downloaded = downloaded);
+            }
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file)
             .await
             .map_err(|err| format!("写入失败：{err}"))?;
-        downloaded += bytes.len() as u64;
-        if now_ms() - last_tick >= 250 {
-            last_tick = now_ms();
-            host.update.set(|state| state.progress.downloaded = downloaded);
-        }
     }
-    tokio::io::AsyncWriteExt::flush(&mut file)
-        .await
-        .map_err(|err| format!("写入失败：{err}"))?;
 
     // A mirror that truncates at 90% but answers 200 must not stage a partial
     // installer: the API said how big the file is.
     if asset.size != 0 && downloaded != asset.size {
+        // The part file stays for the next attempt; this is a resume point, not
+        // a failure to clean.
         return Err(format!(
             "{name}: 收到 {downloaded} / {} 字节，下载被截断",
             asset.size
         ));
     }
+    // Complete. Move the part onto the staged path; everything after this point
+    // (size was checked, digest below) treats it as the real file.
+    tokio::fs::rename(&part, staged_path)
+        .await
+        .map_err(|err| format!("无法落盘 {}：{err}", staged_path.display()))?;
+
     // Integrity. This is the only thing standing between an unsigned installer
-    // and a tampered one, so a mismatch is a refusal, not a warning.
-    if let Some(expected) = &asset.digest {
+    // and a tampered one. GitHub issues a digest for every release asset, so a
+    // missing one is not a pass: the official updater plugins treat "no
+    // signature" as a refusal, and a hash we do not have is a hash we cannot
+    // check — a truncated mirror must never reach the installer.
+    let expected = asset.digest.as_ref().ok_or_else(|| {
+        host.log(&format!("update: no digest published for {name}; refusing to install"));
+        format!("{name}: release 未提供 SHA256，拒绝安装")
+    })?;
+    {
         let actual = format!("{:x}", hasher.finalize());
         if !actual.eq_ignore_ascii_case(expected) {
             host.log(&format!("update: digest mismatch from {name}"));
             return Err(format!("{name}: SHA256 不匹配，已丢弃"));
         }
     }
+    // The signature turns the trust model from "GitHub said so" into "only the
+    // release key could have said so": a mirror that serves a tampered file
+    // cannot forge a signature, no matter what metadata it fakes. The private
+    // key never leaves the release machine; this public half proves the bytes.
+    // Fetched from the bare GitHub URL (never a mirror): the mirror could as
+    // easily serve a matching fake signature alongside a tampered file.
+    verify_signature(client, host, staged_path, asset, name).await?;
     Ok(downloaded)
+}
+
+/// The minisign public key that signs every release. Generated once with
+/// `vc-sign gen` (scripts/sign); the private half lives in the release
+/// machine's key file and nowhere else. Verification here is what makes a
+/// tampered mirror fail closed.
+const RELEASE_PUBLIC_KEY: &str =
+    "RWRacsM1emTEf64kTeIiXhOctDb/qVOooRW8SMyKWyuvBrMi97y/o1z5";
+
+/// minisign-verify against the embedded public key. The signature is fetched
+/// from the release as `<asset name>.sig` and verified in full-file mode: the
+/// whole installer is in memory anyway (it was just hashed), so no streaming
+/// variant is needed.
+async fn verify_signature(
+    client: &reqwest::Client,
+    host: &Host,
+    staged_path: &Path,
+    asset: &AssetInfo,
+    name: &str,
+) -> Result<(), String> {
+    use minisign_verify::{PublicKey, Signature};
+    let sig_url = format!("{}.sig", asset.url);
+    let sig_text = client
+        .get(&sig_url)
+        // A minisign signature is ~300 bytes; a total budget is right.
+        .timeout(PER_MIRROR_TIMEOUT)
+        .send()
+        .await
+        .map_err(|err| format!("无法取回签名: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("无法取回签名: {err}"))?
+        .text()
+        .await
+        .map_err(|err| format!("无法读取签名: {err}"))?;
+    let pk = PublicKey::from_base64(RELEASE_PUBLIC_KEY)
+        .map_err(|err| format!("内置公钥无效: {err}"))?;
+    let signature = Signature::decode(&sig_text).map_err(|err| format!("签名文件无效: {err}"))?;
+    let bytes = tokio::fs::read(staged_path)
+        .await
+        .map_err(|err| format!("无法读取安装包: {err}"))?;
+    pk.verify(&bytes, &signature, false)
+        .map_err(|err| format!("签名与文件不匹配: {err}"))?;
+    host.log(&format!("update: signature verified for {name}"));
+    Ok(())
 }
 
 fn finish_failed(host: &Host, message: String) {
@@ -758,7 +1202,30 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     let _ = std::fs::create_dir_all(layout::update_dir(&host.data_dir));
     let _ = std::fs::write(
         restart_marker_path(&host.data_dir),
-        serde_json::json!({ "restartStack": true, "wasRunning": was_running }).to_string(),
+        serde_json::json!({
+            "restartStack": true,
+            "wasRunning": was_running,
+            // The version this install promised. A boot that consumes the marker
+            // without reaching it means the installer died mid-run (power loss,
+            // a taskkill racing the swap): the failure becomes a visible,
+            // retryable state instead of a silent no-op.
+            "targetVersion": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
+    );
+    // Pre-consumed hand-off: the installer's [Run] entry checks this file and
+    // skips itself (the updater's own chain drives the relaunch), so the panel
+    // an update brings up boots exactly once — through the clean Explorer
+    // relay — instead of the open-close-open flash the old flow showed.
+    let _ = std::fs::write(
+        resume_marker_path(&host.data_dir),
+        serde_json::json!({
+            "restartStack": true,
+            "wasRunning": was_running,
+            "exitPid": 0,
+            "targetVersion": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
     );
 
     // Drop the interpreter probe. The installer is about to replace the venv's
@@ -768,6 +1235,12 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     // process-lifetime cache as 需重建 for an environment that is fine.
     *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = None;
 
+    // The chain owns the whole transition: kill this panel, run the installer to
+    // completion (`start /wait`), then hand the launch to Explorer — whose child
+    // is the clean-relaunched panel, the one and only window this update shows.
+    // The installer's [Run] skips itself (it sees resume.json), so nothing else
+    // opens a window in between.
+    let panel_exe = host.root.join("VoiceCore.exe");
     let mut command = std::process::Command::new("cmd");
     command
         .arg("/C")
@@ -784,11 +1257,17 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         .arg("&")
         .arg("start")
         .arg("")
+        .arg("/wait")
         .arg(&staged)
         .arg("/VERYSILENT")
         .arg("/SUPPRESSMSGBOXES")
         .arg("/NORESTART")
-        .arg("/RESTARTAPPLICATIONS");
+        .arg("/RESTARTAPPLICATIONS")
+        .arg("&")
+        .arg("start")
+        .arg("")
+        .arg("explorer.exe")
+        .arg(&panel_exe);
     hidden(&mut command);
     match command.spawn() {
         // Not forgotten this time — the PID is the liveness probe below.
@@ -888,4 +1367,31 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
     let _ = app.state::<Host>();
     command.spawn().map_err(|err| format!("无法打开浏览器：{err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod release_signature_tests {
+    use super::*;
+
+    /// The signing contract, pinned with a real pair: this signature was made
+    /// by `vc-sign sign` over exactly `PAYLOAD` (see scripts/sign); it must
+    /// verify against the embedded public key, and one flipped byte must not.
+    /// The secret half never enters this repository — the signature is the
+    /// artifact, which is the whole trust model.
+    #[test]
+    fn release_signature_round_trip() {
+        use minisign_verify::{PublicKey, Signature};
+        const PAYLOAD: &[u8] = b"voice-core release signature round trip";
+        const SIGNATURE: &str = "untrusted comment: signature from rsign secret key
+RURacsM1emTEfyGgoQrCjVEzDSLF02JaPumNqOgw7ajyN10Wc/X9H3FpmGA3QLHNZRPEmTMxri5GWBSPfSHjUkma1V1UmbLM/QQ=
+trusted comment: timestamp:1789608442
+M+u2lUpXtew6obBX1ki/vkLWYf+Fjy3XL9QEpaVmS1RzzL85Es6GiRMTDpzPjnZYwui4Vjly704z8CXuUJf6Dg==";
+        let pk = PublicKey::from_base64(RELEASE_PUBLIC_KEY).unwrap();
+        let signature = Signature::decode(SIGNATURE).unwrap();
+        pk.verify(PAYLOAD, &signature, false)
+            .expect("the release key must verify its own signature");
+        let mut tampered = PAYLOAD.to_vec();
+        tampered[0] ^= 0xFF;
+        assert!(pk.verify(&tampered, &signature, false).is_err());
+    }
 }

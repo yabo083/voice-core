@@ -37,6 +37,15 @@ use tauri::{AppHandle, Manager, RunEvent, WindowEvent};
 use host::Host;
 
 fn main() {
+    // Before anything claims the single-instance mutex: a panel relaunched by
+    // `update::resume_after_update` through Explorer waits for the installer-
+    // environment instance it replaces to exit, so the mutex hand-off is clean.
+    // Everything else passes through instantly.
+    {
+        let root = layout::install_root();
+        let data_dir = layout::resolve_data_dir(&root);
+        update::wait_for_previous_panel(&data_dir);
+    }
     let app = tauri::Builder::default()
         // First, deliberately. Everything after this line assumes it is the only
         // instance: two GUIs would mean two tray icons and two supervisors racing
@@ -112,6 +121,7 @@ fn main() {
             update::update_last_check,
             update::update_status,
             update::update_download,
+            update::update_cancel,
             update::update_install,
             update::open_url,
         ])

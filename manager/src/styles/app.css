@@ -1481,6 +1481,124 @@ select.input {
   display: none;
 }
 
+/* --- deploy pager ---------------------------------------------------------
+   The deploy screen's three stages (准备 / 需下载 / 完成) live side by side on
+   one horizontal track; switching a stage moves the track, it never rebuilds a
+   page, so a detect() answer landing mid-transition cannot flash. The viewport
+   height is pinned by the screen to the active page's own height, so the short
+   final page does not inherit the environment list's. */
+
+.dpager {
+  overflow: hidden;
+  /* Height changes when a page's content changes (skeletons to rows) or when the
+     active page changes; the track supplies the horizontal motion. */
+  transition: height var(--dur-3) var(--ease);
+}
+
+.dpager__track {
+  display: flex;
+  /* Each page keeps its own natural height: the screen pins the viewport to the
+     active page's offsetHeight, and flex's default stretch would make every page
+     report the tallest sibling's height instead. */
+  align-items: flex-start;
+  width: 300%;
+  transition: transform var(--dur-3) var(--ease);
+}
+
+.dpager__page {
+  flex: 0 0 calc(100% / 3);
+  min-width: 0;
+  display: grid;
+  gap: var(--sp-7);
+  align-content: start;
+  /* Programmatic focus target after a stage switch; never draws its own ring. */
+  outline: none;
+}
+
+/* The track is three pages wide, so one page is exactly a third of it. */
+.dpager[data-stage="download"] .dpager__track {
+  transform: translateX(-33.3333%);
+}
+
+.dpager[data-stage="done"] .dpager__track {
+  transform: translateX(-66.6667%);
+}
+
+/* The stepper: three chips over the pages, the past ones ticked, the current one
+   accented. It is also the fallback when automatic behaviour is confusing - a
+   user can always walk back to a previous stage by name. */
+.dpager__steps {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.dpager__step {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-5);
+  border: 1px solid var(--line);
+  border-radius: var(--r-chip);
+  background: transparent;
+  color: var(--ink-muted);
+  font: inherit;
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  transition:
+    background var(--dur-2) var(--ease),
+    color var(--dur-2) var(--ease),
+    border-color var(--dur-2) var(--ease);
+}
+
+.dpager__step:hover {
+  background: var(--bg-hover);
+  color: var(--ink);
+}
+
+.dpager__dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: var(--r-chip);
+  background: var(--bg-inset);
+  color: var(--ink-faint);
+  font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
+}
+
+.dpager__dot .icon {
+  width: 12px;
+  height: 12px;
+}
+
+.dpager__step.is-active {
+  border-color: var(--accent);
+  background: var(--accent-wash);
+  color: var(--accent-text);
+}
+
+.dpager__step.is-active .dpager__dot {
+  background: var(--accent);
+  color: var(--ink-on-accent);
+}
+
+/* A passed stage reads as settled, not as current: ok-wash, not accent. */
+.dpager__step.is-passed .dpager__dot {
+  background: var(--st-ok-wash);
+  color: var(--st-ok);
+}
+
+/* The line under the final page's banner that says the handoff is happening on
+  its own; without it an automatic route reads as the panel acting unbidden. */
+.dpager__hint {
+  color: var(--ink-muted);
+  font-size: var(--fs-sm);
+}
+
+
 /* --- voices --------------------------------------------------------------- */
 
 .draft-host:empty {

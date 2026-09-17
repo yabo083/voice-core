@@ -24,6 +24,7 @@ import { settleLanguageTransition, t } from "./i18n";
 import { brandMark, icon, type IconName } from "./icons";
 import { ipcMessage, onStackState, updateCheck, type Inventory } from "./ipc";
 import {
+  envComplete,
   inventory,
   refreshInventory,
   stack,
@@ -85,10 +86,12 @@ function mount(app: HTMLElement): void {
    *  survives the update it announced is a badge that trains people to ignore it. */
   let updateAvailable = false;
 
-  /** True once the engine is installed, which is what retires the Deploy tab. */
+  /** True once the whole environment passes `envComplete` - working Python, the
+   *  engine's interpreter, every model weight on disk - which is what retires the
+   *  Deploy tab and what the deploy screen's own final page waits for. One
+   *  predicate, so the rail, the landing screen and the pager cannot disagree. */
   function provisioned(): boolean {
-    const inv = inventory.value;
-    return inv !== null && inv.engine_python !== null && inv.python_ok;
+    return envComplete(inventory.value);
   }
 
   /** `focus` is false only for the screen the window opens on: nothing has been
@@ -273,7 +276,10 @@ function mount(app: HTMLElement): void {
   const previewUpdate = new URLSearchParams(window.location.search).get("vcPreview") === "update";
   function landing(inv: Inventory | null): ScreenId {
     if (previewUpdate) return "settings";
-    if (inv === null || inv.engine_python === null || !inv.python_ok) return "deploy";
+    // `envComplete` is a boolean, not a type predicate, so the null check is its own
+    // line: envComplete(null) is false, and the deploy page is exactly the
+    // no-answer-yet landing.
+    if (inv === null || !envComplete(inv)) return "deploy";
     return inv.packs.length === 0 ? "voices" : "status";
   }
 

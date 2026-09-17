@@ -50,6 +50,23 @@ class Store<T> {
 /** null means "detect() has not answered yet", which is a different screen state
  *  from "detect() found nothing". */
 export const inventory = new Store<Inventory | null>(null);
+
+/** The one definition of "this install is done": a working Python, the engine's
+ *  interpreter beside it, and every model weight the manifest expects on disk. The
+ *  rail's retire-deploy rule, the landing screen and the deploy screen's final page
+ *  all read this one predicate, so they cannot disagree about whether work remains.
+ *  An empty model manifest keeps this false - detect() always reports the engine's
+ *  weight manifest, so an empty list means the answer did not arrive in full. */
+export function envComplete(inv: Inventory | null): boolean {
+  return (
+    inv !== null &&
+    inv.engine_python !== null &&
+    inv.python_ok &&
+    inv.models.length > 0 &&
+    inv.models.every((model) => model.present)
+  );
+}
+
 export const voices = new Store<Pack[] | null>(null);
 export const status = new Store<Status>({ reachable: false, error: null, body: null });
 export const stack = new Store<StackState>({ runtime: false, presenter: false, model_loaded: false });

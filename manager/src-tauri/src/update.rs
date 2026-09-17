@@ -177,6 +177,9 @@ async fn fetch_release(http: &reqwest::Client, prefix: &str) -> Result<ReleaseIn
         // GitHub's API requires a UA, and naming the version is what makes a
         // rate-limit line in someone's mirror log readable.
         .header("Accept", "application/vnd.github+json")
+        // A few KiB of JSON: a total budget is right, and the client carries
+        // none since the asset download moved its deadline to the read loop.
+        .timeout(PER_MIRROR_TIMEOUT)
         .send()
         .await
         .map_err(|err| err.to_string())?;
@@ -353,10 +356,13 @@ fn explicit_proxy() -> Result<Option<reqwest::Proxy>, String> {
 /// already-running Clash count without a word typed anywhere.
 fn outbound_client() -> Result<reqwest::Client, String> {
     let builder = reqwest::Client::builder()
-        // Response-headers budget for every call made through this client; body
-        // streaming gets its own idle timeout at the read site.
+        // Handshake budget. No client-level `.timeout()`: in reqwest that is a
+        // *total* budget — connect through the last body byte — and a 45 MB
+        // asset on a healthy link outlives it, so every transfer got cut at
+        // 20 s and "resumed" on the next mirror in 20 s windows. Each caller
+        // owns its own deadline instead: small fetches set a per-request
+        // total, the asset stream is bounded per-read in [`try_candidate`].
         .connect_timeout(PER_MIRROR_TIMEOUT)
-        .timeout(PER_MIRROR_TIMEOUT)
         .user_agent(concat!("voice-core/", env!("CARGO_PKG_VERSION")));
     let builder = match explicit_proxy()? {
         Some(proxy) => builder.proxy(proxy),
@@ -1028,6 +1034,8 @@ async fn verify_signature(
     let sig_url = format!("{}.sig", asset.url);
     let sig_text = client
         .get(&sig_url)
+        // A minisign signature is ~300 bytes; a total budget is right.
+        .timeout(PER_MIRROR_TIMEOUT)
         .send()
         .await
         .map_err(|err| format!("无法取回签名: {err}"))?

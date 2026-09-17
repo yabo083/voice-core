@@ -79,8 +79,10 @@ function mount(app: HTMLElement): void {
   const bar = el("div", { class: "cmdslot" });
 
   let active: ScreenId | null = null;
-  /** Set by the boot-time update check; cleared the first time 设置 is opened, because
-   *  a badge that survives its own visit is a badge that trains people to ignore it. */
+  /** Set by the boot-time update check and by the install flow; cleared when the
+   *  installer is launched (the panel that comes back is the newer version, so the
+   *  fact has expired) or when the check answers "no newer release". A badge that
+   *  survives the update it announced is a badge that trains people to ignore it. */
   let updateAvailable = false;
 
   /** True once the engine is installed, which is what retires the Deploy tab. */
@@ -253,11 +255,15 @@ function mount(app: HTMLElement): void {
 
   document.addEventListener("app:navigate", (ev: Event) => {
     const { to, focus } = (ev as CustomEvent<{ to: ScreenId; focus: boolean }>).detail;
-    if (to === "settings" && updateAvailable) {
-      updateAvailable = false;
-      renderRail();
-    }
     if (NAV.some((item) => item.id === to)) show(to, focus);
+  });
+
+  // The install flow announces itself: once the installer is launched, this panel
+  // is by definition outdated — the one that comes back is the newer version, so
+  // the 可更新 badge has said everything it will ever say.
+  document.addEventListener("app:update-launched", () => {
+    updateAvailable = false;
+    renderRail();
   });
 
   // Where the window opens is a statement about what is left to do: an unprovisioned

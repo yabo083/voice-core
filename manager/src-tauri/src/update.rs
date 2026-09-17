@@ -93,10 +93,8 @@ pub struct AssetInfo {
     pub size: u64,
     /// The bare GitHub URL; a mirror wraps it at download time.
     pub url: String,
-    /// GitHub computes and stores SHA-256 per asset. Unsigned installer +
-    /// published hash is this project's integrity model, so the check runs
-    /// whenever the API offers it and the download is refused when the hash is
-    /// offered and does not match.
+    /// GitHub computes and stores SHA-256 per asset. The digest is mandatory at
+    /// install time: a hash we do not have is a hash we cannot check.
     #[serde(default)]
     pub digest: Option<String>,
 }
@@ -514,6 +512,60 @@ pub fn resume_after_update(app: tauri::AppHandle) {
         .get("wasRunning")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let target_version = value
+        .get("targetVersion")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string);
+
+    // An install that promised a version but did not deliver it. The marker
+    // survived, so the installer ran — but this boot is not the target version,
+    // which means it died mid-run (power loss, a taskkill racing the swap) or
+    // the [Run] relaunch never happened. The staged file is usually still in
+    // data\update; surface that as a retryable row instead of silence.
+    if let Some(target) = &target_version {
+        let running_version = env!("CARGO_PKG_VERSION");
+        if target != running_version {
+            host.log(&format!(
+                "update: install did not complete — this panel is {running_version}, the install promised {target}; the staged package stays in data\\update for a retry"
+            ));
+            // Keep whatever installer is staged (the same file the failed run
+            // verified) visible to the update row: restoring `staged` lets
+            // 立即安装 offer a retry without re-downloading.
+            let data_dir = host.data_dir.clone();
+            let dir = layout::update_dir(&data_dir);
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                // The newest .exe in data\update is the one the failed run
+                // verified; the sweep in run_download keeps it to one.
+                let newest = entries
+                    .flatten()
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.is_file()
+                            && p.extension()
+                                .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+                    })
+                    .max_by_key(|p| {
+                        p.metadata()
+                            .and_then(|m| m.modified())
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| d.as_millis())
+                            .unwrap_or(0)
+                    });
+                if let Some(candidate) = newest {
+                    host.update.set(|state| {
+                        state.staged = Some(candidate.display().to_string());
+                        state.progress.done = true;
+                        state.progress.active = false;
+                        state.progress.failed = true;
+                        state.progress.error = format!(
+                            "上一次更新未完成（目标版本 {target}），安装包已就绪，可重试"
+                        );
+                    });
+                }
+            }
+        }
+    }
 
     if !from_installer {
         // A clean Explorer child: the poison is gone, so this panel simply lives.
@@ -706,6 +758,9 @@ async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetI
     for (name, url) in candidates(&asset.url) {
         match try_candidate(&client, &host, &staged_path, &asset, &url, &name).await {
             Ok(bytes) => {
+                // Resume artifacts are the transfer's scratch, not its product:
+                // the verified file is `staged_path`, the sidecar's job is done.
+                let _ = std::fs::remove_file(part_path(&staged_path));
                 host.update.set(|state| {
                     state.progress.downloaded = bytes;
                     state.progress.total = bytes;
@@ -735,17 +790,67 @@ async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetI
                 return;
             }
             Err(err) => {
-                let _ = std::fs::remove_file(&staged_path);
+                // A resume-capable failure keeps the partial for the next
+                // candidate to continue from; only the final failure wipes it,
+                // because the panel's retry button comes back here.
                 last_error = err;
             }
         }
     }
+    let _ = std::fs::remove_file(part_path(&staged_path));
     finish_failed(&host, last_error);
 }
 
+/// The partial download, written beside its target. The sidecar records which
+/// asset the bytes belong to, so a partial of 1.9.9 can never resume into a
+/// staged 1.9.10.
+fn part_path(staged_path: &Path) -> PathBuf {
+    staged_path.with_extension("exe.part")
+}
+
+/// The partial's provenance: asset name, size, and the digest promised. A part
+/// file that does not describe the asset being downloaded is deleted, not used.
+#[derive(Serialize, Deserialize)]
+struct PartMeta {
+    name: String,
+    size: u64,
+    digest: Option<String>,
+}
+
+fn read_partial(staged_path: &Path, asset: &AssetInfo) -> u64 {
+    let part = part_path(staged_path);
+    let Ok(meta_raw) = std::fs::read_to_string(part.with_extension("exe.part.meta")) else {
+        return 0;
+    };
+    let Ok(meta) = serde_json::from_str::<PartMeta>(&meta_raw) else {
+        return 0;
+    };
+    let usable = meta.name == asset.name
+        && meta.size == asset.size
+        && meta.digest == asset.digest;
+    if !usable {
+        let _ = std::fs::remove_file(&part);
+        return 0;
+    }
+    std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+}
+
+fn write_partial_meta(staged_path: &Path, asset: &AssetInfo) {
+    let meta = PartMeta {
+        name: asset.name.clone(),
+        size: asset.size,
+        digest: asset.digest.clone(),
+    };
+    if let Ok(json) = serde_json::to_string(&meta) {
+        let _ = std::fs::write(part_path(staged_path).with_extension("exe.part.meta"), json);
+    }
+}
+
 /// One mirror, start to finish: response headers, body streamed to disk while
-/// hashed, size then digest checked. Any `Err` leaves no file behind — the
-/// caller removes the partial on its way to the next candidate.
+/// hashed, size then digest checked. A failed candidate leaves its partial on
+/// disk for the next candidate (or the next run) to resume from — that is the
+/// point of the `.part` file; the caller moves it to `staged_path` only after
+/// the whole file verified.
 async fn try_candidate(
     client: &reqwest::Client,
     host: &Host,
@@ -754,73 +859,182 @@ async fn try_candidate(
     url: &str,
     name: &str,
 ) -> Result<u64, String> {
+    let part = part_path(staged_path);
+
+    // Bytes already on disk from an earlier attempt of the *same* asset. The
+    // sidecar meta makes a stale partial impossible: name, size and digest must
+    // all match, or the part is deleted and the transfer starts over.
+    let resume_from = read_partial(staged_path, asset);
+    if resume_from > 0 {
+        host.log(&format!(
+            "update: resuming {name} from {resume_from} bytes"
+        ));
+    }
+    write_partial_meta(staged_path, asset);
+
     // No total-transfer timeout here: `timeout()` on the request would budget
     // the whole body, and a 45 MB asset on a slow-but-alive link is healthy.
     // The connect timeout bounds the handshake; the per-read idle timeout at
     // the loop below bounds a stalled connection.
-    let response = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|err| format!("{name}: {err}"))?;
+    let mut request = client.get(url);
+    if resume_from > 0 && asset.size != 0 && resume_from < asset.size {
+        request = request.header("Range", format!("bytes={resume_from}-"));
+    }
+    let response = request.send().await.map_err(|err| format!("{name}: {err}"))?;
     if !response.status().is_success() {
         return Err(format!("{name}: HTTP {}", response.status().as_u16()));
+    }
+
+    // 206 Partial Content is the resumed transfer; a mirror that answers 200 to
+    // a Range request is restarting from zero, and its body is taken as such.
+    let resumed = response.status() == reqwest::StatusCode::PARTIAL_CONTENT && resume_from > 0;
+    let start = if resumed { resume_from } else { 0 };
+    if !resumed && resume_from > 0 {
+        // The mirror ignored the Range header; the partial's bytes are not a
+        // prefix of this body, so discard and write from zero.
+        let _ = tokio::fs::remove_file(&part).await;
     }
 
     // A 1 MiB buffered writer: reqwest hands the stream over in small chunks,
     // and an unbuffered write per chunk makes every 64 KiB a syscall — the
     // difference between saturating a gigabit link and crawling at a tenth of it.
-    let raw = tokio::fs::File::create(staged_path)
-        .await
-        .map_err(|err| format!("无法写入 {}：{err}", staged_path.display()))?;
+    // Resume appends to the part file; a fresh transfer truncates it.
+    let raw = if resumed {
+        tokio::fs::OpenOptions::new()
+            .append(true)
+            .open(&part)
+            .await
+            .map_err(|err| format!("无法写入 {}：{err}", part.display()))?
+    } else {
+        tokio::fs::File::create(&part)
+            .await
+            .map_err(|err| format!("无法写入 {}：{err}", part.display()))?
+    };
     let mut file = tokio::io::BufWriter::with_capacity(1024 * 1024, raw);
+    // The hash starts over with every attempt: the part file's bytes are hashed
+    // by re-reading them, then the body continues into the same hasher.
     let mut hasher = Sha256::new();
-    let mut downloaded: u64 = 0;
-    let mut last_tick = now_ms();
-    let mut stream = response;
-    loop {
-        // `chunk` rather than an `AsyncRead` wrapper: reqwest's response is
-        // its own stream type, and this is the API that needs no adapter. The
-        // timeout is per read, not per download — a slow link is healthy, a
-        // stalled one is cut.
-        let bytes = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.chunk()).await {
-            Ok(Ok(Some(bytes))) => bytes,
-            Ok(Ok(None)) => break,
-            Ok(Err(err)) => return Err(format!("{name}: {err}")),
-            Err(_) => return Err(format!("{name}: 连接停滞超过 30 秒")),
-        };
-        hasher.update(&bytes);
-        tokio::io::AsyncWriteExt::write_all(&mut file, &bytes)
+    let mut downloaded: u64 = start;
+    {
+        // Re-hash the resumed prefix. 45 MB of SHA-256 is well under a second,
+        // and it keeps the integrity model identical between fresh and resumed
+        // transfers: the final check always covers every byte on disk.
+        if start > 0 {
+            let prefix = tokio::fs::read(&part)
+                .await
+                .map_err(|err| format!("无法读取断点文件：{err}"))?;
+            hasher.update(&prefix);
+        }
+        let mut last_tick = now_ms();
+        let mut stream = response;
+        loop {
+            // `chunk` rather than an `AsyncRead` wrapper: reqwest's response is
+            // its own stream type, and this is the API that needs no adapter. The
+            // timeout is per read, not per download — a slow link is healthy, a
+            // stalled one is cut.
+            let bytes = match tokio::time::timeout(DOWNLOAD_IDLE_TIMEOUT, stream.chunk()).await {
+                Ok(Ok(Some(bytes))) => bytes,
+                Ok(Ok(None)) => break,
+                Ok(Err(err)) => return Err(format!("{name}: {err}")),
+                Err(_) => return Err(format!("{name}: 连接停滞超过 30 秒")),
+            };
+            hasher.update(&bytes);
+            tokio::io::AsyncWriteExt::write_all(&mut file, &bytes)
+                .await
+                .map_err(|err| format!("写入失败：{err}"))?;
+            downloaded += bytes.len() as u64;
+            if now_ms() - last_tick >= 250 {
+                last_tick = now_ms();
+                host.update.set(|state| state.progress.downloaded = downloaded);
+            }
+        }
+        tokio::io::AsyncWriteExt::flush(&mut file)
             .await
             .map_err(|err| format!("写入失败：{err}"))?;
-        downloaded += bytes.len() as u64;
-        if now_ms() - last_tick >= 250 {
-            last_tick = now_ms();
-            host.update.set(|state| state.progress.downloaded = downloaded);
-        }
     }
-    tokio::io::AsyncWriteExt::flush(&mut file)
-        .await
-        .map_err(|err| format!("写入失败：{err}"))?;
 
     // A mirror that truncates at 90% but answers 200 must not stage a partial
     // installer: the API said how big the file is.
     if asset.size != 0 && downloaded != asset.size {
+        // The part file stays for the next attempt; this is a resume point, not
+        // a failure to clean.
         return Err(format!(
             "{name}: 收到 {downloaded} / {} 字节，下载被截断",
             asset.size
         ));
     }
+    // Complete. Move the part onto the staged path; everything after this point
+    // (size was checked, digest below) treats it as the real file.
+    tokio::fs::rename(&part, staged_path)
+        .await
+        .map_err(|err| format!("无法落盘 {}：{err}", staged_path.display()))?;
+
     // Integrity. This is the only thing standing between an unsigned installer
-    // and a tampered one, so a mismatch is a refusal, not a warning.
-    if let Some(expected) = &asset.digest {
+    // and a tampered one. GitHub issues a digest for every release asset, so a
+    // missing one is not a pass: the official updater plugins treat "no
+    // signature" as a refusal, and a hash we do not have is a hash we cannot
+    // check — a truncated mirror must never reach the installer.
+    let expected = asset.digest.as_ref().ok_or_else(|| {
+        host.log(&format!("update: no digest published for {name}; refusing to install"));
+        format!("{name}: release 未提供 SHA256，拒绝安装")
+    })?;
+    {
         let actual = format!("{:x}", hasher.finalize());
         if !actual.eq_ignore_ascii_case(expected) {
             host.log(&format!("update: digest mismatch from {name}"));
             return Err(format!("{name}: SHA256 不匹配，已丢弃"));
         }
     }
+    // The signature turns the trust model from "GitHub said so" into "only the
+    // release key could have said so": a mirror that serves a tampered file
+    // cannot forge a signature, no matter what metadata it fakes. The private
+    // key never leaves the release machine; this public half proves the bytes.
+    // Fetched from the bare GitHub URL (never a mirror): the mirror could as
+    // easily serve a matching fake signature alongside a tampered file.
+    verify_signature(client, host, staged_path, asset, name).await?;
     Ok(downloaded)
+}
+
+/// The minisign public key that signs every release. Generated once with
+/// `vc-sign gen` (scripts/sign); the private half lives in the release
+/// machine's key file and nowhere else. Verification here is what makes a
+/// tampered mirror fail closed.
+const RELEASE_PUBLIC_KEY: &str =
+    "RWRacsM1emTEf64kTeIiXhOctDb/qVOooRW8SMyKWyuvBrMi97y/o1z5";
+
+/// minisign-verify against the embedded public key. The signature is fetched
+/// from the release as `<asset name>.sig` and verified in full-file mode: the
+/// whole installer is in memory anyway (it was just hashed), so no streaming
+/// variant is needed.
+async fn verify_signature(
+    client: &reqwest::Client,
+    host: &Host,
+    staged_path: &Path,
+    asset: &AssetInfo,
+    name: &str,
+) -> Result<(), String> {
+    use minisign_verify::{PublicKey, Signature};
+    let sig_url = format!("{}.sig", asset.url);
+    let sig_text = client
+        .get(&sig_url)
+        .send()
+        .await
+        .map_err(|err| format!("无法取回签名: {err}"))?
+        .error_for_status()
+        .map_err(|err| format!("无法取回签名: {err}"))?
+        .text()
+        .await
+        .map_err(|err| format!("无法读取签名: {err}"))?;
+    let pk = PublicKey::from_base64(RELEASE_PUBLIC_KEY)
+        .map_err(|err| format!("内置公钥无效: {err}"))?;
+    let signature = Signature::decode(&sig_text).map_err(|err| format!("签名文件无效: {err}"))?;
+    let bytes = tokio::fs::read(staged_path)
+        .await
+        .map_err(|err| format!("无法读取安装包: {err}"))?;
+    pk.verify(&bytes, &signature, false)
+        .map_err(|err| format!("签名与文件不匹配: {err}"))?;
+    host.log(&format!("update: signature verified for {name}"));
+    Ok(())
 }
 
 fn finish_failed(host: &Host, message: String) {
@@ -886,7 +1100,16 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     let _ = std::fs::create_dir_all(layout::update_dir(&host.data_dir));
     let _ = std::fs::write(
         restart_marker_path(&host.data_dir),
-        serde_json::json!({ "restartStack": true, "wasRunning": was_running }).to_string(),
+        serde_json::json!({
+            "restartStack": true,
+            "wasRunning": was_running,
+            // The version this install promised. A boot that consumes the marker
+            // without reaching it means the installer died mid-run (power loss,
+            // a taskkill racing the swap): the failure becomes a visible,
+            // retryable state instead of a silent no-op.
+            "targetVersion": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
     );
 
     // Drop the interpreter probe. The installer is about to replace the venv's
@@ -1016,4 +1239,31 @@ pub async fn open_url(app: tauri::AppHandle, url: String) -> Result<(), String> 
     let _ = app.state::<Host>();
     command.spawn().map_err(|err| format!("无法打开浏览器：{err}"))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod release_signature_tests {
+    use super::*;
+
+    /// The signing contract, pinned with a real pair: this signature was made
+    /// by `vc-sign sign` over exactly `PAYLOAD` (see scripts/sign); it must
+    /// verify against the embedded public key, and one flipped byte must not.
+    /// The secret half never enters this repository — the signature is the
+    /// artifact, which is the whole trust model.
+    #[test]
+    fn release_signature_round_trip() {
+        use minisign_verify::{PublicKey, Signature};
+        const PAYLOAD: &[u8] = b"voice-core release signature round trip";
+        const SIGNATURE: &str = "untrusted comment: signature from rsign secret key
+RURacsM1emTEfyGgoQrCjVEzDSLF02JaPumNqOgw7ajyN10Wc/X9H3FpmGA3QLHNZRPEmTMxri5GWBSPfSHjUkma1V1UmbLM/QQ=
+trusted comment: timestamp:1789608442
+M+u2lUpXtew6obBX1ki/vkLWYf+Fjy3XL9QEpaVmS1RzzL85Es6GiRMTDpzPjnZYwui4Vjly704z8CXuUJf6Dg==";
+        let pk = PublicKey::from_base64(RELEASE_PUBLIC_KEY).unwrap();
+        let signature = Signature::decode(SIGNATURE).unwrap();
+        pk.verify(PAYLOAD, &signature, false)
+            .expect("the release key must verify its own signature");
+        let mut tampered = PAYLOAD.to_vec();
+        tampered[0] ^= 0xFF;
+        assert!(pk.verify(&tampered, &signature, false).is_err());
+    }
 }

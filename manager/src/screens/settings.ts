@@ -651,6 +651,10 @@ export function createSettingsScreen(): HTMLElement {
                 // the launch fails, take the mask down — the row is honest
                 // again and 重试 is reachable.
                 showUpdateMask();
+                // The badge retires with the announcement: from this click the
+                // running panel is by definition outdated, and the one [Run]
+                // brings back is the newer version.
+                document.dispatchEvent(new CustomEvent("app:update-launched"));
                 void updateInstall()
                   .then(() => {
                     void pollOnce();

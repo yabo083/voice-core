@@ -46,6 +46,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 sha2 = "0.10"
 # `fs` for the streamed write of the staged installer.
 tokio = { version = "1", features = ["time", "sync", "fs", "io-util"] }
+minisign-verify = "0.2.5"
 
 # Kernel-enforced process ownership, the same mechanism the runtime uses for its
 # engine worker: a job object with KILL_ON_JOB_CLOSE cannot leak a child and

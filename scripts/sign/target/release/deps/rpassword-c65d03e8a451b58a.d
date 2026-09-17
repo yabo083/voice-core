@@ -1,0 +1,11 @@
+E:\Codes\AI\agent项目\littlecases\voice-core-v2\scripts\sign\target\release\deps\rpassword-c65d03e8a451b58a.d: C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\lib.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\config.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\feedback.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\windows.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\utf8.rs
+
+E:\Codes\AI\agent项目\littlecases\voice-core-v2\scripts\sign\target\release\deps\librpassword-c65d03e8a451b58a.rlib: C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\lib.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\config.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\feedback.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\windows.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\utf8.rs
+
+E:\Codes\AI\agent项目\littlecases\voice-core-v2\scripts\sign\target\release\deps\librpassword-c65d03e8a451b58a.rmeta: C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\lib.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\config.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\feedback.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\windows.rs C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\utf8.rs
+
+C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\lib.rs:
+C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\config.rs:
+C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\feedback.rs:
+C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\windows.rs:
+C:\Users\yabo\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rpassword-7.5.4\src\utf8.rs:

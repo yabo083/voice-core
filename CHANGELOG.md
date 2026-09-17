@@ -4,9 +4,25 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-The HTTP surface carries its own version, `apiVersion`, which is bumped only on a breaking
-change to the public contract and is independent of the release version below
-(`src/service.rs:26-27`).
+## [0.1.0] - 2026-09-17
+
+### Note — version scheme reset
+
+The 1.x line is retired: history stays in the archived releases and in the changelog
+below, but the numbering starts over at 0.1.0. While the project is pre-1.0 the minor
+number is the release counter and the patch is for fixes; **bumps are conservative by
+policy** — a release has to earn its number. `0.1.0` is functionally 1.9.15 plus the
+download stop button, and the updater treats it as older than any 1.9.x, which is the
+point: installed 1.x panels will not see 0.1.0 as an update, and the first 0.1.x
+release after this one is the migration point.
+
+### Added
+
+- **A download can be stopped.** The update panel's downloading state carries a
+  停止下载 button; the backend raises a flag the transfer loop checks between
+  body chunks (and before each 30 s idle window), keeps the partial on disk as a
+  resume point, and reports a `cancelled` terminal state that is not an error —
+  the retry continues from the bytes already on disk.
 
 ## [1.9.15] - 2026-09-17
 

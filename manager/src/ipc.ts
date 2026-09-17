@@ -38,6 +38,7 @@ const PREVIEW_BLOCKED: Record<string, true> = {
   stop_stack: true,
   update_check: true,
   update_download: true,
+  update_cancel: true,
   update_install: true,
   register_pack: true,
   remove_pack: true,

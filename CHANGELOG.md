@@ -8,6 +8,29 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.14] - 2026-09-17
+
+### Changed
+
+- **New installs get the latency-optimized engine from setup.** bootstrap.ps1
+  now clones the fork (yabo083/Irodori-TTS, branch `voice-core` — the
+  conditional-encoding dedup + CUDA-Graph replay tree, measured 1511→636 ms
+  per utterance) instead of upstream `main`; the stage description and
+  THIRD-PARTY-NOTICES say so. `-EngineRoot` reuse and the preflight marker are
+  untouched: a user pointing at pristine upstream still installs, just slower.
+
+### Fixed
+
+- **The update download no longer stalls in bursts.** The outbound client
+  carried a 20 s total request timeout, which in reqwest covers the *body
+  stream* — every transfer past 20 s was cut mid-body and "resumed" on the
+  next mirror in further 20 s windows. That is the crawl/burst/stall cadence,
+  and a mid-body cut on a compressed stream surfaces as
+  `error decoding response body` (the ghfast.top failure was our own timeout).
+  The client now carries only a connect timeout; the asset stream is bounded
+  per-read by the 30 s idle timeout, and the two small fetches (release JSON,
+  `.sig`) set their own per-request totals.
+
 ## [1.9.13] - 2026-09-17
 
 ### Changed

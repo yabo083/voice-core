@@ -8,6 +8,17 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.13] - 2026-09-17
+
+### Changed
+
+- **The deploy pages now form the one-way chain they claim to be.** 准备
+  carries a 下一阶段 button of its own; 仅检测 moved off 需下载 (detecting is
+  准备's job — redoing the previous stage's work in the next stage was a
+  loop, not a chain); and 需下载 itself is conditional: with nothing missing
+  the page does not exist, and walking forward from 准备 lands directly on
+  完成. It reappears only when the detect says something is actually missing.
+
 ## [1.9.12] - 2026-09-17
 
 ### Fixed

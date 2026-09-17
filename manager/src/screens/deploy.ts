@@ -759,37 +759,34 @@ export function createDeployScreen(): DeployScreen {
               onClick: () => void recheck(),
             }),
       );
-      fill(cmdRight, null);
+      fill(
+        cmdRight,
+        button({
+          label: t.deploy.nextStage,
+          kind: "primary",
+          glyph: "caret-right",
+          onClick: () => setStep("download"),
+        }),
+      );
       return;
     }
 
-    // The download page. While detect() has not answered, both actions are blocked
-    // with the reason; once it has, the primary action is whichever of the two makes
-    // sense: install what is missing, or - when nothing is - walk on to 完成.
+    // The download page carries exactly one action: install what is missing.
+    // 仅检测 lives on 准备 — detection is that page's job, and re-running it
+    // here would redo the previous stage. While detect() has not answered the
+    // primary action blocks with the reason.
     const inv = inventory.value;
-    fill(
-      cmdLeft,
-      inv === null
-        ? blockedButton({ label: t.deploy.checkOnly, glyph: "check" }, t.deploy.detecting)
-        : button({ label: t.deploy.checkOnly, glyph: "check", onClick: () => void run(null, true) }),
-    );
+    fill(cmdLeft, null);
     fill(
       cmdRight,
-      envComplete(inv)
-        ? button({
-            label: t.deploy.nextStage,
+      inv === null
+        ? blockedButton({ label: t.deploy.installNow, glyph: "download-simple" }, t.deploy.detecting)
+        : button({
+            label: t.deploy.installNow,
             kind: "primary",
-            glyph: "caret-right",
-            onClick: () => setStep("done"),
-          })
-        : inv === null
-          ? blockedButton({ label: t.deploy.installNow, glyph: "download-simple" }, t.deploy.detecting)
-          : button({
-              label: t.deploy.installNow,
-              kind: "primary",
-              glyph: "download-simple",
-              onClick: () => void run(null, false),
-            }),
+            glyph: "download-simple",
+            onClick: () => void run(null, false),
+          }),
     );
   }
 
@@ -1080,6 +1077,11 @@ export function createDeployScreen(): DeployScreen {
 
   function setStep(next: Step): void {
     if (step === next) return;
+    // 需下载 is a conditional page, not a fixed stop: an environment with
+    // nothing missing has no download to offer, so walking forward from 准备
+    // lands directly on 完成. Walking backward from 完成 keeps it skipped the
+    // same way. The page only exists while something is actually missing.
+    if (next === "download" && envComplete(inventory.value)) next = "done";
     step = next;
     viewport.setAttribute("data-stage", next);
     applyInert();

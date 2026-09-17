@@ -1,6 +1,6 @@
 [package]
 name = "voice-core"
-version = "1.9.12"
+version = "1.9.13"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Local-first TTS runtime for AI agents and humans: one API surface, many frontends."

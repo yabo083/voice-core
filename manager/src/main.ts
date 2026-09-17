@@ -26,6 +26,7 @@ import { ipcMessage, onStackState, updateCheck, type Inventory } from "./ipc";
 import {
   envComplete,
   inventory,
+  previewInventory,
   refreshInventory,
   stack,
   startConfigWatcher,
@@ -61,6 +62,14 @@ const NAV: NavSpec[] = [
   { id: "train", label: t.common.navTrain, glyph: "magic-wand" },
   { id: "settings", label: t.common.navSettings, glyph: "gear" },
 ];
+
+/** The two browser preview modes. The update one (`?vcPreview=update`) exists to
+ *  put 更新 on screen in a plain browser; the deploy one (`?vcPreview=deploy`)
+ *  renders the deploy screen from the state.ts fixtures. Both skip every backend
+ *  touch — no detect, no pollers, no GitHub — so UI iteration costs no releases. */
+const PREVIEW_MODE = new URLSearchParams(window.location.search).get("vcPreview") ?? "";
+const previewUpdate = PREVIEW_MODE === "update";
+const previewDeploy = PREVIEW_MODE === "deploy";
 
 function mount(app: HTMLElement): void {
   const deploy: DeployScreen = createDeployScreen();
@@ -271,11 +280,20 @@ function mount(app: HTMLElement): void {
 
   // Where the window opens is a statement about what is left to do: an unprovisioned
   // tree opens on Deploy, a provisioned one without voices opens on Voices, and a
-  // finished install opens on Status. The update-preview URL skips the statement:
-  // it exists to put 更新 on screen in a plain browser, nothing else.
-  const previewUpdate = new URLSearchParams(window.location.search).get("vcPreview") === "update";
+  // finished install opens on Status. The preview URLs skip the statement.
   function landing(inv: Inventory | null): ScreenId {
     if (previewUpdate) return "settings";
+    if (previewDeploy) {
+      // The deploy preview lands where the fixture says: the default inventory is
+      // provisioned, so the screen opens as its transient sub-page of 状态 — the
+      // shape a real post-install visit has; `#inv=missing` lands on the rail's own
+      // deploy tab. `screen=` picks the landing directly.
+      const screen = new URLSearchParams(window.location.search).get("screen");
+      if (screen === "status" || screen === "deploy" || screen === "voices" || screen === "train" || screen === "settings") {
+        return screen;
+      }
+      return envComplete(inv) ? "status" : "deploy";
+    }
     // `envComplete` is a boolean, not a type predicate, so the null check is its own
     // line: envComplete(null) is false, and the deploy page is exactly the
     // no-answer-yet landing.
@@ -296,6 +314,16 @@ function mount(app: HTMLElement): void {
   });
 
   show(landing(inventory.value), false);
+
+  if (previewDeploy) {
+    // The state switch without a reload — the update preview's contract: edit the
+    // hash, the store follows, every subscriber re-renders. The screen param rides
+    // the same hash so a `#screen=` landing survives the change too.
+    window.addEventListener("hashchange", () => {
+      inventory.set(previewInventory());
+      show(landing(inventory.value), false);
+    });
+  }
 }
 
 async function boot(): Promise<void> {
@@ -311,6 +339,15 @@ async function boot(): Promise<void> {
   });
 
   void onStackState((next) => stack.set(next));
+
+  // The deploy preview feeds the fixture into the store once and stops: no pollers,
+  // no backend — the panel renders exactly what the fixture says, and the hash is
+  // the switch. The update preview's own check stays skipped in the same spirit.
+  if (previewDeploy) {
+    inventory.set(previewInventory());
+    mount(app);
+    return;
+  }
 
   // detect() decides which screen opens, so the first paint waits for it - but never
   // for long: a host that cannot answer must not leave a blank window behind.

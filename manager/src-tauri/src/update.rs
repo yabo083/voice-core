@@ -424,26 +424,85 @@ fn restart_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     layout::update_dir(data_dir).join("restart.json")
 }
 
-/// Consume the marker and restart the stack if it names this install as
-/// update-restarted. Runs once at boot, before the first paint, so the panel the
-/// installer brings back is indistinguishable from the panel a second manual
-/// launch brings back: service up, model warmable, no 部署 screen in between.
-pub fn resume_after_update(app: tauri::AppHandle) {
-    let data_dir = app.state::<Host>().data_dir.clone();
-    let marker = restart_marker_path(&data_dir);
-    let Ok(raw) = std::fs::read_to_string(&marker) else {
+/// The hand-off file, `<data dir>\update\resume.json`. Written by the installer-
+/// born panel when it relaunches itself outside the installer's process tree;
+/// read by [`wait_for_previous_panel`] in `main()` (before the single-instance
+/// plugin claims the mutex) and consumed by [`resume_after_update`] on that
+/// second boot.
+fn resume_marker_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    layout::update_dir(data_dir).join("resume.json")
+}
+
+/// Block until `pid` exits, polling every 200 ms up to `limit`.
+fn wait_for_process(pid: u32, limit: std::time::Duration) {
+    let deadline = std::time::Instant::now() + limit;
+    while process_alive(pid) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+/// Before the builder: a panel relaunched through [`resume_marker_path`]'s
+/// hand-off waits for the process it is replacing to die, so the single-instance
+/// mutex is free when this instance claims it. Everything else starts instantly.
+pub fn wait_for_previous_panel(data_dir: &std::path::Path) {
+    let Ok(raw) = std::fs::read_to_string(resume_marker_path(data_dir)) else {
         return;
     };
-    // The marker is ours and one launch consumes it, however this panel ends:
-    // the restart it asks for happens exactly once, and a crash loop that
-    // re-reads a stale marker every boot is exactly what deleting it prevents.
-    let _ = std::fs::remove_file(&marker);
-    // From this instant the panel knows it was born of an install, so a failing
-    // interpreter probe is a race suspect, not a verdict (see `updated_at`).
-    *app.state::<Host>()
-        .updated_at
-        .lock()
-        .unwrap_or_else(|err| err.into_inner()) = Some(std::time::Instant::now());
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return;
+    };
+    if let Some(pid) = value.get("exitPid").and_then(serde_json::Value::as_u64) {
+        wait_for_process(pid as u32, std::time::Duration::from_secs(15));
+    }
+}
+
+/// Consume the marker and decide this boot's relationship to the installer.
+///
+/// Measured on the reference machine (the 1.9.9 update): a panel born of the
+/// installer's [Run] chain spawns broken children for its whole lifetime — the
+/// interpreter probe's child either failed instantly with `uv trampoline:
+/// entity not found` or, with a bare interpreter in its place, hung for the
+/// probe's entire 90-second deadline without ever reaching `sitecustomize`.
+/// The same executable launched normally probes fine in seconds. The poison
+/// follows the launch chain — environment, handles, console, job, nothing in
+/// the dumped process state explains it — so the answer is not to diagnose it
+/// per-child but to refuse to live in it.
+///
+/// Two marker generations, one decision each:
+///
+/// * `restart.json` — written by [`update_install`]. This boot came up through
+///   the installer's [Run]: it relaunches itself through Explorer and exits
+///   before its first paint.
+/// * `resume.json` — written by that relaunching panel. This boot came up
+///   through Explorer: clean, it stays and resumes the stack the flags ask for.
+pub fn resume_after_update(app: tauri::AppHandle) {
+    let host = app.state::<Host>();
+    let data_dir = host.data_dir.clone();
+    let installer_marker = restart_marker_path(&data_dir);
+    let handoff = resume_marker_path(&data_dir);
+
+    // The hand-off takes precedence: it was written by a panel that already saw
+    // restart.json, and this clean Explorer child is the boot it was meant for.
+    let (marker, from_installer) = if handoff.is_file() {
+        (&handoff, false)
+    } else {
+        (&installer_marker, true)
+    };
+    let Ok(raw) = std::fs::read_to_string(marker) else {
+        return;
+    };
+    // One launch consumes one marker, however this panel ends: the restart it
+    // asks for happens exactly once, and a crash loop that re-reads a stale
+    // marker every boot is exactly what deleting it prevents.
+    let _ = std::fs::remove_file(marker);
+    // An installer-born panel is probe-suspect for a while (see `updated_at`);
+    // a clean Explorer child never needs the grace window.
+    if from_installer {
+        *host
+            .updated_at
+            .lock()
+            .unwrap_or_else(|err| err.into_inner()) = Some(std::time::Instant::now());
+    }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return;
     };
@@ -455,13 +514,66 @@ pub fn resume_after_update(app: tauri::AppHandle) {
         .get("wasRunning")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
-    if !wants || !was_running {
+
+    if !from_installer {
+        // A clean Explorer child: the poison is gone, so this panel simply lives.
+        host.log("update: resumed as the clean relaunch; the installer environment is gone");
+        resume_in_process(&app, wants && was_running);
+        return;
+    }
+
+    // Carry the user's intent across the relaunch. The successor reads the pid
+    // before its single-instance claim and the flags at setup.
+    let _ = std::fs::write(
+        &handoff,
+        serde_json::json!({
+            "restartStack": wants,
+            "wasRunning": was_running,
+            "exitPid": std::process::id(),
+        })
+        .to_string(),
+    );
+
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(err) => {
+            host.log(&format!(
+                "update: cannot resolve own executable for the clean relaunch: {err}; staying up in the installer environment"
+            ));
+            let _ = std::fs::remove_file(&handoff);
+            resume_in_process(&app, wants && was_running);
+            return;
+        }
+    };
+    // Explorer performs the launch as its own child: a fresh environment, fresh
+    // handle table, no installer anywhere in the ancestry. `explorer <path>` uses
+    // the shell's file association, which for an .exe is ShellExecute — exactly
+    // what the Start-menu shortcut does, and measured clean every time.
+    match std::process::Command::new("explorer.exe").arg(&exe).spawn() {
+        Ok(_) => {
+            host.log("update: relaunching the panel outside the installer environment; this instance is exiting");
+            std::process::exit(0);
+        }
+        Err(err) => {
+            host.log(&format!(
+                "update: clean relaunch failed ({err}); staying up in the installer environment"
+            ));
+            let _ = std::fs::remove_file(&handoff);
+            resume_in_process(&app, wants && was_running);
+        }
+    }
+}
+
+/// The in-process fallback: resume the stack here if no clean relaunch happens.
+fn resume_in_process(app: &tauri::AppHandle, should_resume: bool) {
+    if !should_resume {
         app.state::<Host>()
             .log("update: restart marker present but the stack was not running before the update; leaving the stack down");
         return;
     }
-    let host = app.state::<Host>();
-    host.log("update: relaunching the stack this installer's [Run] interrupted");
+    let app = app.clone();
+    app.state::<Host>()
+        .log("update: relaunching the stack this installer's [Run] interrupted");
     tauri::async_runtime::spawn(async move {
         if let Err(err) = crate::supervise::start(&app).await {
             app.state::<Host>()

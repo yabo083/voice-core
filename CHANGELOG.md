@@ -8,6 +8,24 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.10] - 2026-09-17
+
+### Fixed
+
+- **A panel the installer's [Run] brought up spawned broken children for its
+  whole lifetime** (measured across 1.9.8 and 1.9.9 updates): the interpreter
+  probe's child failed instantly with `uv trampoline: entity not found` — and
+  with a bare interpreter substituted, hung for the probe's entire 90-second
+  deadline without ever running a line of Python. The same executable launched
+  normally probes fine in seconds; the environment, handle table, console,
+  job and injected modules of the failing process were all dumped and ruled
+  out. The poison follows the launch chain itself, so the panel now refuses to
+  live in it: a boot that consumes the update restart marker relaunches itself
+  once through Explorer — whose child is clean, measured — writes the stack's
+  resume intent to `resume.json`, and exits before its first paint. The
+  successor waits for the old pid before claiming the single-instance mutex,
+  then resumes like any second boot.
+
 ## [1.9.9] - 2026-09-17
 
 ### Fixed

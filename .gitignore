@@ -51,6 +51,11 @@ token.txt
 # excluded - with the directory pattern the negation below would never be consulted.
 /docs/*
 !/docs/api.md
+# The plans directory is tracked on purpose: docs/plans/roadmap.md is the long-horizon
+# record of what this product intends to do next (persona roadmap included), and it must
+# survive machine moves like every other fact the repo owns.
+!/docs/plans/
+!/docs/plans/*.md
 
 # Local assets carried over from the v1 checkout: candidate engine weights, the upstream
 # WebUI and its venv, the training corpus, pruned adapters and finished deliverables. Tens of

@@ -523,7 +523,7 @@ pub fn resume_after_update(app: tauri::AppHandle) {
     // relaunch itself and the installer's [Run] skipped itself). The restart
     // marker is consumed alongside the hand-off either way: leaving it would
     // make the next boot believe an installer just ran.
-    let (marker, from_installer) = if handoff.is_file() {
+    let (marker, mut from_installer) = if handoff.is_file() {
         (&handoff, false)
     } else {
         (&installer_marker, true)
@@ -531,6 +531,13 @@ pub fn resume_after_update(app: tauri::AppHandle) {
     let Ok(raw) = std::fs::read_to_string(marker) else {
         return;
     };
+    // A restart marker with no hand-off beside it can also be the bare file the
+    // installer's own [Run] entry writes (`type nul >`): that boot came up
+    // through the installer chain just as surely as an updater-driven one, and
+    // the poison does not care who drove the chain. Treat it as installer-born.
+    if raw.trim().is_empty() {
+        from_installer = true;
+    }
     // One launch consumes one marker, however this panel ends: the restart it
     // asks for happens exactly once, and a crash loop that re-reads a stale
     // marker every boot is exactly what deleting it prevents.
@@ -545,19 +552,26 @@ pub fn resume_after_update(app: tauri::AppHandle) {
             .lock()
             .unwrap_or_else(|err| err.into_inner()) = Some(std::time::Instant::now());
     }
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        return;
-    };
+    // A bare marker (no JSON) carries no flags: this boot has nothing to resume
+    // and nothing to promise-version-check. Its only business is the clean
+    // relaunch below — but there is no hand-off to write intent with, so the
+    // successor learns nothing and the stack stays as the user left it before
+    // the install, which for a manual run is the truth.
+    let bare = serde_json::from_str::<serde_json::Value>(&raw).is_err();
+    let value = serde_json::from_str::<serde_json::Value>(&raw).ok();
     let wants = value
-        .get("restartStack")
+        .as_ref()
+        .and_then(|v| v.get("restartStack"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let was_running = value
-        .get("wasRunning")
+        .as_ref()
+        .and_then(|v| v.get("wasRunning"))
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let target_version = value
-        .get("targetVersion")
+        .as_ref()
+        .and_then(|v| v.get("targetVersion"))
         .and_then(serde_json::Value::as_str)
         .map(str::to_string);
 
@@ -619,7 +633,9 @@ pub fn resume_after_update(app: tauri::AppHandle) {
     }
 
     // Carry the user's intent across the relaunch. The successor reads the pid
-    // before its single-instance claim and the flags at setup.
+    // before its single-instance claim and the flags at setup. A bare marker
+    // has no flags to carry — the successor's own boot is a plain one, and the
+    // hand-off exists only so it waits for this pid before claiming the mutex.
     let _ = std::fs::write(
         &handoff,
         serde_json::json!({
@@ -629,6 +645,7 @@ pub fn resume_after_update(app: tauri::AppHandle) {
         })
         .to_string(),
     );
+    let _ = bare;
 
     let exe = match std::env::current_exe() {
         Ok(exe) => exe,

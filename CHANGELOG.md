@@ -8,6 +8,23 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.12] - 2026-09-17
+
+### Fixed
+
+- **An update no longer opens the panel three times.** The old flow let the
+  installer's [Run] bring a panel up, see the restart marker, relay itself
+  through Explorer and exit — an open-close-open flash. `update_install` now
+  pre-consumes the hand-off (`exitPid: 0`) and its cmd chain waits for the
+  installer to finish (`start /wait`) before handing the launch to Explorer;
+  the [Run] entry checks `resume.json` and skips itself for updater-driven
+  installs. One panel, born clean.
+- **重新检测 answered silently.** The probe behind `detect()` costs about five
+  seconds, and when the answer matches what is already on screen the re-render
+  is pixel-identical — the button read as dead. It now blocks with a spinner,
+  the environment list shows its skeletons for the wait, and the answer
+  replaces the page whether it changed or not.
+
 ## [1.9.11] - 2026-09-17
 
 ### Changed

@@ -174,6 +174,11 @@ export function createDeployScreen(): DeployScreen {
   let ticker = 0;
   let autoScroll = true;
   let finished = false;
+  /** True while a manual 重新检测 is in flight. The probe behind detect() costs
+   *  about five seconds, and when the answer matches what is already on screen
+   *  the re-render is pixel-identical — without a busy state the button reads
+   *  as dead. Blocked styling plus the skeleton list say "working" instead. */
+  let detecting = false;
   let transient = false;
   let step: Step = "prepare";
   let routeTimer = 0;
@@ -745,12 +750,14 @@ export function createDeployScreen(): DeployScreen {
     if (step === "prepare") {
       fill(
         cmdLeft,
-        button({
-          label: t.deploy.reDetect,
-          glyph: "arrow-clockwise",
-          kind: "quiet",
-          onClick: () => void refreshInventory(),
-        }),
+        detecting
+          ? blockedButton({ label: t.deploy.reDetect, glyph: "arrow-clockwise" }, t.deploy.detecting)
+          : button({
+              label: t.deploy.reDetect,
+              glyph: "arrow-clockwise",
+              kind: "quiet",
+              onClick: () => void recheck(),
+            }),
       );
       fill(cmdRight, null);
       return;
@@ -963,6 +970,22 @@ export function createDeployScreen(): DeployScreen {
       // environment, the inventory subscriber below walks the screen to 完成.
       void refreshInventory();
       void refreshVoices();
+    }
+  }
+
+  /** A manual recheck: the button blocks and the environment list shows its
+   *  skeletons for the ~5 s the interpreter probe costs, then the answer —
+   *  identical or not — replaces the page. */
+  async function recheck(): Promise<void> {
+    if (detecting) return;
+    detecting = true;
+    renderControls();
+    renderEnv(null);
+    try {
+      await refreshInventory();
+    } finally {
+      detecting = false;
+      renderControls();
     }
   }
 

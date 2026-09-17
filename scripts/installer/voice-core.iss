@@ -231,7 +231,7 @@ Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; WorkingDir: "
 ; exactly as before; only silent ones change behaviour.
 Filename: "{app}\{#AppExeName}"; WorkingDir: "{app}"; \
   Description: "{cm:LaunchAppDescription}"; \
-  Flags: postinstall nowait; Check: GuiPresent
+  Flags: postinstall nowait; Check: GuiPresent and not UpdaterDrivesRelaunch
 
 [UninstallRun]
 ; Ask the running voice-core runtime service to stop gracefully before deleting binaries.
@@ -257,6 +257,17 @@ const
 function GuiPresent: Boolean;
 begin
   Result := FileExists(ExpandConstant('{app}\{#AppExeName}'));
+end;
+
+{ True when the panel's updater pre-consumed the relaunch hand-off: it wrote
+  data\update\resume.json before launching this Setup, and its cmd chain starts
+  the panel through Explorer after Setup exits. The [Run] entry must then stay
+  out of the way — launching here would put a second (installer-chain) window
+  on screen that the hand-off design exists to avoid. A manual install has no
+  such file and gets the [Run] checkbox as always. }
+function UpdaterDrivesRelaunch: Boolean;
+begin
+  Result := FileExists(ExpandConstant('{app}\data\update\resume.json'));
 end;
 
 function WebView2Present: Boolean;

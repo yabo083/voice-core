@@ -441,7 +441,10 @@ fn wait_for_process(pid: u32, limit: std::time::Duration) {
 
 /// Before the builder: a panel relaunched through [`resume_marker_path`]'s
 /// hand-off waits for the process it is replacing to die, so the single-instance
-/// mutex is free when this instance claims it. Everything else starts instantly.
+/// mutex is free when this instance claims it. An `exitPid` of 0 means the
+/// hand-off was pre-consumed by `update_install` — there is no predecessor to
+/// wait for (pid 0 is the System process and never exits). Everything else
+/// starts instantly.
 pub fn wait_for_previous_panel(data_dir: &std::path::Path) {
     let Ok(raw) = std::fs::read_to_string(resume_marker_path(data_dir)) else {
         return;
@@ -449,8 +452,10 @@ pub fn wait_for_previous_panel(data_dir: &std::path::Path) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return;
     };
-    if let Some(pid) = value.get("exitPid").and_then(serde_json::Value::as_u64) {
-        wait_for_process(pid as u32, std::time::Duration::from_secs(15));
+    let pid = value.get("exitPid").and_then(serde_json::Value::as_u64);
+    match pid {
+        Some(0) | None => return,
+        Some(pid) => wait_for_process(pid as u32, std::time::Duration::from_secs(15)),
     }
 }
 
@@ -479,8 +484,12 @@ pub fn resume_after_update(app: tauri::AppHandle) {
     let installer_marker = restart_marker_path(&data_dir);
     let handoff = resume_marker_path(&data_dir);
 
-    // The hand-off takes precedence: it was written by a panel that already saw
-    // restart.json, and this clean Explorer child is the boot it was meant for.
+    // The hand-off takes precedence: it was written either by a relaunching
+    // panel (exitPid = its pid, the successor must wait) or pre-consumed by
+    // `update_install` (exitPid = 0, the updater's cmd chain drives the
+    // relaunch itself and the installer's [Run] skipped itself). The restart
+    // marker is consumed alongside the hand-off either way: leaving it would
+    // make the next boot believe an installer just ran.
     let (marker, from_installer) = if handoff.is_file() {
         (&handoff, false)
     } else {
@@ -493,6 +502,8 @@ pub fn resume_after_update(app: tauri::AppHandle) {
     // asks for happens exactly once, and a crash loop that re-reads a stale
     // marker every boot is exactly what deleting it prevents.
     let _ = std::fs::remove_file(marker);
+    let _ = std::fs::remove_file(&installer_marker);
+    let _ = std::fs::remove_file(&handoff);
     // An installer-born panel is probe-suspect for a while (see `updated_at`);
     // a clean Explorer child never needs the grace window.
     if from_installer {
@@ -1111,6 +1122,20 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         })
         .to_string(),
     );
+    // Pre-consumed hand-off: the installer's [Run] entry checks this file and
+    // skips itself (the updater's own chain drives the relaunch), so the panel
+    // an update brings up boots exactly once — through the clean Explorer
+    // relay — instead of the open-close-open flash the old flow showed.
+    let _ = std::fs::write(
+        resume_marker_path(&host.data_dir),
+        serde_json::json!({
+            "restartStack": true,
+            "wasRunning": was_running,
+            "exitPid": 0,
+            "targetVersion": env!("CARGO_PKG_VERSION"),
+        })
+        .to_string(),
+    );
 
     // Drop the interpreter probe. The installer is about to replace the venv's
     // files, and a detect() that runs inside that window (the panel's own
@@ -1119,6 +1144,12 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
     // process-lifetime cache as 需重建 for an environment that is fine.
     *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = None;
 
+    // The chain owns the whole transition: kill this panel, run the installer to
+    // completion (`start /wait`), then hand the launch to Explorer — whose child
+    // is the clean-relaunched panel, the one and only window this update shows.
+    // The installer's [Run] skips itself (it sees resume.json), so nothing else
+    // opens a window in between.
+    let panel_exe = host.root.join("VoiceCore.exe");
     let mut command = std::process::Command::new("cmd");
     command
         .arg("/C")
@@ -1135,11 +1166,17 @@ pub async fn update_install(app: tauri::AppHandle) -> Result<(), String> {
         .arg("&")
         .arg("start")
         .arg("")
+        .arg("/wait")
         .arg(&staged)
         .arg("/VERYSILENT")
         .arg("/SUPPRESSMSGBOXES")
         .arg("/NORESTART")
-        .arg("/RESTARTAPPLICATIONS");
+        .arg("/RESTARTAPPLICATIONS")
+        .arg("&")
+        .arg("start")
+        .arg("")
+        .arg("explorer.exe")
+        .arg(&panel_exe);
     hidden(&mut command);
     match command.spawn() {
         // Not forgotten this time — the PID is the liveness probe below.

@@ -4,17 +4,17 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0] - 2026-09-17
+## [0.1.1] - 2026-09-17
 
 ### Note — version scheme reset
 
 The 1.x line is retired: history stays in the archived releases and in the changelog
 below, but the numbering starts over at 0.1.0. While the project is pre-1.0 the minor
 number is the release counter and the patch is for fixes; **bumps are conservative by
-policy** — a release has to earn its number. `0.1.0` is functionally 1.9.15 plus the
-download stop button, and the updater treats it as older than any 1.9.x, which is the
-point: installed 1.x panels will not see 0.1.0 as an update, and the first 0.1.x
-release after this one is the migration point.
+policy** — a release has to earn its number. `0.1.0` was functionally 1.9.15 plus the
+download stop button, and the updater treated it as older than any 1.9.x, which is the
+point: installed 1.x panels will not see the 0.1.x line as an update, and this release
+is the migration point.
 
 ### Added
 
@@ -23,6 +23,16 @@ release after this one is the migration point.
   body chunks (and before each 30 s idle window), keeps the partial on disk as a
   resume point, and reports a `cancelled` terminal state that is not an error —
   the retry continues from the bytes already on disk.
+
+### Fixed
+
+- **A manual install no longer opens on 部署 with a healthy environment.** The
+  installer's [Run] entry now writes a bare restart marker before launching the
+  panel, so the panel knows it was born in the installer's poisoned environment
+  and gives itself the probe grace window plus the clean Explorer relaunch —
+  the same treatment an updater-driven install always had. The 0.1.0 install
+  measured the stale-待部署 state reaching the screen within one second of boot
+  precisely because no marker file existed to vouch for the chain.
 
 ## [1.9.15] - 2026-09-17
 

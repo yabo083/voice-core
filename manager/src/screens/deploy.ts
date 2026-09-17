@@ -738,11 +738,25 @@ export function createDeployScreen(): DeployScreen {
     }
 
     if (step === "done") {
-      // The final page has no actions: its only exit is the handoff to 状态, and a
-      // button next to that would be a second answer to "what now".
-      commandBar.hidden = true;
+      // The normal visit's exit is the automatic handoff to 状态; a permanent
+      // button beside it would be a second answer to "what now". A transient
+      // visit (entered from 状态 after provisioning) fires no handoff by
+      // design - the user came to look, not to be routed - so its one exit is
+      // an explicit button, not a timer that never runs.
+      const exitable = transient && envComplete(inventory.value);
+      commandBar.hidden = !exitable;
       fill(cmdLeft, null);
-      fill(cmdRight, null);
+      fill(
+        cmdRight,
+        exitable
+          ? button({
+              label: t.deploy.backToStatus,
+              kind: "primary",
+              glyph: "pulse",
+              onClick: (ev: MouseEvent) => navigate("status", ev),
+            })
+          : null,
+      );
       return;
     }
 
@@ -1030,6 +1044,7 @@ export function createDeployScreen(): DeployScreen {
 
   const stepButtons = {} as Record<Step, HTMLButtonElement>;
   const stepDots = {} as Record<Step, HTMLElement>;
+  const stepItems = {} as Record<Step, HTMLLIElement>;
   const stepList = el(
     "ol",
     { class: "dpager__steps", "aria-label": t.deploy.title },
@@ -1048,19 +1063,30 @@ export function createDeployScreen(): DeployScreen {
       );
       stepButtons[name] = btn;
       stepDots[name] = dot;
-      return el("li", {}, btn);
+      stepItems[name] = el("li", {}, btn);
+      return stepItems[name];
     }),
   );
 
   function renderSteps(): void {
-    const current = STEPS.indexOf(step);
-    for (const [index, name] of STEPS.entries()) {
+    // 需下载 is a conditional step, not a fixed stop: with nothing missing the
+    // page does not exist, and a chip whose only behaviour is to silently land
+    // on 完成 is a contradiction in the navigation itself. The stepper shows
+    // the stages that exist and numbers those; the page stays in the DOM and
+    // comes back the moment a detect says something is missing again.
+    const skipDownload = envComplete(inventory.value);
+    const visible: Step[] = skipDownload ? STEPS.filter((name) => name !== "download") : [...STEPS];
+    const current = visible.indexOf(step);
+    for (const name of STEPS) {
+      const pos = visible.indexOf(name);
+      stepItems[name].hidden = pos === -1;
+      if (pos === -1) continue;
       const btn = stepButtons[name];
-      btn.classList.toggle("is-active", index === current);
-      btn.classList.toggle("is-passed", index < current);
-      if (index === current) btn.setAttribute("aria-current", "step");
+      btn.classList.toggle("is-active", pos === current);
+      btn.classList.toggle("is-passed", pos < current);
+      if (pos === current) btn.setAttribute("aria-current", "step");
       else btn.removeAttribute("aria-current");
-      fill(stepDots[name], index < current ? icon("check") : String(index + 1));
+      fill(stepDots[name], pos < current ? icon("check") : String(pos + 1));
     }
   }
 
@@ -1153,6 +1179,9 @@ export function createDeployScreen(): DeployScreen {
     renderInstall(inv);
     renderDone(inv);
     renderControls();
+    // The download chip exists only while the answer says something is missing;
+    // the stepper must hear the same answer the pages did.
+    renderSteps();
 
     // The environment just completed while this screen sits open - the normal shape
     // of a run's last detect(). Walk to the final page; setStep starts the handoff.

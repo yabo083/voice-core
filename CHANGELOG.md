@@ -8,6 +8,22 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.9] - 2026-09-17
+
+### Fixed
+
+- **The first detect after an update still raced to a verdict** (measured on the
+  reference machine's 1.9.8 install): the installer's [Run] brought the panel
+  back while the machine was still settling, the first three interpreter probes
+  failed with `uv trampoline: entity not found` over twenty seconds — against a
+  venv the installer never touched — and that first failing answer routed the
+  panel to 部署 with a 需重建 badge. Caching had been fixed in 1.9.6; the
+  *routing* was still fed the raced sample. A boot that consumes the restart
+  marker now marks the moment, and probes failing within a sixty-second grace
+  window are retried (three samples, five seconds apart) before any verdict
+  reaches the screen. An environment that is genuinely broken still fails three
+  times and reports honestly; a healthy install stops lying.
+
 ## [1.9.8] - 2026-09-17
 
 ### Fixed

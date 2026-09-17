@@ -33,6 +33,13 @@ pub struct Host {
     /// for the process lifetime and dropped when a provision run ends — the only
     /// event that can put a different interpreter on disk.
     pub probe: Mutex<Option<Probe>>,
+    /// When this boot consumed an update's restart marker, if it did. A probe that
+    /// fails within [`update::PROBE_GRACE`] of this instant raced the installer's
+    /// tail (or an antivirus pass over freshly written files, which the 1.9.8
+    /// install on the reference machine measured: the venv was untouched, three
+    /// probes still failed with `entity not found`, and the panel opened on
+    /// 需重建) — the caller retries instead of reporting a verdict.
+    pub updated_at: Mutex<Option<std::time::Instant>>,
     /// The self-update download: one slot, polled by the settings screen through
     /// `update_status`. A download belongs to this process, not to the page that
     /// started it, so it survives closing the screen it was started from.
@@ -61,6 +68,7 @@ impl Host {
             provision: Mutex::new(StreamRun::default()),
             training: Mutex::new(StreamRun::default()),
             probe: Mutex::new(None),
+            updated_at: Mutex::new(None),
             update: update::UpdateDownload::default(),
         }
     }

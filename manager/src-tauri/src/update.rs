@@ -402,6 +402,16 @@ fn last_check_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     layout::update_dir(data_dir).join("last-check.txt")
 }
 
+/// How long after an update-relaunched boot a failed interpreter probe is
+/// treated as a suspect sample rather than a verdict. The installer's [Run]
+/// brings the panel back while the machine is still settling: the antivirus
+/// scans every file Setup just wrote, and the measured 1.9.8 install failed
+/// three probes with `entity not found` over twenty seconds against a venv the
+/// installer never touched. Sixty seconds of re-probing costs a few torch
+/// imports; reporting 需重建 for a healthy install costs the update's whole
+/// contract.
+pub const PROBE_GRACE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// The restart marker, `<data dir>\update\restart.json`: proof that the next
 /// panel to come up is the one an installer's [Run] relaunch brought back, not a
 /// fresh boot by a user who never asked the stack to run.
@@ -428,6 +438,12 @@ pub fn resume_after_update(app: tauri::AppHandle) {
     // the restart it asks for happens exactly once, and a crash loop that
     // re-reads a stale marker every boot is exactly what deleting it prevents.
     let _ = std::fs::remove_file(&marker);
+    // From this instant the panel knows it was born of an install, so a failing
+    // interpreter probe is a race suspect, not a verdict (see `updated_at`).
+    *app.state::<Host>()
+        .updated_at
+        .lock()
+        .unwrap_or_else(|err| err.into_inner()) = Some(std::time::Instant::now());
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&raw) else {
         return;
     };

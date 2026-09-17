@@ -17,6 +17,7 @@ use crate::config_edit;
 use crate::contract::{Inventory, ModelState};
 use crate::host::{hidden, Host};
 use crate::layout;
+use crate::update;
 
 const GIB: f64 = 1024.0 * 1024.0 * 1024.0;
 
@@ -119,7 +120,7 @@ fn inventory(app: &AppHandle) -> Inventory {
     let engine_python = resolve_python(&runtime_file, &host.root, &engine_dir);
     let probe = engine_python
         .as_deref()
-        .map(|python| cached_probe(&host, python));
+        .map(|python| probe_with_grace(&host, python));
 
     let hf_cache = resolve_hf_cache(&host, &runtime_file);
     let models = model_states(hf_cache.as_deref());
@@ -317,6 +318,49 @@ fn cached_probe(host: &Host, python: &Path) -> Probe {
     if probe.ok {
         *host.probe.lock().unwrap_or_else(|err| err.into_inner()) = Some(probe.clone());
     }
+    probe
+}
+
+/// Is a failing probe right now untrustworthy? A boot that consumed an update's
+/// restart marker comes up while the machine is still settling, and the 1.9.8
+/// install measured the failure mode precisely: three probes over twenty
+/// seconds, `entity not found` from the uv trampoline, against a venv the
+/// installer never touched. Within [`update::PROBE_GRACE`] of that boot a
+/// failure is retried before it may reach the screen.
+fn within_update_grace(host: &Host) -> bool {
+    host.updated_at
+        .lock()
+        .unwrap_or_else(|err| err.into_inner())
+        .is_some_and(|at| at.elapsed() < update::PROBE_GRACE)
+}
+
+/// One probe answer, honest about whether the sample can be believed. The panel
+/// cannot tell a raced install from a broken venv, so the grace window is spent
+/// here, behind the command, where the retry is a few log lines instead of a
+/// 部署 screen the user never asked for.
+fn probe_with_grace(host: &Host, python: &Path) -> Probe {
+    let probe = cached_probe(host, python);
+    if probe.ok || !within_update_grace(host) {
+        return probe;
+    }
+    // Bounded: three samples across the window, not a spin. Five seconds apart
+    // spans the twenty-second failure stretch the 1.9.8 install measured with
+    // room to spare; a genuinely broken environment answers "no" three times
+    // and the verdict stands, having cost fifteen seconds of certainty.
+    for attempt in 1..=3 {
+        host.log(&format!(
+            "probe failed within the update grace window; retrying in 5 s (attempt {attempt}/3)"
+        ));
+        std::thread::sleep(Duration::from_secs(5));
+        let retried = cached_probe(host, python);
+        if retried.ok {
+            host.log("interpreter answered after the install window settled");
+            return retried;
+        }
+    }
+    host.log(
+        "probe still failing after the update grace window; reporting the failure as the answer",
+    );
     probe
 }
 

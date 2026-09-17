@@ -24,14 +24,23 @@
 
 ---
 
-## 未完成（三条线）
+## 未完成
 
-### L1 · MeanFlow 蒸馏：自产 4 步推理模型
+### L1 · 多引擎架构 · 第一站：MeanFlow 蒸馏（自产 4 步推理模型）
+
+> L1 的真正目标不是"换一个蒸馏模型"，而是**接第二、第三个 TTS 引擎**——整个 pipeline 从
+> 单引擎假设走向多引擎并存（引擎注册表、模型清单按引擎分组、LoRA 跨引擎兼容层、部署页按
+> engine 粒度报状态、API 按 engine 路由）。MeanFlow 是这条线的**第一站**：它碰巧仍是
+> Irodori 架构（同 worker、同 LoRA 体系），却引入了第二种参数化（RF ↔ MeanFlow）和第二种
+> checkpoint 形态——正好拿它把"一个 worker 目录、一套写死的模型清单、一种采样器假设"拆开，
+> 把多引擎的骨架搭出来。以后接真正的异构引擎（GPT-SoVITS、VITS、F5-TTS…），照这个骨架填。
+
+#### 第一站本身：蒸馏 Small-MF
 
 上游 2026-09-12 的 `89f9d8f` 给了把 RF 模型蒸成 4 步 MeanFlow 模型的完整配方。自己跑一次
 蒸馏，得到 Small-MF 后采样从 32 步降到 4 步——`sample_rf`（≈461 ms，回归式
 `179 ms + 96 ms × steps`）理论缩到几十 ms，单句 636 ms 的大头直接砍掉。这是**推理侧**收益，
-与 LoRA 音色包训练无关；是"接新后端"的正题。
+与 LoRA 音色包训练无关。
 
 **为什么合并是前置**：上游 `89f9d8f` 与 fork `voice-core` 分支在 inference_runtime.py 采样
 分派点有 1 处冲突（恰好砸在 Patch 1 的 `encoded_conditions` 传参上）；model.py 自动合并干净，
@@ -55,9 +64,10 @@ teacher 可与学生同卡（`meanflow_teacher_device_offset: 0`）。
    包住的 forward 变了，**必须重验**：15 clips bitwise identical + bench 数字不回退。
 2. **跑蒸馏**：按上游配方，manifest 用现有训练语料；验收 = 学生模型 4 步合成的听感对比
    （mel-dB RMSE + 人耳盲听，对齐 numSteps 的 36 段做法），不能只看 loss。
-3. **实装**：Small-MF 进模型清单（worker 按 checkpoint 元数据自动选采样器，理论零改动）；
-   **LoRA 音色包大概率要在 MF 基座上重训**（MeanFlow 的 DiT 权重变了，旧 LoRA 失效——
-   排期时算进去）。
+3. **实装（第一站的多引擎切片）**：Small-MF 以**独立 engine 条目**进清单——不是"给
+   Irodori 换个模型文件"，而是第一次让清单、部署状态、按需下载都以 engine 为粒度存在。
+   LoRA 音色包大概率要在 MF 基座上重训（MeanFlow 的 DiT 权重变了，旧 LoRA 失效——排期时
+   算进去；同时这一步会暴露"LoRA 绑定基座"这个契约在多引擎下的正确形状）。
 4. **分发**：0.1.x 的模型清单加 Small-MF（可选下载，不是替换——RF 版仍是兼容底座），
    bootstrap 的 models 表加一行，setup 引导装机自动可选。
 
@@ -66,6 +76,11 @@ teacher 可与学生同卡（`meanflow_teacher_device_offset: 0`）。
 - 合并后：15 clips bitwise identical（两个 patch 在上游新树上仍然逐位一致）
 - 蒸馏后：4 步 vs 32 步，mel-dB RMSE + 人耳盲听；单句总延迟目标 **<300 ms**（从 636 ms）
 - 任何一步不达标就停在原地：RF 636 ms 是已验证的底线，MeanFlow 是增量不是替代
+
+**第一站之后的骨架清单**（接真正的异构引擎时照单施工，现在不展开）：引擎注册表与按
+engine 路由的 API 面；模型清单按引擎分组的 bootstrap；部署页/健康检查的 engine 粒度状态；
+LoRA 跨引擎兼容层（或 per-engine 适配器声明）；`ProvisionOpts`/`needs_gib`/磁盘 fixture 的
+按引擎化。
 
 ### L2 · Persona 角色卡
 

@@ -8,6 +8,38 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.11] - 2026-09-17
+
+### Changed
+
+- **The deploy screen is a three-phase slide instead of one long page.**
+  准备 (what setup left on the machine, what is missing) → 需下载 (what the
+  install will bring, with 立即安装 and 仅检测 where the buttons belong) →
+  完成. A finished environment schedules its own handoff to 状态 after 1.2 s
+  and the deploy rail item retires until the environment breaks again. The
+  provision event flow — seven stage rows, cancel, log pane — moved whole.
+
+### Fixed
+
+- The 可更新 badge retired on the first visit to 设置, before any update had
+  been installed. It now retires when the install is confirmed — the moment
+  the running panel is by definition outdated and the one [Run] brings back
+  is the newer version.
+- A release without a published SHA256 is now refused, not silently accepted.
+  A hash we do not have is a hash we cannot check.
+- Downloads resume: a failed or interrupted transfer keeps a `.part` file with
+  a provenance sidecar (asset name, size, digest) and the next attempt sends
+  `Range` and re-hashes the prefix, so a resumed transfer passes the same
+  integrity gate as a fresh one.
+- An install that died mid-run (power loss, a taskkill racing the swap) no
+  longer vanishes: the restart marker records the target version, and a boot
+  short of it restores the staged package as a visible, retryable row.
+- Releases can now be signed: `scripts/sign` is a minisign keygen/signing
+  helper, package.ps1 signs when a release key is present, and the panel
+  verifies `<asset>.sig` — fetched from GitHub, never from a mirror — against
+  the embedded public key before staging. Trust moves from "GitHub said so"
+  to "only the release key could have".
+
 ## [1.9.10] - 2026-09-17
 
 ### Fixed

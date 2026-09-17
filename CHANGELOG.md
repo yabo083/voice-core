@@ -8,6 +8,23 @@ The HTTP surface carries its own version, `apiVersion`, which is bumped only on 
 change to the public contract and is independent of the release version below
 (`src/service.rs:26-27`).
 
+## [1.9.15] - 2026-09-17
+
+### Changed
+
+- **The deploy stepper honours the conditional download page.** 需下载 is removed
+  from the steps (and the rest renumber) while the environment is complete, instead
+  of a chip whose only behaviour was to land silently on 完成; a detect that finds
+  something missing brings the chip back.
+- **The transient 完成 page gets its exit back.** A visit entered from 状态 after
+  provisioning fires no automatic handoff by design, which left the final page with
+  no exit but a small back arrow; it now carries an explicit 返回状态 button. The
+  non-transient visit keeps the automatic handoff and no button.
+- **A browser preview channel for the deploy screen** (`?vcPreview=deploy`,
+  `#inv=ready|missing`, `screen=` picks the landing): the deploy screen renders
+  from fixtures with no backend, no pollers and no GitHub calls — UI iteration no
+  longer costs a release. The update panel's `?vcPreview=update` got a sibling.
+
 ## [1.9.14] - 2026-09-17
 
 ### Changed

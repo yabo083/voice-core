@@ -121,6 +121,7 @@ fn main() {
             update::update_last_check,
             update::update_status,
             update::update_download,
+            update::update_cancel,
             update::update_install,
             update::open_url,
         ])

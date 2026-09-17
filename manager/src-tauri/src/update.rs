@@ -125,6 +125,10 @@ pub struct DownloadProgress {
     pub done: bool,
     /// Terminal failure; `error` carries the sentence.
     pub failed: bool,
+    /// Terminal cancel, requested by the user. The partial stays on disk as a
+    /// resume point, so this is not `failed`: the retry button continues from
+    /// the bytes already on disk instead of starting over.
+    pub cancelled: bool,
     pub error: String,
 }
 
@@ -146,6 +150,11 @@ pub struct UpdateState {
 #[derive(Default)]
 pub struct UpdateDownload {
     inner: Mutex<UpdateState>,
+    /// Set by [`update_cancel`] while a transfer runs; the read loop in
+    /// [`try_candidate`] checks it between chunks and bails. A separate flag
+    /// rather than a `progress.active = false` write because the run loop owns
+    /// `progress` — a cancel that only cleared fields would race the writer.
+    cancelled: std::sync::atomic::AtomicBool,
 }
 
 impl UpdateDownload {
@@ -159,6 +168,24 @@ impl UpdateDownload {
             .lock()
             .unwrap_or_else(|err| err.into_inner())
             .clone()
+    }
+
+    /// Raise the cancel flag. True when a run was in flight — the caller's cue
+    /// to say so; false when nothing was running.
+    fn cancel(&self) -> bool {
+        self.cancelled
+            .swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Is the flag raised? The transfer loop polls this between body chunks.
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Clear the flag before a fresh transfer starts.
+    fn reset_cancel(&self) {
+        self.cancelled
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -748,11 +775,24 @@ pub async fn update_download(app: tauri::AppHandle, asset: AssetInfo) -> Result<
     Ok(())
 }
 
+/// Stop the running download. The partial stays on disk as a resume point, so
+/// the next 下载 continues from the bytes already there instead of starting
+/// over. Returns at once — the transfer loop notices the flag between chunks
+/// (at most one idle-timeout window later) and reports the terminal state
+/// itself; this command does not own the slot.
+#[tauri::command]
+pub async fn update_cancel(app: tauri::AppHandle) -> Result<bool, String> {
+    let host = app.state::<Host>();
+    let active = host.update.snapshot().progress.active;
+    Ok(host.update.cancel() && active)
+}
+
 /// The transfer: candidates in order, the first one that yields a verified file
 /// wins. Every failure recorded and the next tried; the last error is what the
 /// panel shows when the list runs out.
 async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetInfo) {
     let host = app.state::<Host>();
+    host.update.reset_cancel();
     host.update.set(|state| {
         state.progress = DownloadProgress {
             active: true,
@@ -809,10 +849,29 @@ async fn run_download(app: tauri::AppHandle, staged_path: PathBuf, asset: AssetI
             Err(err) => {
                 // A resume-capable failure keeps the partial for the next
                 // candidate to continue from; only the final failure wipes it,
-                // because the panel's retry button comes back here.
+                // because the panel's retry button comes back here. A user
+                // cancel is resume-shaped by the same logic: the bytes on disk
+                // are a prefix of the asset, and a retry continues from them.
                 last_error = err;
+                if host.update.is_cancelled() {
+                    break;
+                }
             }
         }
+    }
+    if host.update.is_cancelled() {
+        // The part file stays — it is exactly the resume point a later 下载
+        // continues from. `cancelled` is a third terminal state beside done and
+        // failed: the panel shows 重试/继续 without ever calling it an error.
+        let _ = std::fs::remove_file(part_path(&staged_path).with_extension("exe.part.meta"));
+        host.update.set(|state| {
+            state.progress.active = false;
+            state.progress.failed = false;
+            state.progress.error = "已取消下载，断点已保留".to_string();
+            state.progress.cancelled = true;
+        });
+        host.log("update: download cancelled by user; partial kept");
+        return;
     }
     let _ = std::fs::remove_file(part_path(&staged_path));
     finish_failed(&host, last_error);
@@ -945,6 +1004,13 @@ async fn try_candidate(
         let mut last_tick = now_ms();
         let mut stream = response;
         loop {
+            // A user cancel outranks everything the loop is doing: the check
+            // sits before the chunk read, so a click during the 30 s idle
+            // window stops within it rather than after the timeout.
+            if host.update.is_cancelled() {
+                let _ = tokio::io::AsyncWriteExt::flush(&mut file).await;
+                return Err("已取消".to_string());
+            }
             // `chunk` rather than an `AsyncRead` wrapper: reqwest's response is
             // its own stream type, and this is the API that needs no adapter. The
             // timeout is per read, not per download — a slow link is healthy, a

@@ -37,6 +37,7 @@ import {
   updateCheck,
   updateLastCheck,
   updateDownload,
+  updateCancel,
   updateInstall,
   updateStatus,
   openUrl,
@@ -614,8 +615,15 @@ export function createSettingsScreen(): HTMLElement {
     fill(update.body, factRow(t.settings.updateAvailable, value));
     // A download failure is an app-level event: it arrives as a toast once, on
     // the transition into the failed state, and the row just shows 重试. Nothing
-    // error-shaped lives in the panel itself.
-    if (state?.progress.failed === true && state.progress.error !== "" && !failureAnnounced) {
+    // error-shaped lives in the panel itself. A user cancel is deliberately not
+    // here: nobody needs a toast announcing their own click, and the row shows
+    // the resume-able 重试 without claiming anything broke.
+    if (
+      state?.progress.failed === true &&
+      state.progress.cancelled !== true &&
+      state.progress.error !== "" &&
+      !failureAnnounced
+    ) {
       failureAnnounced = true;
       toast(state.progress.error, "fail");
     }
@@ -679,6 +687,37 @@ export function createSettingsScreen(): HTMLElement {
           glyph: "arrow-clockwise",
           small: true,
           onClick: () => void beginDownload(),
+        }),
+      );
+      return container;
+    }
+    if (state?.progress.cancelled === true) {
+      // Not an error and not rendered as one: the retry continues from the
+      // bytes the last run left on disk, which is a different sentence than
+      // "it broke, start over".
+      container.appendChild(
+        button({
+          label: t.settings.updateRetry,
+          glyph: "arrow-clockwise",
+          small: true,
+          onClick: () => void beginDownload(),
+        }),
+      );
+      return container;
+    }
+    if (state?.progress.active === true) {
+      // The one stop the panel owns: kill the transfer, keep the partial.
+      // Resolves at once; the loop's own terminal state arrives by poll.
+      container.appendChild(
+        button({
+          label: t.settings.updateCancel,
+          glyph: "x",
+          small: true,
+          onClick: () => {
+            void updateCancel().catch((err: unknown) =>
+              toast(ipcMessage(err), "fail"),
+            );
+          },
         }),
       );
       return container;
@@ -836,7 +875,7 @@ export function createSettingsScreen(): HTMLElement {
   function previewState(name: string): void {
     window.clearInterval(previewTimer);
     check = previewCheck();
-    state = { progress: { active: false, downloaded: 0, total: 0, done: false, failed: false, error: "" }, staged: null, launched: null };
+    state = { progress: { active: false, downloaded: 0, total: 0, done: false, failed: false, cancelled: false, error: "" }, staged: null, launched: null };
     lastCheckMs = Date.now() - 2 * 3_600_000;
     switch (name) {
       case "unchecked":
@@ -866,17 +905,17 @@ export function createSettingsScreen(): HTMLElement {
         break;
       case "downloading":
         check!.update_available = true;
-        state!.progress = { active: true, downloaded: 19_652_608, total: 47_185_920, done: false, failed: false, error: "" };
+        state!.progress = { active: true, downloaded: 19_652_608, total: 47_185_920, done: false, failed: false, cancelled: false, error: "" };
         startTickerPreview();
         break;
       case "staged":
         check!.update_available = true;
-        state!.progress = { active: false, downloaded: 47_185_920, total: 47_185_920, done: true, failed: false, error: "" };
+        state!.progress = { active: false, downloaded: 47_185_920, total: 47_185_920, done: true, failed: false, cancelled: false, error: "" };
         state!.staged = "C:\\…\\data\\update\\voice-core-1.9.0-setup.exe";
         break;
       case "failed":
         check!.update_available = true;
-        state!.progress = { active: false, downloaded: 8_388_608, total: 47_185_920, done: false, failed: true, error: "ghproxy.net: 连接停滞超过 30 秒" };
+        state!.progress = { active: false, downloaded: 8_388_608, total: 47_185_920, done: false, failed: true, cancelled: false, error: "ghproxy.net: 连接停滞超过 30 秒" };
         // In preview the panel can be entered directly in the failed state, so
         // the transition-based announcement never had a "before". Fire it here;
         // toast() dedupes, and the 12 s hold outlives the screenshot budget.
@@ -887,7 +926,7 @@ export function createSettingsScreen(): HTMLElement {
       // about to be closed by it. Rendered from `launched` being set.
       case "installing":
         check!.update_available = true;
-        state!.progress = { active: false, downloaded: 47_185_920, total: 47_185_920, done: true, failed: false, error: "" };
+        state!.progress = { active: false, downloaded: 47_185_920, total: 47_185_920, done: true, failed: false, cancelled: false, error: "" };
         state!.staged = "C:\\…\\data\\update\\voice-core-1.9.0-setup.exe";
         state!.launched = state!.staged;
         break;

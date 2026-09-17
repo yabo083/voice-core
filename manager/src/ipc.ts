@@ -329,13 +329,15 @@ export interface CheckOutcome {
 }
 
 /** Where the one download is. `active` covers everything between the first byte
- *  and the end; `done`/`failed` are the terminal states the panel renders. */
+ *  and the end; `done`/`failed`/`cancelled` are the terminal states the panel
+ *  renders — a cancel is not a failure, the retry continues from the partial. */
 export interface DownloadProgress {
   active: boolean;
   downloaded: number;
   total: number;
   done: boolean;
   failed: boolean;
+  cancelled: boolean;
   error: string;
 }
 
@@ -362,6 +364,10 @@ export const updateStatus = (): Promise<UpdateState> => invoke("update_status");
  *  backend picks the endpoint: direct first, mirrors as fallback. */
 export const updateDownload = (asset: ReleaseAsset): Promise<void> =>
   invoke("update_download", { asset });
+
+/** Stops the running download; the partial stays as a resume point. Resolves
+ *  at once — the transfer loop reports its own terminal state by polling. */
+export const updateCancel = (): Promise<boolean> => invoke("update_cancel");
 
 /** Hands the staged installer to Setup and gets out of the way. */
 export const updateInstall = (): Promise<void> => invoke("update_install");
